@@ -30,3 +30,7 @@ required-features = ["burn"]
 [[example]]
 name = "cora_uncertainty"
 required-features = ["burn"]
+
+[[example]]
+name = "regression_intervals"
+required-features = ["burn"]
