@@ -1,0 +1,82 @@
+# stableprop
+
+Propagate a distribution through a neural network analytically, to get output
+uncertainty in one forward pass instead of Monte Carlo sampling.
+
+Given a Gaussian (or Cauchy) over a network's inputs, `stableprop` pushes its
+moments through linear, ReLU, leaky-ReLU, and GCN-adjacency layers and returns
+the output mean and (co)variance. It targets the case where Monte Carlo or
+ensembles are the only alternative: **regression / surrogate models with known
+input uncertainty**.
+
+## What it's good for (and not)
+
+On an MLP regressor with known per-point input noise, the analytic error bars
+match a 200-sample Monte Carlo estimate (`Pearson r = 0.81` on the per-point
+std, magnitude ratio `0.96`, 90% interval coverage `0.90`) in **one** forward
+pass instead of 200. There is no softmax baseline for regression, so this is a
+real win over sampling.
+
+It is **not** a classification uncertainty / OOD detector: for that, the model's
+own softmax confidence is a strong free baseline that this does not beat. The
+honest niche is propagating *known input uncertainty* through regressors.
+
+## Usage
+
+```toml
+[dependencies]
+stableprop = { version = "0.1", features = ["burn"] }
+```
+
+```rust
+use stableprop::burn_sdp::{propagate_linear, propagate_relu, Moments};
+
+// mean [n, d_in], input variance [n, d_in]
+let m0 = Moments::new(mean, var);
+let m1 = propagate_relu(&propagate_linear(&m0, w1, b1));
+let m2 = propagate_linear(&m1, w2, b2);
+// m2.mean, m2.var are the analytic output moments
+```
+
+See `examples/`:
+
+- `regression_intervals`: sampling-free error bars vs Monte Carlo (the flagship).
+- `conformal_intervals`: wrap the analytic std in split-conformal for a
+  distribution-free coverage *guarantee* (the raw intervals are a heuristic scale;
+  conformal makes them calibrated).
+- `cora_uncertainty`: honest evidence on classification, where the method is
+  dominated by the softmax baseline.
+
+## What it propagates
+
+- Diagonal Gaussian moments (`Moments`): exact linear, Frey-Hinton ReLU,
+  leaky-ReLU, GCN-adjacency.
+- Full covariance (`MomentsFull`): keeps the cross-feature correlations a layer
+  introduces; more accurate than diagonal (validated against Monte Carlo). The
+  ReLU uses exact diagonal moments with a smooth `Phi(alpha)` gate on the
+  off-diagonal, which avoids the hard-gate decision-boundary brittleness of the
+  local-linearization method it is based on.
+- Weight uncertainty (`propagate_linear_bayes`): epistemic propagation in the
+  style of Probabilistic Backpropagation / Deterministic Variational Inference.
+- Cauchy (`Cauchy`): the heavy-tailed stable distribution (no moments; location
+  and scale are propagated), for heavy-tailed robustness.
+
+Every propagation rule has a Monte-Carlo cross-check in the test suite.
+
+## Background
+
+The method is moment / stable-distribution propagation; see Frey & Hinton (1999)
+for the rectified-Gaussian ReLU moments, Hernandez-Lobato & Adams (2015) and
+Wu et al. (2019) for weight-uncertainty propagation, and Petersen et al.
+(ICLR 2024, "Uncertainty Quantification via Stable Distribution Propagation")
+for the Gaussian/Cauchy stable-distribution framing.
+
+## Roadmap
+
+Convolutional / residual / attention layers, training that penalizes the
+propagated variance, and probabilistic robustness certificates (bounding
+misclassification probability under input noise) are not yet implemented.
+
+## License
+
+MIT OR Apache-2.0.

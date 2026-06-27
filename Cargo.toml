@@ -2,9 +2,16 @@
 name = "stableprop"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.80"
 license = "MIT OR Apache-2.0"
-description = "Propagate mean + variance through neural-network layers for analytic uncertainty (assumed-density filtering)."
-publish = false
+description = "Sampling-free uncertainty propagation through neural networks (analytic Gaussian and Cauchy)."
+repository = "https://github.com/arclabs561/stableprop"
+homepage = "https://github.com/arclabs561/stableprop"
+documentation = "https://docs.rs/stableprop"
+readme = "README.md"
+keywords = ["uncertainty", "moment-propagation", "neural-network", "gaussian", "calibration"]
+categories = ["science", "algorithms"]
+publish = true
 
 [workspace]
 
@@ -38,3 +45,6 @@ required-features = ["burn"]
 [[example]]
 name = "conformal_intervals"
 required-features = ["burn"]
+
+[package.metadata.docs.rs]
+features = ["burn"]
