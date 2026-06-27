@@ -610,7 +610,7 @@ mod tests {
     fn leaky_relu_matches_monte_carlo() {
         let dev = <B as Backend>::Device::default();
         let (n, d, k) = (2usize, 4usize, 80_000usize);
-        let (alpha, std) = (0.1f64, 0.7f64);
+        let (alpha, std) = (0.3f64, 0.7f64);
 
         let mean = Tensor::<B, 2>::random([n, d], Distribution::Normal(0.0, 0.5), &dev);
         let var = Tensor::<B, 2>::full([n, d], std * std, &dev);
@@ -928,5 +928,105 @@ mod tests {
             let rel = (pv[i] as f64 - mc_var[i]).abs() / mc_var[i].max(1e-9);
             assert!(rel < 0.10, "var {i}: {} vs {}", pv[i], mc_var[i]);
         }
+    }
+
+    /// Cauchy interval half-width is `scale * tan(pi p / 2)`.
+    #[test]
+    fn cauchy_interval_halfwidth_value() {
+        let dev = <B as Backend>::Device::default();
+        let scale = Tensor::<B, 2>::full([1, 2], 2.0, &dev);
+        let c = Cauchy::new(Tensor::zeros([1, 2], &dev), scale);
+        let hw = c.interval_halfwidth(0.9).to_data().to_vec::<f32>().unwrap();
+        let expect = 2.0 * (PI * 0.9 / 2.0).tan();
+        assert!(
+            (hw[0] as f64 - expect).abs() < 0.01,
+            "{} vs {expect}",
+            hw[0]
+        );
+    }
+
+    /// Weight-uncertainty propagation with non-zero weight AND bias variance:
+    /// the mean and variance must match Monte Carlo over inputs, weights, bias.
+    #[test]
+    fn bayes_weight_uncertainty_matches_mc() {
+        let dev = <B as Backend>::Device::default();
+        let (n, din, dout, k) = (3usize, 4usize, 3usize, 60_000usize);
+        let (in_std, w_std, b_std) = (0.3f64, 0.2f64, 0.15f64);
+
+        let w_mean = Tensor::<B, 2>::random([din, dout], Distribution::Normal(0.0, 1.0), &dev);
+        let w_var = Tensor::<B, 2>::full([din, dout], w_std * w_std, &dev);
+        let b_mean = Tensor::<B, 1>::random([dout], Distribution::Normal(0.0, 0.5), &dev);
+        let b_var = Tensor::<B, 1>::full([dout], b_std * b_std, &dev);
+        let mean = Tensor::<B, 2>::random([n, din], Distribution::Normal(0.0, 1.0), &dev);
+        let var = Tensor::<B, 2>::full([n, din], in_std * in_std, &dev);
+
+        let out = propagate_linear_bayes(
+            &Moments::new(mean.clone(), var.clone()),
+            w_mean.clone(),
+            w_var,
+            Some((b_mean.clone(), b_var)),
+        );
+        let p_mean = out.mean.to_data().to_vec::<f32>().unwrap();
+        let p_var = out.var.to_data().to_vec::<f32>().unwrap();
+
+        let len = n * dout;
+        let mut samples = Vec::with_capacity(k);
+        for _ in 0..k {
+            let wk = w_mean.clone()
+                + Tensor::<B, 2>::random([din, dout], Distribution::Normal(0.0, w_std), &dev);
+            let bk = b_mean.clone()
+                + Tensor::<B, 1>::random([dout], Distribution::Normal(0.0, b_std), &dev);
+            let xk = mean.clone()
+                + Tensor::<B, 2>::random([n, din], Distribution::Normal(0.0, in_std), &dev);
+            let yk = xk.matmul(wk) + bk.reshape([1, dout]);
+            samples.push(
+                yk.to_data()
+                    .to_vec::<f32>()
+                    .unwrap()
+                    .iter()
+                    .map(|v| *v as f64)
+                    .collect(),
+            );
+        }
+        let (mc_mean, mc_var) = mc_moments(&samples, len);
+        for i in 0..len {
+            assert!(
+                (p_mean[i] as f64 - mc_mean[i]).abs() < 0.03,
+                "mean {i}: {} vs {}",
+                p_mean[i],
+                mc_mean[i]
+            );
+            let rel = (p_var[i] as f64 - mc_var[i]).abs() / mc_var[i].max(1e-9);
+            assert!(rel < 0.10, "var {i}: {} vs {}", p_var[i], mc_var[i]);
+        }
+    }
+
+    /// On a diagonal input the full-covariance ReLU diagonal equals the plain
+    /// diagonal ReLU (the off-diagonal gating contributes nothing).
+    #[test]
+    fn full_cov_relu_diagonal_matches_diagonal_relu() {
+        let dev = <B as Backend>::Device::default();
+        let mean = Tensor::<B, 2>::random([4, 5], Distribution::Normal(0.0, 1.0), &dev);
+        let var = Tensor::<B, 2>::full([4, 5], 0.4, &dev);
+        let diag = propagate_relu(&Moments::new(mean.clone(), var.clone()));
+        let full = propagate_relu_full(&MomentsFull::from_diagonal(mean, var));
+        close(&diag.var, &full.variance(), 1e-4);
+        close(&diag.mean, &full.mean, 1e-4);
+    }
+
+    /// Residual-add is exactly the element-wise sum of the two moments.
+    #[test]
+    fn residual_add_is_exact_sum() {
+        let dev = <B as Backend>::Device::default();
+        let m1 = Tensor::<B, 2>::random([2, 3], Distribution::Normal(0.0, 1.0), &dev);
+        let v1 = Tensor::<B, 2>::full([2, 3], 0.5, &dev);
+        let m2 = Tensor::<B, 2>::random([2, 3], Distribution::Normal(0.0, 1.0), &dev);
+        let v2 = Tensor::<B, 2>::full([2, 3], 0.3, &dev);
+        let r = propagate_residual_add(
+            &Moments::new(m1.clone(), v1.clone()),
+            &Moments::new(m2.clone(), v2.clone()),
+        );
+        close(&r.mean, &(m1 + m2), 1e-5);
+        close(&r.var, &(v1 + v2), 1e-5);
     }
 }
