@@ -507,6 +507,111 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) {
     println!("\nSDP vs MC per-node uncertainty (test nodes): Spearman rho = {rho:.4}");
 }
 
+/// Leave-one-class-out OOD detection (the fair test for epistemic uncertainty):
+/// train WITHOUT the `held_out` class, then test whether uncertainty is higher on
+/// held-out-class nodes (OOD) than on in-distribution test nodes. Compares
+/// input-noise (aleatoric), weight-Laplace (epistemic), and max-softmax
+/// probability (MSP -- the standard free baseline, Hendrycks & Gimpel 2017).
+fn ood_eval<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str, held_out: i32) {
+    let g = load_planetoid(dir, name).unwrap();
+    let mut rng = 0x51ce_2026_0bad_f00du64;
+    let mut by_class: Vec<Vec<usize>> = vec![Vec::new(); g.n_classes];
+    for (i, &c) in g.labels.iter().enumerate() {
+        by_class[c as usize].push(i);
+    }
+    let mut train_idx = Vec::new();
+    for (c, bucket) in by_class.iter_mut().enumerate() {
+        if c as i32 == held_out {
+            continue;
+        }
+        shuffle(bucket, &mut rng);
+        train_idx.extend(bucket.iter().take(20).copied());
+    }
+    let train_set: std::collections::HashSet<usize> = train_idx.iter().copied().collect();
+    let id_test: Vec<usize> = (0..g.n)
+        .filter(|&i| g.labels[i] != held_out && !train_set.contains(&i))
+        .take(1000)
+        .collect();
+    let ood: Vec<usize> = (0..g.n).filter(|&i| g.labels[i] == held_out).collect();
+    println!(
+        "\n=== OOD detection: class {held_out} held out ===\nID train: {}  ID test: {}  OOD nodes: {}",
+        train_idx.len(),
+        id_test.len(),
+        ood.len()
+    );
+
+    let x = Tensor::<B, 2>::from_data(
+        TensorData::new(g.features.clone(), [g.n, g.n_features]),
+        &device,
+    );
+    let adj = Tensor::<B, 2>::from_data(TensorData::new(g.adj_norm.clone(), [g.n, g.n]), &device);
+    let targets = Tensor::<B, 1, Int>::from_data(TensorData::new(g.labels.clone(), [g.n]), &device);
+    let train_sel = Tensor::<B, 1, Int>::from_data(
+        TensorData::new(
+            train_idx.iter().map(|&i| i as i32).collect::<Vec<_>>(),
+            [train_idx.len()],
+        ),
+        &device,
+    );
+
+    let mut model = Gcn::<B>::init(g.n_features, g.n_classes, &device);
+    let mut optim = AdamConfig::new()
+        .with_weight_decay(Some(WeightDecayConfig::new(5e-4)))
+        .init();
+    for _ in 1..=200 {
+        let logits = model.forward(x.clone(), adj.clone());
+        let tl = logits.select(0, train_sel.clone());
+        let tt = targets.clone().select(0, train_sel.clone());
+        let loss = CrossEntropyLoss::new(None, &device).forward(tl, tt);
+        let grads = GradientsParams::from_grads(loss.backward(), &model);
+        model = optim.step(0.01, model, grads);
+    }
+
+    let logits_v = model
+        .forward(x.clone(), adj.clone())
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let node_var = model.sdp_node_variance(x.clone(), adj.clone(), INPUT_STD);
+    let node_epi = epistemic_node_variance(
+        &model,
+        &x,
+        &adj,
+        &targets,
+        &train_idx,
+        &device,
+        LAPLACE_PRIOR_PREC,
+    );
+    // MSP OOD score = 1 - max softmax prob (higher = more OOD).
+    let c = g.n_classes;
+    let msp: Vec<f64> = (0..g.n)
+        .map(|i| {
+            let row = &logits_v[i * c..(i + 1) * c];
+            let m = row.iter().cloned().fold(f32::MIN, f32::max);
+            let denom: f32 = row.iter().map(|v| (v - m).exp()).sum();
+            let maxp = 1.0 / denom; // exp(max-m)/sum = 1/denom
+            1.0 - maxp as f64
+        })
+        .collect();
+
+    let eval: Vec<usize> = id_test.iter().chain(ood.iter()).copied().collect();
+    let labels: Vec<bool> = eval.iter().map(|&i| g.labels[i] == held_out).collect();
+    let pick = |src: &[f64]| -> Vec<f64> { eval.iter().map(|&i| src[i]).collect() };
+    println!("OOD-detection AUROC (1.0 = uncertainty perfectly separates novel-class nodes):");
+    println!(
+        "  input-noise (aleatoric)    = {:.4}",
+        auroc(&pick(&node_var), &labels)
+    );
+    println!(
+        "  weight-Laplace (epistemic) = {:.4}",
+        auroc(&pick(&node_epi), &labels)
+    );
+    println!(
+        "  max-softmax-prob (baseline) = {:.4}",
+        auroc(&pick(&msp), &labels)
+    );
+}
+
 fn main() -> ExitCode {
     let arg = std::env::args().nth(1);
     let dir: PathBuf = match arg {
@@ -521,5 +626,6 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     run::<Autodiff<NdArray<f32>>>(Default::default(), &dir, "cora");
+    ood_eval::<Autodiff<NdArray<f32>>>(Default::default(), &dir, "cora", 0);
     ExitCode::SUCCESS
 }
