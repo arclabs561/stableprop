@@ -289,19 +289,32 @@ pub fn propagate_relu_full<B: Backend>(m: &MomentsFull<B>) -> MomentsFull<B> {
         .exp()
         .mul_scalar(1.0 / (2.0 * PI).sqrt());
     let mu_out = mu.clone() * big_phi.clone() + sigma.clone() * phi.clone();
-    let var_out = ((mu.clone() * mu.clone() + var) * big_phi.clone() + mu * sigma * phi
+    let var_out = ((mu.clone() * mu.clone() + var.clone()) * big_phi.clone()
+        + mu.clone() * sigma.clone() * phi.clone()
         - mu_out.clone() * mu_out.clone())
     .clamp_min(0.0);
 
-    // Off-diagonal: g_i g_j Sigma_ij; diagonal then overwritten with var_out.
-    let g = big_phi;
-    let gg = g.clone().unsqueeze_dim::<3>(2) * g.unsqueeze_dim::<3>(1);
+    // Off-diagonal: post-ReLU covariance via the Wright et al. (2024) series
+    // Cov_ij = sum_k (Sigma_ij^k / k!) d_k(i) d_k(j), to 3rd order. The k=1 term
+    // is the smooth gate Phi(a_i) Phi(a_j) Sigma_ij; the derivatives of E[relu]
+    // in the input mean are d1 = Phi(a), d2 = phi(a)/sigma, d3 = -a phi(a)/sigma^2.
+    // The diagonal is then overwritten with the exact variance.
+    let d1 = big_phi;
+    let d2 = phi.clone() / sigma.clone();
+    let d3 = (alpha * phi).mul_scalar(-1.0) / var;
+    let outer = |t: Tensor<B, 2>| t.clone().unsqueeze_dim::<3>(2) * t.unsqueeze_dim::<3>(1);
+    let cov1 = m.cov.clone();
+    let cov2 = cov1.clone() * cov1.clone();
+    let cov3 = cov2.clone() * cov1.clone();
     let off_mask = eye_d
         .clone()
         .mul_scalar(-1.0)
         .add_scalar(1.0)
         .unsqueeze::<3>();
-    let off = m.cov.clone() * gg * off_mask;
+    let off = (cov1 * outer(d1)
+        + cov2.mul_scalar(0.5) * outer(d2)
+        + cov3.mul_scalar(1.0 / 6.0) * outer(d3))
+        * off_mask;
     let diag = var_out.unsqueeze_dim::<3>(2).expand([n, d, d]) * eye_d.unsqueeze::<3>();
     MomentsFull {
         mean: mu_out,
@@ -1028,5 +1041,59 @@ mod tests {
         );
         close(&r.mean, &(m1 + m2), 1e-5);
         close(&r.var, &(v1 + v2), 1e-5);
+    }
+
+    /// Full post-ReLU covariance (diagonal AND off-diagonal) must match Monte
+    /// Carlo. This exercises the Wright-series off-diagonal terms; correlated
+    /// pre-activations are produced by a linear layer from a diagonal input.
+    #[test]
+    fn relu_full_covariance_matches_monte_carlo() {
+        let dev = <B as Backend>::Device::default();
+        let (n, din, dh, k) = (2usize, 4usize, 5usize, 150_000usize);
+        let std = 0.6f64;
+        let w = Tensor::<B, 2>::random([din, dh], Distribution::Normal(0.0, 0.8), &dev);
+        let mean = Tensor::<B, 2>::random([n, din], Distribution::Normal(0.0, 1.0), &dev);
+        let var = Tensor::<B, 2>::full([n, din], std * std, &dev);
+
+        let pre = propagate_linear_full(
+            &MomentsFull::from_diagonal(mean.clone(), var),
+            w.clone(),
+            None,
+        );
+        let post = propagate_relu_full(&pre);
+        let p_cov = post.cov.to_data().to_vec::<f32>().unwrap(); // [n, dh, dh]
+
+        let mut sh = vec![0.0f64; n * dh];
+        let mut shh = vec![0.0f64; n * dh * dh];
+        for _ in 0..k {
+            let xk = mean.clone()
+                + Tensor::<B, 2>::random([n, din], Distribution::Normal(0.0, std), &dev);
+            let h = xk
+                .matmul(w.clone())
+                .clamp_min(0.0)
+                .to_data()
+                .to_vec::<f32>()
+                .unwrap();
+            for i in 0..n {
+                for a in 0..dh {
+                    let ha = h[i * dh + a] as f64;
+                    sh[i * dh + a] += ha;
+                    for b in 0..dh {
+                        shh[i * dh * dh + a * dh + b] += ha * h[i * dh + b] as f64;
+                    }
+                }
+            }
+        }
+        let kf = k as f64;
+        for i in 0..n {
+            for a in 0..dh {
+                for b in 0..dh {
+                    let mc = shh[i * dh * dh + a * dh + b] / kf
+                        - (sh[i * dh + a] / kf) * (sh[i * dh + b] / kf);
+                    let p = p_cov[i * dh * dh + a * dh + b] as f64;
+                    assert!((p - mc).abs() < 0.03, "cov[{i}][{a}][{b}]: {p} vs MC {mc}");
+                }
+            }
+        }
     }
 }
