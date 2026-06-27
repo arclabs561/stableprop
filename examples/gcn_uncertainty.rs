@@ -18,8 +18,8 @@
 
 use burn::tensor::{backend::Backend, Distribution, Tensor, TensorData};
 use burn_ndarray::NdArray;
-use stableprop::burn_sdp::{propagate_linear, propagate_matmul_left, propagate_relu, Moments};
 use propago::GCNConv;
+use stableprop::burn_sdp::{propagate_linear, propagate_matmul_left, propagate_relu, Moments};
 
 type B = NdArray<f32>;
 
