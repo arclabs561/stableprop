@@ -162,6 +162,21 @@ pub fn propagate_leaky_relu<B: Backend>(m: &Moments<B>, alpha: f64) -> Moments<B
     Moments { mean, var: var_out }
 }
 
+/// Combine a residual skip and a branch `y = skip + branch` under the
+/// independence approximation: `mean = skip.mean + branch.mean`,
+/// `var = skip.var + branch.var`.
+///
+/// This IGNORES the skip-branch covariance (the branch is a function of the
+/// skip's input, so they are correlated). It is accurate when the branch is
+/// small relative to the skip (the usual residual-block regime) and approximate
+/// otherwise. A common simplification for residual networks.
+pub fn propagate_residual_add<B: Backend>(skip: &Moments<B>, branch: &Moments<B>) -> Moments<B> {
+    Moments {
+        mean: skip.mean.clone() + branch.mean.clone(),
+        var: skip.var.clone() + branch.var.clone(),
+    }
+}
+
 /// `d x d` identity on the given backend/device.
 fn eye<B: Backend>(d: usize, device: &B::Device) -> Tensor<B, 2> {
     let mut v = vec![0.0f32; d * d];
@@ -611,6 +626,69 @@ mod tests {
             );
             let rel = (sv[i] as f64 - mc_var[i]).abs() / mc_var[i].max(1e-9);
             assert!(rel < 0.08, "var {i}: {} vs {}", sv[i], mc_var[i]);
+        }
+    }
+
+    /// Residual `y = x + branch(x)` with a SMALL branch: the independence
+    /// approximation of `propagate_residual_add` should be close to Monte Carlo.
+    #[test]
+    fn residual_add_matches_monte_carlo_small_branch() {
+        let dev = <B as Backend>::Device::default();
+        let (n, d, h, k) = (3usize, 4usize, 8usize, 80_000usize);
+        let std = 0.5f64;
+
+        // Small branch weights so the skip dominates.
+        let w1 = Tensor::<B, 2>::random([d, h], Distribution::Normal(0.0, 0.07), &dev);
+        let b1 = Tensor::<B, 1>::random([h], Distribution::Normal(0.0, 0.1), &dev);
+        let w2 = Tensor::<B, 2>::random([h, d], Distribution::Normal(0.0, 0.07), &dev);
+        let b2 = Tensor::<B, 1>::random([d], Distribution::Normal(0.0, 0.1), &dev);
+        let mean = Tensor::<B, 2>::random([n, d], Distribution::Normal(0.0, 1.0), &dev);
+        let var = Tensor::<B, 2>::full([n, d], std * std, &dev);
+
+        let skip = Moments::new(mean.clone(), var.clone());
+        let branch = propagate_linear(
+            &propagate_relu(&propagate_linear(&skip, w1.clone(), Some(b1.clone()))),
+            w2.clone(),
+            Some(b2.clone()),
+        );
+        let res = propagate_residual_add(&skip, &branch);
+        let r_mean = res.mean.to_data().to_vec::<f32>().unwrap();
+        let r_var = res.var.to_data().to_vec::<f32>().unwrap();
+
+        let len = n * d;
+        let mut samples = Vec::with_capacity(k);
+        for _ in 0..k {
+            let noise = Tensor::<B, 2>::random([n, d], Distribution::Normal(0.0, std), &dev);
+            let x = mean.clone() + noise;
+            let br = (x.clone().matmul(w1.clone()) + b1.clone().reshape([1, h]))
+                .clamp_min(0.0)
+                .matmul(w2.clone())
+                + b2.clone().reshape([1, d]);
+            let y = x + br;
+            samples.push(
+                y.to_data()
+                    .to_vec::<f32>()
+                    .unwrap()
+                    .iter()
+                    .map(|v| *v as f64)
+                    .collect(),
+            );
+        }
+        let (mc_mean, mc_var) = mc_moments(&samples, len);
+        for i in 0..len {
+            assert!(
+                (r_mean[i] as f64 - mc_mean[i]).abs() < 0.03,
+                "mean {i}: {} vs {}",
+                r_mean[i],
+                mc_mean[i]
+            );
+            let rel = (r_var[i] as f64 - mc_var[i]).abs() / mc_var[i].max(1e-9);
+            assert!(
+                rel < 0.15,
+                "var {i}: {} vs {} (rel {rel})",
+                r_var[i],
+                mc_var[i]
+            );
         }
     }
 }
