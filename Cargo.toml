@@ -46,5 +46,9 @@ required-features = ["burn"]
 name = "conformal_intervals"
 required-features = ["burn"]
 
+[[example]]
+name = "robust_training"
+required-features = ["burn"]
+
 [package.metadata.docs.rs]
 features = ["burn"]
