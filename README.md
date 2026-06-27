@@ -44,13 +44,18 @@ See `examples/`:
 - `conformal_intervals`: wrap the analytic std in split-conformal for a
   distribution-free coverage *guarantee* (the raw intervals are a heuristic scale;
   conformal makes them calibrated).
+- `robust_training`: train *with* the differentiable propagated variance to
+  reduce error under input noise (shared-init A/B vs plain MSE).
+- `misclassification_risk`: full-covariance propagation of input noise into an
+  analytic estimate of a classifier's error rate (tracks Monte Carlo closely;
+  an estimate, not a guaranteed certificate).
 - `cora_uncertainty`: honest evidence on classification, where the method is
   dominated by the softmax baseline.
 
 ## What it propagates
 
 - Diagonal Gaussian moments (`Moments`): exact linear, Frey-Hinton ReLU,
-  leaky-ReLU, GCN-adjacency.
+  leaky-ReLU, GCN-adjacency, residual-add.
 - Full covariance (`MomentsFull`): keeps the cross-feature correlations a layer
   introduces; more accurate than diagonal (validated against Monte Carlo). The
   ReLU uses exact diagonal moments with a smooth `Phi(alpha)` gate on the
@@ -73,9 +78,10 @@ for the Gaussian/Cauchy stable-distribution framing.
 
 ## Roadmap
 
-Convolutional / residual / attention layers, training that penalizes the
-propagated variance, and probabilistic robustness certificates (bounding
-misclassification probability under input noise) are not yet implemented.
+Convolutional and attention layers are not yet implemented. The residual-add is
+the independence approximation (it ignores the skip-branch covariance). The
+misclassification-risk estimate is an estimate, not a sound certificate; rigorous
+certified bounds would need interval / Lipschitz methods.
 
 ## License
 
