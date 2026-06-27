@@ -246,6 +246,62 @@ pub fn propagate_relu_full<B: Backend>(m: &MomentsFull<B>) -> MomentsFull<B> {
     }
 }
 
+/// Independent Cauchy distributions per feature: `location` and `scale`, `[n, d]`.
+///
+/// Cauchy is the heavy-tailed stable distribution. It has NO mean or variance
+/// (both integrals diverge), so we propagate its location (median) and scale
+/// (half-width) rather than moments. The heavy tails keep predictions
+/// appropriately uncertain far from the training data, which is the basis of the
+/// Cauchy mode of Petersen et al. (2024) for OOD robustness. Like Gaussians,
+/// Cauchys are closed under linear maps, so the linear step is exact.
+#[derive(Clone, Debug)]
+pub struct Cauchy<B: Backend> {
+    pub location: Tensor<B, 2>,
+    pub scale: Tensor<B, 2>,
+}
+
+impl<B: Backend> Cauchy<B> {
+    pub fn new(location: Tensor<B, 2>, scale: Tensor<B, 2>) -> Self {
+        Self { location, scale }
+    }
+
+    /// Half-width of the symmetric central interval of probability mass `p`:
+    /// `scale * tan(pi p / 2)` (e.g. p=0.9 -> scale * 6.31). Far wider than the
+    /// Gaussian `1.64 * sigma` -- the heavy-tail signature.
+    pub fn interval_halfwidth(&self, p: f64) -> Tensor<B, 2> {
+        self.scale.clone().mul_scalar((PI * p / 2.0).tan())
+    }
+}
+
+/// Cauchy propagation through `y = x W + b`. Location maps linearly; scale adds
+/// under ABSOLUTE weights: `scale_out = scale @ |W|` (vs `var @ W^2` for
+/// Gaussians -- the `|.|` and the lack of squaring are the heavy-tail signature).
+/// Exact: Cauchy is closed under linear maps.
+pub fn propagate_linear_cauchy<B: Backend>(
+    c: &Cauchy<B>,
+    weight: Tensor<B, 2>,
+    bias: Option<Tensor<B, 1>>,
+) -> Cauchy<B> {
+    let d_out = weight.dims()[1];
+    let mut location = c.location.clone().matmul(weight.clone());
+    if let Some(b) = bias {
+        location = location + b.reshape([1, d_out]);
+    }
+    let scale = c.scale.clone().matmul(weight.abs());
+    Cauchy { location, scale }
+}
+
+/// Cauchy propagation through ReLU via local linearization (Petersen 2024): the
+/// gate is 1 where the location is positive, 0 otherwise; the location is
+/// rectified and the scale is gated.
+pub fn propagate_relu_cauchy<B: Backend>(c: &Cauchy<B>) -> Cauchy<B> {
+    let gate = c.location.clone().clamp_min(0.0).sign();
+    Cauchy {
+        location: c.location.clone().clamp_min(0.0),
+        scale: c.scale.clone() * gate,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,5 +470,75 @@ mod tests {
             fe < de,
             "full-cov ({fe}) should beat diagonal ({de}) against MC"
         );
+    }
+
+    /// Cauchy is closed under linear maps, so `propagate_linear_cauchy` is exact.
+    /// Validate location (median) and scale (half-IQR) against Cauchy-input MC --
+    /// moments can't be used because a Cauchy has none.
+    #[test]
+    fn cauchy_linear_exact_vs_monte_carlo() {
+        let dev = <B as Backend>::Device::default();
+        let (n, d_in, d_out, k) = (3usize, 4usize, 3usize, 40_000usize);
+
+        let loc = Tensor::<B, 2>::random([n, d_in], Distribution::Normal(0.0, 1.0), &dev);
+        let scale = Tensor::<B, 2>::full([n, d_in], 0.5, &dev);
+        let w = Tensor::<B, 2>::random([d_in, d_out], Distribution::Normal(0.0, 1.0), &dev);
+        let b = Tensor::<B, 1>::random([d_out], Distribution::Normal(0.0, 0.2), &dev);
+
+        let out = propagate_linear_cauchy(
+            &Cauchy::new(loc.clone(), scale.clone()),
+            w.clone(),
+            Some(b.clone()),
+        );
+        let p_loc = out.location.to_data().to_vec::<f32>().unwrap();
+        let p_scale = out.scale.to_data().to_vec::<f32>().unwrap();
+
+        let loc_v = loc.to_data().to_vec::<f32>().unwrap();
+        let scale_v = scale.to_data().to_vec::<f32>().unwrap();
+        let w_v = w.to_data().to_vec::<f32>().unwrap();
+        let b_v = b.to_data().to_vec::<f32>().unwrap();
+
+        let mut rng = 0x00C0_FFEE_u64;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            ((rng >> 11) as f64 + 1.0) / ((1u64 << 53) as f64 + 2.0)
+        };
+        let mut samples: Vec<Vec<f64>> = vec![Vec::with_capacity(k); n * d_out];
+        for _ in 0..k {
+            for i in 0..n {
+                let x: Vec<f64> = (0..d_in)
+                    .map(|c| {
+                        loc_v[i * d_in + c] as f64
+                            + scale_v[i * d_in + c] as f64 * (PI * (next() - 0.5)).tan()
+                    })
+                    .collect();
+                for j in 0..d_out {
+                    let y = b_v[j] as f64
+                        + (0..d_in)
+                            .map(|c| x[c] * w_v[c * d_out + j] as f64)
+                            .sum::<f64>();
+                    samples[i * d_out + j].push(y);
+                }
+            }
+        }
+        for idx in 0..n * d_out {
+            let s = &mut samples[idx];
+            s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let med = s[k / 2];
+            let mc_scale = (s[3 * k / 4] - s[k / 4]) / 2.0;
+            assert!(
+                (p_loc[idx] as f64 - med).abs() < 0.08,
+                "loc {idx}: {} vs median {med}",
+                p_loc[idx]
+            );
+            let rel = (p_scale[idx] as f64 - mc_scale).abs() / mc_scale.max(1e-6);
+            assert!(
+                rel < 0.10,
+                "scale {idx}: {} vs half-IQR {mc_scale}",
+                p_scale[idx]
+            );
+        }
     }
 }
