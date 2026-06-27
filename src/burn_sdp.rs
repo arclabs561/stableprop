@@ -131,6 +131,37 @@ pub fn propagate_relu<B: Backend>(m: &Moments<B>) -> Moments<B> {
     }
 }
 
+/// Propagate through leaky ReLU `max(x, alpha * x)` via exact Gaussian moments.
+///
+/// Uses `leaky(x) = alpha*x + (1-alpha)*relu(x)`, so the moments combine the raw
+/// and rectified-Gaussian moments. Reduces to [`propagate_relu`] at `alpha = 0`.
+pub fn propagate_leaky_relu<B: Backend>(m: &Moments<B>, alpha: f64) -> Moments<B> {
+    let var = m.var.clone().clamp_min(1e-12);
+    let sigma = var.clone().sqrt();
+    let mu = m.mean.clone();
+    let a = mu.clone() / sigma.clone();
+    let big_phi = a
+        .clone()
+        .mul_scalar(FRAC_1_SQRT_2)
+        .erf()
+        .add_scalar(1.0)
+        .mul_scalar(0.5);
+    let phi = (a.clone() * a.clone())
+        .mul_scalar(-0.5)
+        .exp()
+        .mul_scalar(1.0 / (2.0 * PI).sqrt());
+
+    let mu2_plus_var = mu.clone() * mu.clone() + var.clone();
+    // E[relu] and E[relu^2].
+    let e_r = mu.clone() * big_phi.clone() + sigma.clone() * phi.clone();
+    let e_r2 = mu2_plus_var.clone() * big_phi + mu * sigma * phi;
+
+    let mean = e_r.mul_scalar(1.0 - alpha) + m.mean.clone().mul_scalar(alpha);
+    let e_y2 = mu2_plus_var.mul_scalar(alpha * alpha) + e_r2.mul_scalar(1.0 - alpha * alpha);
+    let var_out = (e_y2 - mean.clone() * mean.clone()).clamp_min(0.0);
+    Moments { mean, var: var_out }
+}
+
 /// `d x d` identity on the given backend/device.
 fn eye<B: Backend>(d: usize, device: &B::Device) -> Tensor<B, 2> {
     let mut v = vec![0.0f32; d * d];
@@ -539,6 +570,47 @@ mod tests {
                 "scale {idx}: {} vs half-IQR {mc_scale}",
                 p_scale[idx]
             );
+        }
+    }
+
+    /// Leaky-ReLU moments must match Monte Carlo.
+    #[test]
+    fn leaky_relu_matches_monte_carlo() {
+        let dev = <B as Backend>::Device::default();
+        let (n, d, k) = (2usize, 4usize, 80_000usize);
+        let (alpha, std) = (0.1f64, 0.7f64);
+
+        let mean = Tensor::<B, 2>::random([n, d], Distribution::Normal(0.0, 0.5), &dev);
+        let var = Tensor::<B, 2>::full([n, d], std * std, &dev);
+        let out = propagate_leaky_relu(&Moments::new(mean.clone(), var.clone()), alpha);
+        let sm = out.mean.to_data().to_vec::<f32>().unwrap();
+        let sv = out.var.to_data().to_vec::<f32>().unwrap();
+
+        let len = n * d;
+        let mut samples = Vec::with_capacity(k);
+        for _ in 0..k {
+            let noise = Tensor::<B, 2>::random([n, d], Distribution::Normal(0.0, std), &dev);
+            let x = mean.clone() + noise;
+            let y = x.clone().clamp_min(0.0) + x.clamp_max(0.0).mul_scalar(alpha);
+            samples.push(
+                y.to_data()
+                    .to_vec::<f32>()
+                    .unwrap()
+                    .iter()
+                    .map(|v| *v as f64)
+                    .collect(),
+            );
+        }
+        let (mc_mean, mc_var) = mc_moments(&samples, len);
+        for i in 0..len {
+            assert!(
+                (sm[i] as f64 - mc_mean[i]).abs() < 0.02,
+                "mean {i}: {} vs {}",
+                sm[i],
+                mc_mean[i]
+            );
+            let rel = (sv[i] as f64 - mc_var[i]).abs() / mc_var[i].max(1e-9);
+            assert!(rel < 0.08, "var {i}: {} vs {}", sv[i], mc_var[i]);
         }
     }
 }
