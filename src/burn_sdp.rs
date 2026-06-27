@@ -872,4 +872,61 @@ mod tests {
         assert!(s[0] > 0.5, "active scale kept");
         assert!(s[1] < 1e-6, "inactive scale gated to 0");
     }
+
+    /// Linear WITH bias: the bias must be added to the mean (and not the
+    /// variance). Catches mutations that drop or misplace the bias.
+    #[test]
+    fn linear_bias_added_to_mean_only() {
+        let dev = <B as Backend>::Device::default();
+        let mean = Tensor::<B, 2>::zeros([2, 3], &dev);
+        let var = Tensor::<B, 2>::full([2, 3], 0.5, &dev);
+        let w = Tensor::<B, 2>::from_data(
+            TensorData::new(vec![1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0], [3, 2]),
+            &dev,
+        );
+        let bias = Tensor::<B, 1>::from_data(TensorData::new(vec![5.0f32, -2.0], [2]), &dev);
+        let out = propagate_linear(&Moments::new(mean, var), w, Some(bias));
+        let m = out.mean.to_data().to_vec::<f32>().unwrap();
+        let v = out.var.to_data().to_vec::<f32>().unwrap();
+        // mean = 0*W + bias = [5, -2] per row.
+        assert!(
+            (m[0] - 5.0).abs() < 1e-4 && (m[1] + 2.0).abs() < 1e-4,
+            "bias not in mean"
+        );
+        // variance unaffected by bias: col 0 gets var(=0.5), col 1 gets 0.
+        assert!((v[0] - 0.5).abs() < 1e-4, "bias leaked into variance");
+    }
+
+    /// GCN-adjacency propagation: `var_out = (a*a) @ var`. Validate vs MC.
+    #[test]
+    fn matmul_left_variance_matches_monte_carlo() {
+        let dev = <B as Backend>::Device::default();
+        let (n, d, k) = (4usize, 3usize, 60_000usize);
+        let std = 0.4f64;
+        let a = Tensor::<B, 2>::random([n, n], Distribution::Normal(0.0, 0.6), &dev);
+        let mean = Tensor::<B, 2>::random([n, d], Distribution::Normal(0.0, 1.0), &dev);
+        let var = Tensor::<B, 2>::full([n, d], std * std, &dev);
+        let out = propagate_matmul_left(a.clone(), &Moments::new(mean.clone(), var));
+        let pv = out.var.to_data().to_vec::<f32>().unwrap();
+
+        let len = n * d;
+        let mut samples = Vec::with_capacity(k);
+        for _ in 0..k {
+            let noise = Tensor::<B, 2>::random([n, d], Distribution::Normal(0.0, std), &dev);
+            let y = a.clone().matmul(mean.clone() + noise);
+            samples.push(
+                y.to_data()
+                    .to_vec::<f32>()
+                    .unwrap()
+                    .iter()
+                    .map(|x| *x as f64)
+                    .collect(),
+            );
+        }
+        let (_, mc_var) = mc_moments(&samples, len);
+        for i in 0..len {
+            let rel = (pv[i] as f64 - mc_var[i]).abs() / mc_var[i].max(1e-9);
+            assert!(rel < 0.10, "var {i}: {} vs {}", pv[i], mc_var[i]);
+        }
+    }
 }
