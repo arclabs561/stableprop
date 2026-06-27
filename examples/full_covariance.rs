@@ -12,7 +12,7 @@
 use burn::module::Module;
 use burn::nn::{Linear, LinearConfig};
 use burn::tensor::backend::Backend;
-use burn::tensor::{activation, Distribution, Tensor, TensorData};
+use burn::tensor::{activation, Distribution, Tensor};
 use burn_ndarray::NdArray;
 
 use stableprop::burn_sdp::{

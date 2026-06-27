@@ -12,7 +12,7 @@
 use burn::module::Module;
 use burn::nn::{Linear, LinearConfig};
 use burn::tensor::backend::Backend;
-use burn::tensor::{activation, Distribution, Tensor, TensorData};
+use burn::tensor::{Distribution, Tensor};
 use burn_ndarray::NdArray;
 use std::f64::consts::PI;
 
@@ -54,7 +54,7 @@ fn main() {
     let b2 = model.lin2.bias.as_ref().map(|p| p.val());
 
     let x = Tensor::<Nd, 2>::random([N, D_IN], Distribution::Normal(0.0, 1.0), &dev);
-    let len = N * D_OUT;
+    let _len = N * D_OUT;
 
     // Cauchy propagation: location + scale, then a 90% interval half-width.
     let c0 = Cauchy::new(x.clone(), Tensor::<Nd, 2>::full([N, D_IN], GAMMA, &dev));
