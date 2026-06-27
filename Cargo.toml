@@ -29,6 +29,7 @@ burn = { version = "0.20.0", default-features = false, features = ["std"], optio
 burn = { version = "0.20.0", default-features = false, features = ["std", "autodiff"] }
 burn-ndarray = "0.20.0"
 propago = "0.2"
+tuplet = { version = "0.2", features = ["burn-ndarray"] }
 proptest = "1.5"
 
 [[example]]
@@ -64,4 +65,8 @@ features = ["burn"]
 
 [[example]]
 name = "cauchy_tails"
+required-features = ["burn"]
+
+[[example]]
+name = "tuplet_contrastive"
 required-features = ["burn"]
