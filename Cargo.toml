@@ -29,6 +29,7 @@ burn = { version = "0.20.0", default-features = false, features = ["std"], optio
 burn = { version = "0.20.0", default-features = false, features = ["std", "autodiff"] }
 burn-ndarray = "0.20.0"
 propago = "0.2"
+proptest = "1.5"
 
 [[example]]
 name = "gcn_uncertainty"
