@@ -55,7 +55,7 @@ See `examples/`:
 ## What it propagates
 
 - Diagonal Gaussian moments (`Moments`): exact linear, Frey-Hinton ReLU,
-  leaky-ReLU, GCN-adjacency, residual-add.
+  leaky-ReLU, 2-D convolution, GCN-adjacency, residual-add.
 - Full covariance (`MomentsFull`): keeps the cross-feature correlations a layer
   introduces; more accurate than diagonal (validated against Monte Carlo). The
   ReLU uses exact diagonal moments with a smooth `Phi(alpha)` gate on the
@@ -78,8 +78,9 @@ for the Gaussian/Cauchy stable-distribution framing.
 
 ## Roadmap
 
-Convolutional and attention layers are not yet implemented. The residual-add is
-the independence approximation (it ignores the skip-branch covariance). The
+Attention layers are not yet implemented (moments through softmax and uncertain
+query-key products are a research problem, not a clean addition). The residual-add
+is the independence approximation (it ignores the skip-branch covariance). The
 misclassification-risk estimate is an estimate, not a sound certificate; rigorous
 certified bounds would need interval / Lipschitz methods.
 

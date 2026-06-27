@@ -177,6 +177,23 @@ pub fn propagate_residual_add<B: Backend>(skip: &Moments<B>, branch: &Moments<B>
     }
 }
 
+/// Propagate a diagonal Gaussian through a 2-D convolution. Convolution is a
+/// linear map, so under the diagonal-covariance assumption the moments are
+/// exact: `mean_out = conv(mean, w) + b`, `var_out = conv(var, w^2)`.
+///
+/// `mean` / `var` are `[N, C_in, H, W]`, `weight` is `[C_out, C_in, kh, kw]`.
+pub fn propagate_conv2d<B: Backend>(
+    mean: Tensor<B, 4>,
+    var: Tensor<B, 4>,
+    weight: Tensor<B, 4>,
+    bias: Option<Tensor<B, 1>>,
+    options: burn::tensor::ops::ConvOptions<2>,
+) -> (Tensor<B, 4>, Tensor<B, 4>) {
+    let mean_out = burn::tensor::module::conv2d(mean, weight.clone(), bias, options.clone());
+    let var_out = burn::tensor::module::conv2d(var, weight.clone() * weight, None, options);
+    (mean_out, var_out)
+}
+
 /// `d x d` identity on the given backend/device.
 fn eye<B: Backend>(d: usize, device: &B::Device) -> Tensor<B, 2> {
     let mut v = vec![0.0f32; d * d];
@@ -689,6 +706,57 @@ mod tests {
                 r_var[i],
                 mc_var[i]
             );
+        }
+    }
+
+    /// Conv2d is linear, so `propagate_conv2d` variance is exact: it must match
+    /// Monte Carlo tightly.
+    #[test]
+    fn conv2d_variance_matches_monte_carlo() {
+        let dev = <B as Backend>::Device::default();
+        let (n, cin, hw, cout, ksz, k) = (2usize, 3usize, 6usize, 4usize, 3usize, 20_000usize);
+        let std = 0.3f64;
+        let opts = burn::tensor::ops::ConvOptions::new([1, 1], [0, 0], [1, 1], 1);
+
+        let weight =
+            Tensor::<B, 4>::random([cout, cin, ksz, ksz], Distribution::Normal(0.0, 0.4), &dev);
+        let bias = Tensor::<B, 1>::random([cout], Distribution::Normal(0.0, 0.2), &dev);
+        let mean = Tensor::<B, 4>::random([n, cin, hw, hw], Distribution::Normal(0.0, 1.0), &dev);
+        let var = Tensor::<B, 4>::full([n, cin, hw, hw], std * std, &dev);
+
+        let (_, var_out) = propagate_conv2d(
+            mean.clone(),
+            var,
+            weight.clone(),
+            Some(bias.clone()),
+            opts.clone(),
+        );
+        let p_var = var_out.to_data().to_vec::<f32>().unwrap();
+        let len = p_var.len();
+
+        let mut samples = Vec::with_capacity(k);
+        for _ in 0..k {
+            let noise =
+                Tensor::<B, 4>::random([n, cin, hw, hw], Distribution::Normal(0.0, std), &dev);
+            let y = burn::tensor::module::conv2d(
+                mean.clone() + noise,
+                weight.clone(),
+                Some(bias.clone()),
+                opts.clone(),
+            );
+            samples.push(
+                y.to_data()
+                    .to_vec::<f32>()
+                    .unwrap()
+                    .iter()
+                    .map(|v| *v as f64)
+                    .collect(),
+            );
+        }
+        let (_, mc_var) = mc_moments(&samples, len);
+        for i in 0..len {
+            let rel = (p_var[i] as f64 - mc_var[i]).abs() / mc_var[i].max(1e-9);
+            assert!(rel < 0.10, "var {i}: {} vs {}", p_var[i], mc_var[i]);
         }
     }
 }
