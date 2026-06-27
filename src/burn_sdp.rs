@@ -759,4 +759,117 @@ mod tests {
             assert!(rel < 0.10, "var {i}: {} vs {}", p_var[i], mc_var[i]);
         }
     }
+
+    // --- Fast invariant / reduction / edge-case tests (no Monte Carlo) ---
+
+    fn close(a: &Tensor<B, 2>, b: &Tensor<B, 2>, tol: f64) {
+        let (av, bv) = (
+            a.to_data().to_vec::<f32>().unwrap(),
+            b.to_data().to_vec::<f32>().unwrap(),
+        );
+        for i in 0..av.len() {
+            assert!(
+                (av[i] as f64 - bv[i] as f64).abs() < tol,
+                "elem {i}: {} vs {}",
+                av[i],
+                bv[i]
+            );
+        }
+    }
+
+    fn fixture() -> (Tensor<B, 2>, Moments<B>) {
+        let dev = <B as Backend>::Device::default();
+        let mean = Tensor::<B, 2>::random([4, 5], Distribution::Normal(0.0, 1.0), &dev);
+        let var = Tensor::<B, 2>::full([4, 5], 0.4, &dev);
+        (mean.clone(), Moments::new(mean, var))
+    }
+
+    /// Leaky ReLU at alpha = 0 is plain ReLU.
+    #[test]
+    fn leaky_reduces_to_relu() {
+        let (_, m) = fixture();
+        let r = propagate_relu(&m);
+        let l = propagate_leaky_relu(&m, 0.0);
+        close(&r.mean, &l.mean, 1e-5);
+        close(&r.var, &l.var, 1e-5);
+    }
+
+    /// Weight-uncertainty propagation with zero weight variance is plain linear.
+    #[test]
+    fn bayes_reduces_to_linear_at_zero_weight_var() {
+        let dev = <B as Backend>::Device::default();
+        let (_, m) = fixture();
+        let w = Tensor::<B, 2>::random([5, 3], Distribution::Normal(0.0, 1.0), &dev);
+        let lin = propagate_linear(&m, w.clone(), None);
+        let wvar = w.clone().zeros_like();
+        let bayes = propagate_linear_bayes(&m, w, wvar, None);
+        close(&lin.mean, &bayes.mean, 1e-5);
+        close(&lin.var, &bayes.var, 1e-5);
+    }
+
+    /// The diagonal of full-covariance propagation equals diagonal propagation
+    /// after a single linear layer.
+    #[test]
+    fn full_cov_diagonal_matches_diagonal_linear() {
+        let dev = <B as Backend>::Device::default();
+        let (mean, m) = fixture();
+        let w = Tensor::<B, 2>::random([5, 3], Distribution::Normal(0.0, 1.0), &dev);
+        let diag = propagate_linear(&m, w.clone(), None);
+        let full = propagate_linear_full(&MomentsFull::from_diagonal(mean, m.var.clone()), w, None);
+        close(&diag.var, &full.variance(), 1e-4);
+    }
+
+    /// `from_diagonal(..).variance()` round-trips the variance.
+    #[test]
+    fn from_diagonal_roundtrip() {
+        let (mean, m) = fixture();
+        let mf = MomentsFull::from_diagonal(mean, m.var.clone());
+        close(&m.var, &mf.variance(), 1e-5);
+    }
+
+    /// Deterministic input (zero variance): ReLU output mean is `max(0, mean)`
+    /// and output variance stays ~0.
+    #[test]
+    fn relu_deterministic_input() {
+        let dev = <B as Backend>::Device::default();
+        let mean =
+            Tensor::<B, 2>::from_data(TensorData::new(vec![1.0f32, -1.0, 2.0, -0.5], [1, 4]), &dev);
+        let var = Tensor::<B, 2>::full([1, 4], 0.0, &dev);
+        let out = propagate_relu(&Moments::new(mean, var));
+        let m = out.mean.to_data().to_vec::<f32>().unwrap();
+        let v = out.var.to_data().to_vec::<f32>().unwrap();
+        let expect = [1.0, 0.0, 2.0, 0.0];
+        for i in 0..4 {
+            assert!((m[i] - expect[i]).abs() < 1e-3, "mean {i}: {}", m[i]);
+            assert!(v[i] < 1e-3, "var {i}: {}", v[i]);
+        }
+    }
+
+    /// All propagated variances stay non-negative.
+    #[test]
+    fn variance_stays_nonnegative() {
+        let dev = <B as Backend>::Device::default();
+        let (mean, m) = fixture();
+        let w = Tensor::<B, 2>::random([5, 5], Distribution::Normal(0.0, 2.0), &dev);
+        let chain = propagate_relu(&propagate_linear(
+            &propagate_leaky_relu(&propagate_linear(&m, w.clone(), None), 0.1),
+            w,
+            None,
+        ));
+        let v = chain.var.to_data().to_vec::<f32>().unwrap();
+        assert!(v.iter().all(|x| *x >= 0.0), "negative variance present");
+        let _ = mean;
+    }
+
+    /// Cauchy ReLU gates the scale to zero where the location is negative.
+    #[test]
+    fn cauchy_relu_gates_scale() {
+        let dev = <B as Backend>::Device::default();
+        let loc = Tensor::<B, 2>::from_data(TensorData::new(vec![2.0f32, -3.0, 0.5], [1, 3]), &dev);
+        let scale = Tensor::<B, 2>::full([1, 3], 1.0, &dev);
+        let out = propagate_relu_cauchy(&Cauchy::new(loc, scale));
+        let s = out.scale.to_data().to_vec::<f32>().unwrap();
+        assert!(s[0] > 0.5, "active scale kept");
+        assert!(s[1] < 1e-6, "inactive scale gated to 0");
+    }
 }
