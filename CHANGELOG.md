@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-06-27
+
+### Changed
+
+- Full-covariance ReLU now uses the Wright et al. (2024) covariance series to
+  3rd order for the off-diagonal terms, replacing the first-order gate. The
+  output covariance is more accurate (validated against Monte Carlo; on a
+  2-layer MLP the full-covariance output std is unbiased vs a ~13% bias for
+  diagonal propagation).
+
+### Added
+
+- Property tests (proptest) on the reference propagation.
+- `full_covariance` and `cauchy_tails` examples.
+- CI workflow (fmt, clippy, tests, both feature sets).
+
 ## [0.3.0] - 2026-06-27
 
 ### Added
