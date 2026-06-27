@@ -1,0 +1,25 @@
+[package]
+name = "distprop"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Propagate mean + variance through neural-network layers for analytic uncertainty (assumed-density filtering)."
+publish = false
+
+[workspace]
+
+[features]
+default = []
+# Burn-tensor backend: differentiable, batched moment propagation.
+burn = ["dep:burn"]
+
+[dependencies]
+burn = { version = "0.20.0", default-features = false, features = ["std"], optional = true }
+
+[dev-dependencies]
+burn-ndarray = "0.20.0"
+propago = "0.2"
+
+[[example]]
+name = "gcn_uncertainty"
+required-features = ["burn"]
