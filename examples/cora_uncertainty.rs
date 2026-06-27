@@ -29,11 +29,14 @@ use burn::tensor::{activation, Int, Tensor, TensorData};
 use burn_ndarray::NdArray;
 
 use burn::nn::{Linear, LinearConfig};
-use momentprop::burn_sdp::{propagate_linear, propagate_matmul_left, propagate_relu, Moments};
+use momentprop::burn_sdp::{
+    propagate_linear, propagate_linear_bayes, propagate_matmul_left, propagate_relu, Moments,
+};
 
 const HIDDEN: usize = 16;
 const INPUT_STD: f64 = 0.1;
 const MC_SAMPLES: usize = 200;
+const LAPLACE_PRIOR_PREC: f64 = 1e-2;
 
 struct Graph {
     n: usize,
@@ -281,6 +284,76 @@ fn auroc(score: &[f64], positive: &[bool]) -> f64 {
     (sum_pos - (n_pos * (n_pos + 1)) as f64 / 2.0) / (n_pos as f64 * n_neg as f64)
 }
 
+/// Diagonal-Laplace EPISTEMIC per-node variance: estimate each weight's
+/// posterior variance from the empirical Fisher (sum of per-train-node squared
+/// gradients), then propagate that weight uncertainty with zero input noise.
+/// This is the "make it better" path -- weight uncertainty is epistemic, unlike
+/// the input-noise (aleatoric) signal `sdp_node_variance` computes.
+fn epistemic_node_variance<B: AutodiffBackend>(
+    model: &Gcn<B>,
+    x: &Tensor<B, 2>,
+    adj: &Tensor<B, 2>,
+    targets: &Tensor<B, 1, Int>,
+    train_idx: &[usize],
+    device: &B::Device,
+    prior_prec: f64,
+) -> Vec<f64> {
+    // Empirical Fisher diagonal for the two weight matrices.
+    let mut f1: Option<Tensor<B::InnerBackend, 2>> = None;
+    let mut f2: Option<Tensor<B::InnerBackend, 2>> = None;
+    for &node in train_idx {
+        let logits = model.forward(x.clone(), adj.clone());
+        let sel = Tensor::<B, 1, Int>::from_data(TensorData::new(vec![node as i32], [1]), device);
+        let nl = logits.select(0, sel.clone());
+        let nt = targets.clone().select(0, sel);
+        let loss = CrossEntropyLoss::new(None, device).forward(nl, nt);
+        let grads = loss.backward();
+        let g1 = model.lin1.weight.val().grad(&grads).unwrap();
+        let g2 = model.lin2.weight.val().grad(&grads).unwrap();
+        f1 = Some(match f1 {
+            None => g1.clone() * g1,
+            Some(a) => a + g1.clone() * g1,
+        });
+        f2 = Some(match f2 {
+            None => g2.clone() * g2,
+            Some(a) => a + g2.clone() * g2,
+        });
+    }
+    // Posterior variance = 1 / (prior precision + Fisher).
+    let wvar1 = f1.unwrap().add_scalar(prior_prec).recip();
+    let wvar2 = f2.unwrap().add_scalar(prior_prec).recip();
+    let wmean1 = model.lin1.weight.val().inner();
+    let wmean2 = model.lin2.weight.val().inner();
+    let zeros_like = |t: &Tensor<B::InnerBackend, 1>| t.clone().zeros_like();
+    let bias1 = model
+        .lin1
+        .bias
+        .as_ref()
+        .map(|b| (b.val().inner(), zeros_like(&b.val().inner())));
+    let bias2 = model
+        .lin2
+        .bias
+        .as_ref()
+        .map(|b| (b.val().inner(), zeros_like(&b.val().inner())));
+
+    // Propagate weight uncertainty with zero input noise (pure epistemic).
+    let xi = x.clone().inner();
+    let adji = adj.clone().inner();
+    let [n, _] = xi.dims();
+    let var0 = xi.clone().zeros_like();
+    let m0 = Moments::new(xi, var0);
+    let m1 = propagate_relu(&propagate_matmul_left(
+        adji.clone(),
+        &propagate_linear_bayes(&m0, wmean1, wvar1, bias1),
+    ));
+    let m2 = propagate_matmul_left(adji, &propagate_linear_bayes(&m1, wmean2, wvar2, bias2));
+    let [_, c] = m2.var.dims();
+    let v = m2.var.to_data().to_vec::<f32>().unwrap();
+    (0..n)
+        .map(|i| (0..c).map(|j| v[i * c + j] as f64).sum())
+        .collect()
+}
+
 fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) {
     let g = load_planetoid(dir, name).unwrap();
     let (train_idx, test_idx) = split(&g.labels, g.n_classes);
@@ -383,13 +456,9 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) {
     rand_u.iter_mut().for_each(|v| *v = v.fract());
 
     println!("accuracy vs coverage (abstain on most-uncertain):");
-    println!(
-        "  {:>9}  {:>10}  {:>10}",
-        "coverage", "sdp", "random"
-    );
+    println!("  {:>9}  {:>10}  {:>10}", "coverage", "sdp", "random");
     for &cov in &[1.0, 0.9, 0.8, 0.7, 0.6, 0.5] {
-        let a_sdp =
-            accuracy_at_coverage(&logits_v, &g.labels, &test_idx, &u_sdp, g.n_classes, cov);
+        let a_sdp = accuracy_at_coverage(&logits_v, &g.labels, &test_idx, &u_sdp, g.n_classes, cov);
         let a_rand =
             accuracy_at_coverage(&logits_v, &g.labels, &test_idx, &rand_u, g.n_classes, cov);
         println!("  {cov:>9.2}  {a_sdp:>10.4}  {a_rand:>10.4}");
@@ -400,13 +469,39 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) {
         .iter()
         .map(|&i| !argmax_correct(&logits_v, &g.labels, i, g.n_classes))
         .collect();
+    // Epistemic (weight-uncertainty) signal via diagonal Laplace.
+    let node_epi = epistemic_node_variance(
+        &model,
+        &x,
+        &adj,
+        &targets,
+        &train_idx,
+        &device,
+        LAPLACE_PRIOR_PREC,
+    );
+    let u_epi: Vec<f64> = test_idx.iter().map(|&i| node_epi[i]).collect();
+
     println!("\nmisclassification detection (AUROC of uncertainty vs error):");
-    println!("  SDP  AUROC = {:.4}  (one pass)", auroc(&u_sdp, &errors));
     println!(
-        "  MC   AUROC = {:.4}  ({MC_SAMPLES} samples)",
+        "  input-noise (aleatoric) AUROC = {:.4}",
+        auroc(&u_sdp, &errors)
+    );
+    println!(
+        "  weight-Laplace (epistemic) AUROC = {:.4}",
+        auroc(&u_epi, &errors)
+    );
+    println!(
+        "  MC input-noise AUROC = {:.4}  ({MC_SAMPLES} samples)",
         auroc(&u_mc, &errors)
     );
     println!("  (0.5 = uninformative, 1.0 = flags every wrong prediction)");
+
+    // Accuracy-coverage for the epistemic signal too.
+    println!("\nepistemic accuracy vs coverage (abstain on most-uncertain):");
+    for &cov in &[1.0, 0.9, 0.8, 0.7, 0.6, 0.5] {
+        let a = accuracy_at_coverage(&logits_v, &g.labels, &test_idx, &u_epi, g.n_classes, cov);
+        println!("  {cov:>9.2}  {a:>10.4}");
+    }
 
     let rho = spearman(&u_sdp, &u_mc);
     println!("\nSDP vs MC per-node uncertainty (test nodes): Spearman rho = {rho:.4}");
@@ -416,8 +511,7 @@ fn main() -> ExitCode {
     let arg = std::env::args().nth(1);
     let dir: PathBuf = match arg {
         Some(p) => PathBuf::from(p),
-        None => Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../propago/data/cora"),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../propago/data/cora"),
     };
     if !dir.join("cora.content").exists() {
         eprintln!(

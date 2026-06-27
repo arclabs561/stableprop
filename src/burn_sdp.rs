@@ -52,6 +52,35 @@ pub fn propagate_linear<B: Backend>(
     Moments { mean, var }
 }
 
+/// Propagate through `y = x @ W + b` where BOTH inputs and weights are uncertain
+/// (mean-field: all elements independent). This is the linear step of
+/// Probabilistic Backpropagation (Hernandez-Lobato 2015) / Deterministic
+/// Variational Inference (Wu 2019): the weight variance `w_var` is what turns
+/// input sensitivity into *epistemic* uncertainty. Reduces to
+/// [`propagate_linear`] when `w_var` is zero.
+///
+/// `var_out = mean_x^2 @ w_var  +  var_x @ mean_W^2  +  var_x @ w_var  +  b_var`
+/// (the first term is the new epistemic contribution, the second is the existing
+/// input-variance propagation, the third is the cross term).
+pub fn propagate_linear_bayes<B: Backend>(
+    m: &Moments<B>,
+    w_mean: Tensor<B, 2>,
+    w_var: Tensor<B, 2>,
+    bias: Option<(Tensor<B, 1>, Tensor<B, 1>)>,
+) -> Moments<B> {
+    let mut mean = m.mean.clone().matmul(w_mean.clone());
+    let wm2 = w_mean.clone() * w_mean;
+    let mx2 = m.mean.clone() * m.mean.clone();
+    let mut var =
+        mx2.matmul(w_var.clone()) + m.var.clone().matmul(wm2) + m.var.clone().matmul(w_var);
+    if let Some((bm, bv)) = bias {
+        let d = bm.dims()[0];
+        mean = mean + bm.reshape([1, d]);
+        var = var + bv.reshape([1, d]);
+    }
+    Moments { mean, var }
+}
+
 /// Propagate through left multiplication by a fixed matrix `y = a @ x`
 /// (e.g. a GCN message-passing step `A_hat @ H`).
 ///
