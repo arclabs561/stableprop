@@ -26,3 +26,7 @@ propago = "0.2"
 [[example]]
 name = "gcn_uncertainty"
 required-features = ["burn"]
+
+[[example]]
+name = "cora_uncertainty"
+required-features = ["burn"]
