@@ -52,8 +52,16 @@ name = "robust_training"
 required-features = ["burn"]
 
 [[example]]
+name = "full_covariance"
+required-features = ["burn"]
+
+[[example]]
 name = "misclassification_risk"
 required-features = ["burn"]
 
 [package.metadata.docs.rs]
 features = ["burn"]
+
+[[example]]
+name = "cauchy_tails"
+required-features = ["burn"]
