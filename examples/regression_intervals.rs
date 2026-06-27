@@ -3,14 +3,14 @@
 //!
 //! When a regression network's inputs carry known noise (sensor error, an
 //! upstream model's variance), you want output error bars. The usual way is
-//! Monte Carlo: push K noisy copies through and measure the spread. momentprop
+//! Monte Carlo: push K noisy copies through and measure the spread. stableprop
 //! gives the same mean and variance in ONE analytic pass. Unlike classification
 //! (where softmax confidence is a strong free baseline), regression has no such
-//! baseline -- MC or ensembles are the alternatives, and momentprop replaces
+//! baseline -- MC or ensembles are the alternatives, and stableprop replaces
 //! them cheaply.
 //!
 //! This demo trains an MLP regressor, then on a test set with known input noise
-//! compares momentprop's analytic (mean, std) against K-sample Monte Carlo:
+//! compares stableprop's analytic (mean, std) against K-sample Monte Carlo:
 //! agreement of the error bars, and empirical coverage of the 95% interval.
 //!
 //! Run: `cargo run --release --example regression_intervals --features burn`
@@ -24,7 +24,7 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{activation, Distribution, Tensor, TensorData};
 use burn_ndarray::NdArray;
 
-use momentprop::burn_sdp::{propagate_linear, propagate_relu, Moments};
+use stableprop::burn_sdp::{propagate_linear, propagate_relu, Moments};
 
 type Ad = Autodiff<NdArray<f32>>;
 type Nd = NdArray<f32>;
@@ -120,7 +120,7 @@ fn main() {
     let w2 = model.lin2.weight.val().inner();
     let b2 = model.lin2.bias.as_ref().map(|p| p.val().inner());
 
-    // momentprop: analytic (mean, var) in ONE pass.
+    // stableprop: analytic (mean, var) in ONE pass.
     // Heteroscedastic: each test point carries its own known input-noise std
     // (the realistic case -- different measurements have different uncertainty).
     let sigma = Tensor::<Nd, 2>::random([N_TEST, 1], Distribution::Uniform(0.05, 0.4), &idev);
@@ -186,5 +186,5 @@ fn main() {
     println!("  std agreement (Pearson r) = {r:.4}   (1.0 = identical error bars)");
     println!("  std mean ratio (mp / MC)  = {mean_ratio:.3}  (1.0 = unbiased magnitude)");
     println!("  95% interval coverage     = {coverage:.3}   (target ~0.95 = calibrated)");
-    println!("\ncost: momentprop = 1 forward pass, Monte Carlo = {MC_SAMPLES} passes");
+    println!("\ncost: stableprop = 1 forward pass, Monte Carlo = {MC_SAMPLES} passes");
 }

@@ -1,9 +1,9 @@
-//! Real-data calibration eval: does momentprop's analytic uncertainty actually
+//! Real-data calibration eval: does stableprop's analytic uncertainty actually
 //! flag the nodes a GCN gets wrong on Cora?
 //!
 //! Trains a 2-layer GCN on the Cora citation graph (Kipf & Welling 2017), then
 //! puts a Gaussian over the input features and propagates it through the trained
-//! net with momentprop to get a per-node predictive variance in one pass. The test
+//! net with stableprop to get a per-node predictive variance in one pass. The test
 //! that risks the claim: rank test nodes by that variance and **abstain on the
 //! most-uncertain ones** -- if the uncertainty is meaningful, accuracy on the
 //! retained nodes climbs above the random-abstention baseline. We also check that
@@ -29,7 +29,7 @@ use burn::tensor::{activation, Int, Tensor, TensorData};
 use burn_ndarray::NdArray;
 
 use burn::nn::{Linear, LinearConfig};
-use momentprop::burn_sdp::{
+use stableprop::burn_sdp::{
     propagate_linear, propagate_linear_bayes, propagate_matmul_left, propagate_relu, Moments,
 };
 

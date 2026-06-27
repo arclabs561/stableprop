@@ -1,4 +1,4 @@
-//! Cross-check momentprop's analytic moment propagation against Monte Carlo.
+//! Cross-check stableprop's analytic moment propagation against Monte Carlo.
 //!
 //! propagate_linear is exact and propagate_relu is the Frey-Hinton moment match;
 //! both should agree with the empirical moments of sampled Gaussians. MC is an
@@ -7,7 +7,7 @@
 //! (they check variance-reduction and one mean point, not the full mean+cov
 //! against samples). Fixed-seed Box-Muller so the statistical check is stable.
 
-use momentprop::{propagate_linear, propagate_relu, Moments};
+use stableprop::{propagate_linear, propagate_relu, Moments};
 
 struct Rng {
     s: u64,

@@ -1,7 +1,7 @@
 //! Analytic uncertainty on a propago GCN vs Monte-Carlo input-noise sampling.
 //!
 //! This deliberately risks the claim that diagonal Gaussian moment propagation
-//! (momentprop) matches the true output uncertainty. We build a 2-layer GCN
+//! (stableprop) matches the true output uncertainty. We build a 2-layer GCN
 //! (`GCNConv -> ReLU -> GCNConv`) from propago, put a Gaussian over the input
 //! node features, then compare two ways of getting the output variance:
 //!
@@ -18,7 +18,7 @@
 
 use burn::tensor::{backend::Backend, Distribution, Tensor, TensorData};
 use burn_ndarray::NdArray;
-use momentprop::burn_sdp::{propagate_linear, propagate_matmul_left, propagate_relu, Moments};
+use stableprop::burn_sdp::{propagate_linear, propagate_matmul_left, propagate_relu, Moments};
 use propago::GCNConv;
 
 type B = NdArray<f32>;
