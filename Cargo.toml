@@ -1,5 +1,5 @@
 [package]
-name = "distprop"
+name = "momentprop"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -17,6 +17,9 @@ burn = ["dep:burn"]
 burn = { version = "0.20.0", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
+# autodiff is needed by the cora_uncertainty example's training loop; cargo
+# unifies this with the optional `burn` dep when building momentprop's examples.
+burn = { version = "0.20.0", default-features = false, features = ["std", "autodiff"] }
 burn-ndarray = "0.20.0"
 propago = "0.2"
 
