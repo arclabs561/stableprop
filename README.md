@@ -40,6 +40,8 @@ let m2 = propagate_linear(&m1, w2, b2);
 
 See `examples/`:
 
+Full gallery with commands and captured output: [`examples/README.md`](examples/README.md).
+
 - `regression_intervals`: sampling-free error bars vs Monte Carlo (the flagship).
 - `conformal_intervals`: wrap the analytic std in split-conformal for a
   distribution-free coverage *guarantee* (the raw intervals are a heuristic scale;
