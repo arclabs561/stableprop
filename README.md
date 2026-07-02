@@ -25,7 +25,7 @@ honest niche is propagating *known input uncertainty* through regressors.
 
 ```toml
 [dependencies]
-stableprop = { version = "0.1", features = ["burn"] }
+stableprop = { version = "0.3", features = ["burn"] }
 ```
 
 ```rust
