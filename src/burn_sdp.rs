@@ -7,10 +7,12 @@
 //! assumption; ReLU uses Frey & Hinton (1999) moment matching. All ops are Burn
 //! tensor ops, so the propagation is differentiable and runs on any backend.
 //!
-//! Covariance is approximated as diagonal: cross-feature correlations introduced
-//! by a layer are dropped before the next layer. This is the cheap inference-time
-//! variant; the off-diagonal terms are what the full "stable distribution
-//! propagation" of Petersen et al. (ICLR 2024) keeps.
+//! The default [`Moments`] path approximates covariance as diagonal:
+//! cross-feature correlations introduced by a layer are dropped before the
+//! next layer. [`MomentsFull`] keeps the full covariance (the "stable
+//! distribution propagation" of Petersen et al., ICLR 2024) and [`Cauchy`]
+//! covers the heavy-tailed stable case; both cost more per layer than the
+//! diagonal path.
 
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};

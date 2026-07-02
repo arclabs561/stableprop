@@ -6,13 +6,14 @@
 //! post-ReLU mean and variance from the Gaussian CDF and PDF evaluated at
 //! `mu / sigma`.
 //!
-//! The ReLU step is the Frey & Hinton (1999) Gaussian moment-matching
-//! approximation, with off-diagonal covariance dropped (diagonal assumption).
-//! Keeping the full covariance and the heavy-tailed (Cauchy) case is the
-//! generalization of Petersen et al., "Uncertainty Quantification via Stable
-//! Distribution Propagation" (ICLR 2024), which this crate does not implement.
+//! The ReLU step in this module is the Frey & Hinton (1999) Gaussian
+//! moment-matching approximation, with off-diagonal covariance dropped
+//! (diagonal assumption). The full-covariance and heavy-tailed (Cauchy)
+//! cases, the generalization of Petersen et al., "Uncertainty Quantification
+//! via Stable Distribution Propagation" (ICLR 2024), live in [`burn_sdp`]
+//! (`MomentsFull` and `Cauchy`).
 //!
-//! The [`burn_sdp`] module (feature `burn`) provides the same propagation on
+//! The [`burn_sdp`] module (feature `burn`) provides the propagation on
 //! Burn tensors: batched, differentiable, and composable with Burn models.
 
 #[cfg(feature = "burn")]
