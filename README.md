@@ -12,8 +12,8 @@ input uncertainty**.
 ## What it's good for (and not)
 
 On an MLP regressor with known per-point input noise, the analytic error bars
-match a 200-sample Monte Carlo estimate (`Pearson r = 0.81` on the per-point
-std, magnitude ratio `0.96`, 90% interval coverage `0.90`) in **one** forward
+match a 200-sample Monte Carlo estimate (`Pearson r = 0.80` on the per-point
+std, magnitude ratio `1.06`, 95% interval coverage `0.93`) in **one** forward
 pass instead of 200. There is no softmax baseline for regression, so this is a
 real win over sampling.
 
