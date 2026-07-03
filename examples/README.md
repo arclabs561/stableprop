@@ -3,7 +3,7 @@
 Each example answers one question and is runnable from the repo root. Output
 excerpts below are real, captured from a run. All examples need the `burn`
 feature. `cora_uncertainty` is data-gated: if the Cora files are absent, it
-exits 0 and prints the fetch command for the sibling `propago` checkout.
+exits 0 and prints the fetch command for the sibling `ricci` checkout.
 
 ## Regression uncertainty
 
@@ -116,7 +116,7 @@ analytic misclassification-risk estimate under input noise std 0.25:
 
 ### `gcn_uncertainty`: does diagonal propagation track MC variance through a GCN?
 
-Builds a two-layer `propago` GCN, puts Gaussian noise on node features, and
+Builds a two-layer `ricci` GCN, puts Gaussian noise on node features, and
 compares analytic output variance with Monte Carlo.
 
 ```bash

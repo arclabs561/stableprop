@@ -9,7 +9,7 @@
 //! retained nodes climbs above the random-abstention baseline. We also check that
 //! the analytic ranking agrees with Monte-Carlo sampling (Spearman).
 //!
-//! Data is reused from propago's example (gitignored). Run:
+//! Data is reused from ricci's example (gitignored). Run:
 //! `cargo run --release --example cora_uncertainty --features burn`
 //! (optionally pass a path to a dir holding `cora.content` + `cora.cites`).
 
@@ -47,7 +47,7 @@ struct Graph {
     adj_norm: Vec<f32>,
 }
 
-/// LBC-format loader (same parser propago's cora example uses).
+/// LBC-format loader (same parser ricci's cora example uses).
 fn load_planetoid(dir: &Path, name: &str) -> std::io::Result<Graph> {
     let content = std::fs::read_to_string(dir.join(format!("{name}.content")))?;
     let cites = std::fs::read_to_string(dir.join(format!("{name}.cites")))?;
@@ -126,8 +126,8 @@ fn load_planetoid(dir: &Path, name: &str) -> std::io::Result<Graph> {
 }
 
 /// A GCN layer is `adj @ (x W + b)`; built from `burn::nn::Linear` so the model
-/// is trainable without depending on a specific propago version (the spike in
-/// `gcn_uncertainty.rs` exercises propago's `GCNConv` directly).
+/// is trainable without depending on a specific ricci version (the spike in
+/// `gcn_uncertainty.rs` exercises ricci's `GCNConv` directly).
 #[derive(Module, Debug)]
 struct Gcn<B: Backend> {
     lin1: Linear<B>,
@@ -616,11 +616,11 @@ fn main() -> ExitCode {
     let arg = std::env::args().nth(1);
     let dir: PathBuf = match arg {
         Some(p) => PathBuf::from(p),
-        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../propago/data/cora"),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../ricci/data/cora"),
     };
     if !dir.join("cora.content").exists() {
         eprintln!(
-            "cora data not found at {}\nfetch it via propago: (cd ../propago && ./scripts/fetch_cora.sh)",
+            "cora data not found at {}\nfetch it via ricci: (cd ../ricci && ./scripts/fetch_cora.sh)",
             dir.display()
         );
         return ExitCode::SUCCESS;

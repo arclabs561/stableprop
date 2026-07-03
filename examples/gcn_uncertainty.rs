@@ -1,8 +1,8 @@
-//! Analytic uncertainty on a propago GCN vs Monte-Carlo input-noise sampling.
+//! Analytic uncertainty on a ricci GCN vs Monte-Carlo input-noise sampling.
 //!
 //! This deliberately risks the claim that diagonal Gaussian moment propagation
 //! (stableprop) matches the true output uncertainty. We build a 2-layer GCN
-//! (`GCNConv -> ReLU -> GCNConv`) from propago, put a Gaussian over the input
+//! (`GCNConv -> ReLU -> GCNConv`) from ricci, put a Gaussian over the input
 //! node features, then compare two ways of getting the output variance:
 //!
 //! 1. SDP -- propagate (mean, var) analytically through the layers, one pass.
@@ -18,12 +18,12 @@
 
 use burn::tensor::{backend::Backend, Distribution, Tensor, TensorData};
 use burn_ndarray::NdArray;
-use propago::GCNConv;
+use ricci::GCNConv;
 use stableprop::burn_sdp::{propagate_linear, propagate_matmul_left, propagate_relu, Moments};
 
 type B = NdArray<f32>;
 
-/// Pull `(weight, bias)` tensors out of a propago GCN layer's linear.
+/// Pull `(weight, bias)` tensors out of a ricci GCN layer's linear.
 fn lin_params(layer: &GCNConv<B>) -> (Tensor<B, 2>, Option<Tensor<B, 1>>) {
     let w = layer.linear().weight.val();
     let b = layer.linear().bias.as_ref().map(|p| p.val());
