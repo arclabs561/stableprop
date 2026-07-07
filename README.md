@@ -1,7 +1,6 @@
 # stableprop
 
-Propagate a distribution through a neural network analytically, to get output
-uncertainty in one forward pass instead of Monte Carlo sampling.
+Propagate uncertainty through neural networks analytically.
 
 Given a Gaussian (or Cauchy) over a network's inputs, `stableprop` pushes its
 moments through linear, ReLU, leaky-ReLU, and GCN-adjacency layers and returns
@@ -15,7 +14,7 @@ On an MLP regressor with known per-point input noise, the analytic error bars
 match a 200-sample Monte Carlo estimate (`Pearson r = 0.80` on the per-point
 std, magnitude ratio `1.06`, 95% interval coverage `0.93`) in **one** forward
 pass instead of 200. There is no softmax baseline for regression, so this is a
-real win over sampling.
+direct replacement for sampling in that setting.
 
 It is **not** a classification uncertainty / OOD detector: for that, the model's
 own softmax confidence is a strong free baseline that this does not beat. The
@@ -42,7 +41,7 @@ See `examples/`:
 
 Full gallery with commands and captured output: [`examples/README.md`](examples/README.md).
 
-- `regression_intervals`: sampling-free error bars vs Monte Carlo (the flagship).
+- `regression_intervals`: sampling-free error bars vs Monte Carlo.
 - `conformal_intervals`: wrap the analytic std in split-conformal for a
   distribution-free coverage *guarantee* (the raw intervals are a heuristic scale;
   conformal makes them calibrated).
