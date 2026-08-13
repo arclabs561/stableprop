@@ -7,7 +7,7 @@
 //! (they check variance-reduction and one mean point, not the full mean+cov
 //! against samples). Fixed-seed Box-Muller so the statistical check is stable.
 
-use stableprop::{propagate_linear, propagate_relu, Moments};
+use stableprop::{propagate_linear, propagate_relu, propagate_sequential, Layer, Moments};
 
 struct Rng {
     s: u64,
@@ -126,4 +126,72 @@ fn relu_moments_match_monte_carlo() {
             emp_var
         );
     }
+}
+
+#[test]
+fn chained_linear_covariance_is_exact() {
+    let input = Moments {
+        mean: vec![0.5, -1.0],
+        cov: vec![vec![0.8, 0.3], vec![0.3, 0.5]],
+    };
+    let w1 = vec![vec![1.0, 2.0], vec![-0.5, 1.0], vec![0.25, -1.5]];
+    let b1 = vec![0.2, -0.1, 0.4];
+    let w2 = vec![vec![2.0, -1.0, 0.5], vec![0.3, 0.7, -2.0]];
+    let b2 = vec![-0.3, 0.8];
+
+    let chained = propagate_linear(&propagate_linear(&input, &w1, &b1), &w2, &b2);
+    let collapsed_w = vec![vec![2.625, 2.25], vec![-0.55, 4.3]];
+    let collapsed_b = vec![0.4, -0.01];
+    let collapsed = propagate_linear(&input, &collapsed_w, &collapsed_b);
+
+    for i in 0..2 {
+        assert!((chained.mean[i] - collapsed.mean[i]).abs() < 1e-12);
+        for j in 0..2 {
+            assert!((chained.cov[i][j] - collapsed.cov[i][j]).abs() < 1e-12);
+        }
+    }
+}
+
+#[test]
+fn chained_nonlinear_moments_track_seeded_monte_carlo() {
+    let layers = vec![
+        Layer::Linear {
+            weight: vec![vec![0.8, -0.2], vec![0.3, 0.7]],
+            bias: vec![0.4, 0.2],
+        },
+        Layer::ReLU,
+        Layer::Linear {
+            weight: vec![vec![0.6, 0.4], vec![-0.2, 0.5]],
+            bias: vec![0.1, 0.3],
+        },
+        Layer::ReLU,
+        Layer::Linear {
+            weight: vec![vec![1.0, -0.4]],
+            bias: vec![0.2],
+        },
+    ];
+    let input_mean = [0.5, -0.2];
+    let input_std = [0.4, 0.3];
+    let analytic = propagate_sequential(&layers, &input_mean, &input_std);
+
+    let mut rng = Rng::new(0xC1A1_5EED);
+    let samples = 500_000;
+    let (mut sum, mut sumsq) = (0.0, 0.0);
+    for _ in 0..samples {
+        let x0 = input_mean[0] + input_std[0] * rng.normal();
+        let x1 = input_mean[1] + input_std[1] * rng.normal();
+        let h0 = (0.8 * x0 - 0.2 * x1 + 0.4).max(0.0);
+        let h1 = (0.3 * x0 + 0.7 * x1 + 0.2).max(0.0);
+        let z0 = (0.6 * h0 + 0.4 * h1 + 0.1).max(0.0);
+        let z1 = (-0.2 * h0 + 0.5 * h1 + 0.3).max(0.0);
+        let y = z0 - 0.4 * z1 + 0.2;
+        sum += y;
+        sumsq += y * y;
+    }
+    let n = samples as f64;
+    let mc_mean = sum / n;
+    let mc_var = sumsq / n - mc_mean * mc_mean;
+
+    assert!((analytic.mean[0] - mc_mean).abs() < 0.02);
+    assert!((analytic.cov[0][0] - mc_var).abs() < 0.02);
 }

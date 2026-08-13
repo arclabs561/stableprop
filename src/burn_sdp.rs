@@ -169,13 +169,27 @@ pub fn propagate_leaky_relu<B: Backend>(m: &Moments<B>, alpha: f64) -> Moments<B
 /// `var = skip.var + branch.var`.
 ///
 /// This IGNORES the skip-branch covariance (the branch is a function of the
-/// skip's input, so they are correlated). It is accurate when the branch is
-/// small relative to the skip (the usual residual-block regime) and approximate
-/// otherwise. A common simplification for residual networks.
+/// skip's input, so they are correlated). Use
+/// [`propagate_residual_add_correlated`] when that covariance is available.
 pub fn propagate_residual_add<B: Backend>(skip: &Moments<B>, branch: &Moments<B>) -> Moments<B> {
     Moments {
         mean: skip.mean.clone() + branch.mean.clone(),
         var: skip.var.clone() + branch.var.clone(),
+    }
+}
+
+/// Combine `y = skip + branch` with the diagonal skip-branch covariance.
+///
+/// `skip_branch_cov[i]` is `Cov(skip[i], branch[i])`, giving the exact marginal
+/// variance `Var(y[i]) = Var(skip[i]) + Var(branch[i]) + 2 Cov(skip[i], branch[i])`.
+pub fn propagate_residual_add_correlated<B: Backend>(
+    skip: &Moments<B>,
+    branch: &Moments<B>,
+    skip_branch_cov: Tensor<B, 2>,
+) -> Moments<B> {
+    Moments {
+        mean: skip.mean.clone() + branch.mean.clone(),
+        var: skip.var.clone() + branch.var.clone() + skip_branch_cov.mul_scalar(2.0),
     }
 }
 
@@ -347,6 +361,10 @@ impl<B: Backend> Cauchy<B> {
     /// `scale * tan(pi p / 2)` (e.g. p=0.9 -> scale * 6.31). Far wider than the
     /// Gaussian `1.64 * sigma` -- the heavy-tail signature.
     pub fn interval_halfwidth(&self, p: f64) -> Tensor<B, 2> {
+        assert!(
+            p.is_finite() && (0.0..1.0).contains(&p),
+            "probability mass must be finite and in [0, 1)"
+        );
         self.scale.clone().mul_scalar((PI * p / 2.0).tan())
     }
 }
@@ -1043,6 +1061,32 @@ mod tests {
         );
         close(&r.mean, &(m1 + m2), 1e-5);
         close(&r.var, &(v1 + v2), 1e-5);
+    }
+
+    #[test]
+    fn correlated_residual_add_includes_cross_covariance() {
+        let dev = <B as Backend>::Device::default();
+        let mean = Tensor::<B, 2>::from_data(TensorData::new(vec![1.0f32, -2.0], [1, 2]), &dev);
+        let var = Tensor::<B, 2>::from_data(TensorData::new(vec![0.5f32, 2.0], [1, 2]), &dev);
+        let skip = Moments::new(mean.clone(), var.clone());
+        let branch = Moments::new(mean, var.clone());
+
+        // branch == skip, so Cov(skip, branch) == Var(skip) and
+        // Var(skip + branch) == 4 Var(skip).
+        let out = propagate_residual_add_correlated(&skip, &branch, var);
+
+        let out_mean = out.mean.to_data().to_vec::<f32>().unwrap();
+        let out_var = out.var.to_data().to_vec::<f32>().unwrap();
+        assert_eq!(out_mean, vec![2.0, -4.0]);
+        assert_eq!(out_var, vec![2.0, 8.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "probability mass must be finite and in [0, 1)")]
+    fn cauchy_interval_rejects_invalid_probability_mass() {
+        let dev = <B as Backend>::Device::default();
+        let c = Cauchy::<B>::new(Tensor::zeros([1, 1], &dev), Tensor::ones([1, 1], &dev));
+        let _ = c.interval_halfwidth(1.0);
     }
 
     /// Full post-ReLU covariance (diagonal AND off-diagonal) must match Monte
