@@ -27,10 +27,12 @@ sampling-free error bars vs 200-sample Monte Carlo:
 cost: stableprop = 1 forward pass, Monte Carlo = 200 passes
 ```
 
-### `conformal_intervals`: can the analytic scale get distribution-free coverage?
+### `conformal_intervals`: can the analytic scale adapt conformal intervals?
 
-Wraps stableprop's per-point standard deviation in split conformal prediction
-and compares raw, adaptive conformal, and constant-width conformal intervals.
+Uses stableprop's per-point standard deviation as a split-conformal scale and
+compares raw, adaptive conformal, and constant-width conformal intervals. Under
+exchangeability, split conformal targets marginal coverage over repeated
+calibration and test samples; one finite test split need not equal the target.
 
 ```bash
 cargo run --release --features burn --example conformal_intervals
@@ -43,7 +45,7 @@ target coverage = 0.90
   conformalized stableprop (adaptive)    0.877      0.792
   constant-width conformal              0.905      0.792
 
-raw is miscalibrated; both conformal methods hit the target with a guarantee.
+raw is miscalibrated in this run; the conformal intervals are calibrated from held-out scores.
 ```
 
 ### `robust_training`: can propagated variance be part of the training loss?

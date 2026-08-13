@@ -10,11 +10,11 @@ input uncertainty**.
 
 ## What it's good for (and not)
 
-On an MLP regressor with known per-point input noise, the analytic error bars
-match a 200-sample Monte Carlo estimate (`Pearson r = 0.80` on the per-point
-std, magnitude ratio `1.06`, 95% interval coverage `0.93`) in **one** forward
-pass instead of 200. There is no softmax baseline for regression, so this is a
-direct replacement for sampling in that setting.
+In the seeded synthetic MLP example, the analytic error bars agree with a
+200-sample Monte Carlo estimate (`Pearson r = 0.80` on per-point standard
+deviation, mean magnitude ratio `1.06`, empirical 95% interval coverage
+`0.93`) using one propagated forward pass instead of 200 sampled passes. This
+is one comparison, not a general accuracy or calibration result.
 
 It is **not** a classification uncertainty / OOD detector: for that, the model's
 own softmax confidence is a strong free baseline that this does not beat. The
@@ -42,9 +42,9 @@ See `examples/`:
 Full gallery with commands and captured output: [`examples/README.md`](examples/README.md).
 
 - `regression_intervals`: sampling-free error bars vs Monte Carlo.
-- `conformal_intervals`: wrap the analytic std in split-conformal for a
-  distribution-free coverage *guarantee* (the raw intervals are a heuristic scale;
-  conformal makes them calibrated).
+- `conformal_intervals`: use the analytic standard deviation as a split-conformal
+  scale. Under exchangeability, this targets finite-sample marginal coverage;
+  realized coverage on a particular test split can differ.
 - `robust_training`: train *with* the differentiable propagated variance to
   reduce error under input noise (shared-init A/B vs plain MSE).
 - `misclassification_risk`: full-covariance propagation of input noise into an
@@ -57,17 +57,18 @@ Full gallery with commands and captured output: [`examples/README.md`](examples/
 
 - Diagonal Gaussian moments (`Moments`): exact linear, Frey-Hinton ReLU,
   leaky-ReLU, 2-D convolution, GCN-adjacency, residual-add.
-- Full covariance (`MomentsFull`): keeps the cross-feature correlations a layer
-  introduces; more accurate than diagonal (validated against Monte Carlo). The
-  ReLU uses exact diagonal moments with a smooth `Phi(alpha)` gate on the
-  off-diagonal, which avoids the hard-gate decision-boundary brittleness of the
-  local-linearization method it is based on.
+- Full covariance (`MomentsFull`): keeps cross-feature correlations through
+  affine and ReLU layers. The ReLU uses exact univariate moments on the diagonal
+  and a truncated Wright-series calculation for off-diagonal covariance; tests
+  compare both parts with Monte Carlo on correlated Gaussian inputs.
 - Weight uncertainty (`propagate_linear_bayes`): epistemic propagation in the
   style of Probabilistic Backpropagation / Deterministic Variational Inference.
 - Cauchy (`Cauchy`): the heavy-tailed stable distribution (no moments; location
   and scale are propagated), for heavy-tailed robustness.
 
-Every propagation rule has a Monte-Carlo cross-check in the test suite.
+Tests use closed-form identities, invariants, property checks, and Monte Carlo
+oracles for the main Gaussian affine and activation paths. The examples provide
+additional empirical comparisons for full networks.
 
 ## Background
 
@@ -80,8 +81,9 @@ for the Gaussian/Cauchy stable-distribution framing.
 ## Roadmap
 
 Attention layers are not yet implemented (moments through softmax and uncertain
-query-key products are a research problem, not a clean addition). The residual-add
-is the independence approximation (it ignores the skip-branch covariance). The
+query-key products are a research problem, not a clean addition). The default
+residual-add assumes independent branches; `propagate_residual_add_correlated`
+accepts diagonal skip-branch covariance when it is available. The
 misclassification-risk estimate is an estimate, not a sound certificate; rigorous
 certified bounds would need interval / Lipschitz methods.
 
