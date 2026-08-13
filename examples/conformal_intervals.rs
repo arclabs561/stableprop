@@ -1,16 +1,17 @@
-//! Guaranteed coverage: conformalize stableprop's analytic error bars.
+//! Conformalize stableprop's analytic error bars.
 //!
 //! stableprop's propagated std is a *heuristic* uncertainty scale -- accurate as
 //! a relative signal, but not calibrated to real residuals (we measured ~0.90
 //! coverage where 0.95 was wanted). Split-conformal prediction fixes that: using
 //! stableprop's per-point std as the normalizer, it produces intervals with a
-//! distribution-free coverage GUARANTEE, while staying adaptive (wider where
-//! stableprop says the input is more uncertain).
+//! finite-sample marginal coverage under exchangeability, while staying adaptive
+//! (wider where stableprop says the input is more uncertain).
 //!
 //! This trains a regressor, then on a held-out calibration set computes the
 //! conformal quantile of normalized residuals `|y - y_hat| / sigma`, and reports
 //! test coverage for: raw stableprop intervals, conformalized (adaptive), and
-//! constant-width conformal. The conformalized ones must hit the target.
+//! constant-width conformal. Coverage on one finite test split can differ from
+//! the target.
 //!
 //! Run: `cargo run --release --example conformal_intervals --features burn`
 
@@ -174,6 +175,8 @@ fn main() {
         "  {:<34} {:>8.3} {:>10.3}",
         "constant-width conformal", const_cov, const_w
     );
-    println!("\nraw is miscalibrated; both conformal methods hit the target with a guarantee.");
+    println!(
+        "\nraw is miscalibrated in this run; conformal intervals use held-out calibration scores."
+    );
     println!("the conformalized-stableprop width adapts per point (stableprop's sigma), the constant one does not.");
 }

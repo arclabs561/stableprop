@@ -59,8 +59,9 @@ Full gallery with commands and captured output: [`examples/README.md`](examples/
   leaky-ReLU, 2-D convolution, GCN-adjacency, residual-add.
 - Full covariance (`MomentsFull`): keeps cross-feature correlations through
   affine and ReLU layers. The ReLU uses exact univariate moments on the diagonal
-  and a truncated Wright-series calculation for off-diagonal covariance; tests
-  compare both parts with Monte Carlo on correlated Gaussian inputs.
+  and a third-order truncated Wright-series calculation for off-diagonal
+  covariance; tests compare both parts with Monte Carlo on correlated Gaussian
+  inputs.
 - Weight uncertainty (`propagate_linear_bayes`): epistemic propagation in the
   style of Probabilistic Backpropagation / Deterministic Variational Inference.
 - Cauchy (`Cauchy`): the heavy-tailed stable distribution (no moments; location

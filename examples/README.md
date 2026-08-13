@@ -45,7 +45,7 @@ target coverage = 0.90
   conformalized stableprop (adaptive)    0.877      0.792
   constant-width conformal              0.905      0.792
 
-raw is miscalibrated in this run; the conformal intervals are calibrated from held-out scores.
+raw is miscalibrated in this run; the conformal intervals use held-out calibration scores.
 ```
 
 ### `robust_training`: can propagated variance be part of the training loss?
