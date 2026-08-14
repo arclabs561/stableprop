@@ -10,9 +10,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Full-covariance ReLU now uses the Wright et al. (2024) covariance series to
   3rd order for the off-diagonal terms, replacing the first-order gate. The
-  output covariance is more accurate (validated against Monte Carlo; on a
-  2-layer MLP the full-covariance output std is unbiased vs a ~13% bias for
-  diagonal propagation).
+  implementation is checked against Monte Carlo; in the recorded two-layer MLP
+  example, the mean output-standard-deviation ratio is 1.003 for full
+  covariance and 1.120 for diagonal propagation.
 
 ### Added
 
@@ -33,7 +33,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `propagate_leaky_relu`: exact Gaussian moments through leaky ReLU.
 - `propagate_residual_add`: residual skip + branch combination (independence
-  approximation; exact when the branch is small relative to the skip).
+  approximation; skip-branch covariance is not represented by this API).
 - `robust_training` example: training with the differentiable propagated variance
   as a loss term, reducing error under input noise.
 - `misclassification_risk` example: full-covariance propagation of input noise
@@ -46,7 +46,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Diagonal Gaussian moment propagation: linear, ReLU (Frey-Hinton), GCN-adjacency.
 - Full-covariance propagation (`MomentsFull`): exact linear, smooth-gated ReLU;
-  more accurate than diagonal, validated against Monte Carlo.
+  compared with diagonal propagation and Monte Carlo in tests.
 - Weight-uncertainty (Bayesian) linear propagation (`propagate_linear_bayes`).
 - Cauchy stable-distribution propagation (`Cauchy`).
 - Examples: `regression_intervals`, `conformal_intervals`, `cora_uncertainty`,

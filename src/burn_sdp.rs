@@ -222,8 +222,8 @@ fn eye<B: Backend>(d: usize, device: &B::Device) -> Tensor<B, 2> {
 /// Mean and FULL covariance of a batch of `n` independent Gaussians.
 ///
 /// `mean` is `[n, d]`, `cov` is `[n, d, d]`. Unlike [`Moments`], this keeps the
-/// cross-feature correlations a layer introduces, which is the accuracy diagonal
-/// propagation drops (Petersen et al., ICLR 2024). Cost is `O(n d^2)` memory and
+/// cross-feature correlations that diagonal propagation drops (Petersen et al.,
+/// ICLR 2024). Cost is `O(n d^2)` memory and
 /// `O(n d^3)` per linear layer, so it suits small-to-medium feature dimensions.
 #[derive(Clone, Debug)]
 pub struct MomentsFull<B: Backend> {
@@ -342,10 +342,9 @@ pub fn propagate_relu_full<B: Backend>(m: &MomentsFull<B>) -> MomentsFull<B> {
 ///
 /// Cauchy is the heavy-tailed stable distribution. It has NO mean or variance
 /// (both integrals diverge), so we propagate its location (median) and scale
-/// (half-width) rather than moments. The heavy tails keep predictions
-/// appropriately uncertain far from the training data, which is the basis of the
-/// Cauchy mode of Petersen et al. (2024) for OOD robustness. Like Gaussians,
-/// Cauchys are closed under linear maps, so the linear step is exact.
+/// (half-width) rather than moments. This is the Cauchy mode of Petersen et al.
+/// (2024). Like Gaussians, Cauchys are closed under linear maps, so the linear
+/// step is exact.
 #[derive(Clone, Debug)]
 pub struct Cauchy<B: Backend> {
     pub location: Tensor<B, 2>,

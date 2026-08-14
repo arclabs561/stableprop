@@ -1,13 +1,14 @@
 # stableprop examples
 
 Each example answers one question and is runnable from the repo root. Output
-excerpts below are real, captured from a run. All examples need the `burn`
-feature. `cora_uncertainty` is data-gated: if the Cora files are absent, it
-exits 0 and prints the fetch command for the sibling `ricci` checkout.
+excerpts below are captured runs, not reproducibility targets; training
+initialization and sampling can change the numbers. All examples need the
+`burn` feature. `cora_uncertainty` is data-gated: if the Cora files are absent,
+it exits 0 and prints the fetch command for the sibling `ricci` checkout.
 
 ## Regression uncertainty
 
-### `regression_intervals`: can analytic error bars replace Monte Carlo?
+### `regression_intervals`: how do analytic error bars compare with Monte Carlo?
 
 Trains an MLP regressor, propagates known input variance through it, and compares
 the analytic output standard deviation against 200-sample Monte Carlo.
@@ -15,17 +16,8 @@ the analytic output standard deviation against 200-sample Monte Carlo.
 ```bash
 cargo run --release --features burn --example regression_intervals
 ```
-```text
-training MLP regressor (3000 samples, 800 epochs)...
-train RMSE: 0.2088
-
-sampling-free error bars vs 200-sample Monte Carlo:
-  std agreement (Pearson r) = 0.8023   (1.0 = identical error bars)
-  std mean ratio (mp / MC)  = 1.063  (1.0 = unbiased magnitude)
-  95% interval coverage     = 0.929   (target ~0.95 = calibrated)
-
-cost: stableprop = 1 forward pass, Monte Carlo = 200 passes
-```
+The example prints training RMSE, agreement and mean-ratio diagnostics against
+Monte Carlo, and empirical interval coverage. Exact values vary between runs.
 
 ### `conformal_intervals`: can the analytic scale adapt conformal intervals?
 

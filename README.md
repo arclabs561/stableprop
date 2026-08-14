@@ -4,17 +4,15 @@ Propagate uncertainty through neural networks analytically.
 
 Given a Gaussian (or Cauchy) over a network's inputs, `stableprop` pushes its
 moments through linear, ReLU, leaky-ReLU, and GCN-adjacency layers and returns
-the output mean and (co)variance. It targets the case where Monte Carlo or
-ensembles are the only alternative: **regression / surrogate models with known
-input uncertainty**.
+the output mean and (co)variance. It targets regression and surrogate models
+with known input uncertainty, where sampling is otherwise a common baseline.
 
 ## What it's good for (and not)
 
-In the seeded synthetic MLP example, the analytic error bars agree with a
-200-sample Monte Carlo estimate (`Pearson r = 0.80` on per-point standard
-deviation, mean magnitude ratio `1.06`, empirical 95% interval coverage
-`0.93`) using one propagated forward pass instead of 200 sampled passes. This
-is one comparison, not a general accuracy or calibration result.
+The synthetic MLP example compares analytic error bars with a 200-sample Monte
+Carlo estimate using one propagated forward pass instead of 200 sampled passes.
+Training initialization and Monte Carlo draws vary between runs; this is a
+demonstration, not an accuracy or calibration result.
 
 It is **not** a classification uncertainty / OOD detector: for that, the model's
 own softmax confidence is a strong free baseline that this does not beat. The
@@ -48,10 +46,10 @@ Full gallery with commands and captured output: [`examples/README.md`](examples/
 - `robust_training`: train *with* the differentiable propagated variance to
   reduce error under input noise (shared-init A/B vs plain MSE).
 - `misclassification_risk`: full-covariance propagation of input noise into an
-  analytic estimate of a classifier's error rate (tracks Monte Carlo closely;
-  an estimate, not a guaranteed certificate).
+  analytic estimate of a classifier's error rate, compared with Monte Carlo in
+  the example (not a guaranteed certificate).
 - `cora_uncertainty`: honest evidence on classification, where the method is
-  dominated by the softmax baseline.
+  weaker than the softmax baseline in the recorded run.
 
 ## What it propagates
 
@@ -64,8 +62,8 @@ Full gallery with commands and captured output: [`examples/README.md`](examples/
   inputs.
 - Weight uncertainty (`propagate_linear_bayes`): epistemic propagation in the
   style of Probabilistic Backpropagation / Deterministic Variational Inference.
-- Cauchy (`Cauchy`): the heavy-tailed stable distribution (no moments; location
-  and scale are propagated), for heavy-tailed robustness.
+- Cauchy (`Cauchy`): propagates location and scale for a heavy-tailed stable
+  distribution, which has no finite moments.
 
 Tests use closed-form identities, invariants, property checks, and Monte Carlo
 oracles for the main Gaussian affine and activation paths. The examples provide
