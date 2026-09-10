@@ -78,3 +78,11 @@ required-features = ["burn"]
 [[example]]
 name = "uncertainty_sources"
 required-features = ["burn"]
+
+[[example]]
+name = "active_selection"
+required-features = ["burn"]
+
+[[example]]
+name = "correlated_residual"
+required-features = ["burn"]

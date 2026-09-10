@@ -101,8 +101,16 @@ Uncertain-weight propagation generalizes deterministic weights. Setting
 weight and bias variances to zero recovers the diagonal deterministic affine
 rule. PBP and DVI additionally learn distributions over weights. Likewise,
 `propagate_residual_add_correlated` generalizes the independent-add helper when
-the caller supplies the cross-covariance; it does not derive that covariance
-for an arbitrary residual block.
+the caller supplies the cross-covariance. The affine and ReLU cross-covariance
+helpers derive it through supported branches, as in
+[`correlated_residual`](../examples/correlated_residual.rs).
+
+For jointly Gaussian vectors `U, V`, Gaussian integration by parts gives
+`Cov(U, ReLU(V)) = Cov(U, V) diag(Phi(mean_V / std_V))`. Unlike covariance
+between two rectified variables, this cross-covariance needs only univariate
+Gaussian CDFs. The identity is exact at that Gaussian layer, apart from numerical
+tail handling. ReLU makes the joint distribution non-Gaussian; subsequent
+affine transport stays exact, but another Gaussian ReLU step is an approximation.
 
 ## Efficiency and accuracy
 
@@ -124,6 +132,16 @@ weights and correlation signs. More covariance terms do not ensure better
 network-level accuracy: Gaussian closure and series truncation are separate
 errors. Exact bivariate Gaussian ReLU formulas can remove the latter while
 retaining the former, at the cost of additional numerical primitives.
+
+Strong correlation can make truncation matter to a decision. For two
+zero-mean, unit-variance Gaussian inputs with correlation one, the rectified
+covariance is about 0.34085; the current series gives 0.32958. Subtracting
+those identical rectified outputs should give zero variance, but combining
+the truncated cross-term with exact marginal variances gives about 0.02254.
+The [closed-form reference test](../tests/relu_covariance_reference.rs) checks
+this limitation across positive and negative correlations.
+For decisions driven by cancellation between nearly identical ReLU outputs,
+compare against Monte Carlo or exact bivariate moments.
 
 Independent Monte Carlo mean estimates have standard error proportional to
 `1 / sqrt(samples)` when variance is finite. Cauchy means do not satisfy that
@@ -214,7 +232,7 @@ example uses held-out labels to calibrate a propagated scale.
 | Sensor-noise propagation through a regressor | Gaussian moment estimates with diagonal or full covariance | Compare output means, variance error, coverage, and runtime against Monte Carlo. Coverage of noisy model outputs is different from coverage of observed labels. |
 | Calibrated regression intervals | A per-input scale for the `conformal_intervals` example | Held-out calibration and test splits; interval width and coverage. [Split conformal](https://arxiv.org/abs/2107.07511) assumes exchangeability and targets marginal coverage. |
 | Embedding stability | Differentiable variance penalty alongside [tuplet](https://github.com/arclabs561/tuplet)'s contrastive loss | Shared initialization, held-out examples, shared perturbations, and downstream accuracy with and without noise. A penalty can also erase useful signal. |
-| Learned dynamics and state estimation | Affine/activation covariance primitives | A filtering or control system also needs process noise and input-output cross-covariance. [Kuang & Lin's filtering and smoothing study](https://arxiv.org/abs/2511.09016), revised May 2026, constructs those joint distributions and evaluates Lorenz/Wiener systems and feedback control. It argues for scoring the uncertainty as well as RMSE. |
+| Learned dynamics and state estimation | Marginal and cross-covariance transport through affine/ReLU layers | A filtering or control system also needs joint-state bookkeeping, process and observation noise, and conditioning. [Kuang & Lin's filtering and smoothing study](https://arxiv.org/abs/2511.09016), revised May 2026, constructs those joint distributions and evaluates Lorenz/Wiener systems and feedback control. It argues for scoring the uncertainty as well as RMSE. |
 | GCN or classifier uncertainty | Input-noise propagation and experimental risk/ranking examples | Node correlations, calibration, and suitable softmax/MC baselines. A synthetic graph or one Cora split does not establish general OOD performance. |
 
 For a first use, run

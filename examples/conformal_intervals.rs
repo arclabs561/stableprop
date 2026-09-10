@@ -3,10 +3,9 @@
 //! stableprop's propagated std is a chosen Gaussian feature-noise sensitivity
 //! normalizer, not a calibrated residual model. This synthetic generator adds
 //! label noise but does not simulate noisy observed features. Split-conformal
-//! prediction can calibrate the normalizer: using
-//! stableprop's per-point std as the normalizer, it produces intervals with a
-//! finite-sample marginal coverage under exchangeability, while staying adaptive
-//! (wider where stableprop says the input is more uncertain).
+//! prediction calibrates intervals scaled by that per-point std. It gives
+//! finite-sample marginal coverage under exchangeability, with wider intervals
+//! where the model output is more sensitive to the chosen feature noise.
 //!
 //! This trains a regressor, then on a held-out calibration set computes the
 //! conformal quantile of normalized residuals `|y - y_hat| / sigma`, and reports

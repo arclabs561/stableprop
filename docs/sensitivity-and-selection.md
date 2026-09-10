@@ -59,6 +59,14 @@ squared disagreement under the *same Gaussian feature-noise distribution*.
 Only then test whether selecting by that score improves learning. Agreement
 with Monte Carlo establishes the uncertainty calculation, not the selector.
 
+For classification logits, remove the common shift before measuring
+disagreement. With `P = I - 11^T / K` for `K` classes, the corresponding score
+is `2 trace(P Cov(Y | x) P)`, where `1` is the length-`K` all-ones column
+vector. Adding the same random offset to every logit
+changes raw logit variance without changing softmax probabilities or the winner.
+The [`active_selection`](../examples/active_selection.rs) experiment uses this
+centered score for both analytic propagation and sampled perturbations.
+
 ## When posterior variance ranks Gaussian information gain
 
 For a scalar Gaussian observation with independent noise variance `v_noise`
@@ -214,21 +222,33 @@ selection.[^noise] A consistency or relevance filter is another hypothesis to
 ablate; agreement with the model's original prediction is not proof that a
 transformation preserves the true label.
 
-These checks would justify an experimental selector. Until then, propagated
-variance is a diagnostic or regularizer with a defined noise model.
+The [`active_selection`](../examples/active_selection.rs) example implements
+the four basic policies on a fixed two-class synthetic pool. It holds the
+training recipe and evaluation noise fixed, refits from shared initial weights,
+and reports learning curves over three seeds without a variance penalty.
+In the reference run at 96 labels, mean unperturbed accuracy was 0.992 for entropy,
+0.965 for random, 0.944 for analytic disagreement, and 0.965 for sampled
+disagreement. Agreement between the two disagreement scores did not make them
+better selectors. The [example guide](../examples/README.md#active-selection)
+describes the controls and timing limits.
+
+This is a small acquisition study, not a validation on noisy pools, retrieval
+tasks, or real labeling costs. Diversity baselines and the failure cases above
+remain necessary before recommending the score for a new application.
 
 ## Extensions worth testing
 
 | Extension | New use | Required evidence |
 | --- | --- | --- |
-| Joint cross-covariance through affine/ReLU layers | Derive residual covariance; maintain state–measurement coupling for filtering | Joint-Gaussian Monte Carlo checks, residual example, finite gradients and tail handling |
 | More accurate bivariate ReLU moments | Reduce the current covariance-series truncation error | A reference grid including degenerate correlations; a backend-compatible derivative implementation; decision-level benefit |
 | Jointly uncertain dot-product moments | Score two uncertain embeddings | A consumer with both input distributions and their dependence modeled; comparison with fixed-candidate scoring |
-| Analytic augmentation-consistency score | Reduce repeated feature-noise evaluations | Agreement with sampled disagreement, followed by a controlled acquisition study |
+| Broader acquisition evaluation | Test when the implemented disagreement score helps | Noisy or irrelevant pool points, diversity baselines, task-specific perturbations, and label-cost comparisons |
 | Structured covariance | Reduce memory at larger feature widths | Explicit rank/projection policy and measured accuracy–memory tradeoff |
 
-Cross-covariance is the smallest missing primitive for the residual and
-filtering applications discussed in the [method guide](methods.md).
+Affine and Gaussian ReLU cross-covariance transport is implemented and exercised
+by [`correlated_residual`](../examples/correlated_residual.rs). A filtering
+application still needs a joint state model, process and observation noise,
+and a conditioning step; those are not supplied by the propagation helpers.
 An exact Gaussian layer calculation still does not make a deep network's
 pushforward Gaussian. Fixed-rank covariance also needs care: an affine map
 turns a diagonal residual into a generally dense covariance. Keeping only its

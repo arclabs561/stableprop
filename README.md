@@ -84,7 +84,9 @@ transpose of the vector API's layout.
 
 The tensor API also includes leaky ReLU, diagonal convolution, fixed left
 matrix multiplication, residual addition, and affine propagation with supplied
-weight variances. See the [API documentation](https://docs.rs/stableprop/latest/stableprop/burn_sdp/).
+weight variances. Affine and Gaussian ReLU cross-covariance helpers carry
+dependence between a skip input and its branch. See the
+[API documentation](https://docs.rs/stableprop/latest/stableprop/burn_sdp/).
 
 ## Try an application
 
@@ -96,6 +98,8 @@ weight variances. See the [API documentation](https://docs.rs/stableprop/latest/
 | Calibrate prediction intervals against held-out labels | [conformal_intervals](examples/conformal_intervals.rs) |
 | Train with an output-variance penalty | [robust_training](examples/robust_training.rs) |
 | Measure the effect of retaining covariance | [full_covariance](examples/full_covariance.rs) |
+| Derive a residual branch's covariance with its input | [correlated_residual](examples/correlated_residual.rs) |
+| Test sensitivity as a data-selection score | [active_selection](examples/active_selection.rs) |
 | Regularize contrastive embeddings | [tuplet_contrastive](examples/tuplet_contrastive.rs), using [tuplet](https://github.com/arclabs561/tuplet)'s Burn loss |
 | Propagate node-feature noise through a GCN | [gcn_uncertainty](examples/gcn_uncertainty.rs), using [ricci](https://github.com/arclabs561/ricci) |
 

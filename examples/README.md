@@ -15,6 +15,8 @@ still differ across backend or dependency versions.
 | Calibrate intervals against observed targets | [`conformal_intervals`](conformal_intervals.rs) |
 | Add a differentiable variance penalty to training | [`robust_training`](robust_training.rs) |
 | Compare diagonal and full covariance | [`full_covariance`](full_covariance.rs) |
+| Carry dependence through a residual branch | [`correlated_residual`](correlated_residual.rs) |
+| Evaluate sensitivity as an acquisition score | [`active_selection`](active_selection.rs) |
 | Explore heavy-tailed input noise | [`cauchy_tails`](cauchy_tails.rs) |
 | Estimate classification error under input noise | [`misclassification_risk`](misclassification_risk.rs) |
 | Compose with graph convolutions | [`gcn_uncertainty`](gcn_uncertainty.rs) |
@@ -98,6 +100,7 @@ input perturbations. Compare both metrics; the penalty can trade accuracy for lo
 
 ```sh
 cargo run --release --features burn --example full_covariance
+cargo run --release --features burn --example correlated_residual
 cargo run --release --features burn --example cauchy_tails
 ```
 
@@ -105,6 +108,13 @@ cargo run --release --features burn --example cauchy_tails
 covariance approximation against 400 Monte Carlo samples through an MLP. Read
 the mean absolute relative standard-deviation error alongside the mean ratio:
 a ratio near one can hide errors that cancel. This seeded comparison does not establish a general ordering.
+
+`correlated_residual` propagates `Y = X + ReLU(X W + b) V`. It carries
+`Cov(X, branch)` through affine and ReLU helpers, then supplies its diagonal to
+the correlated-add helper. A scalar hidden state makes these output marginal
+moments exact for Gaussian input, apart from numerical tail handling. The
+example compares them with 100,000 Monte Carlo draws. For its fixed weights,
+ignoring skip–branch dependence understates one variance and overstates the other.
 
 `cauchy_tails` measures interval coverage when the actual input perturbations
 are Cauchy. Gaussian standard deviation and Cauchy scale are different
@@ -172,3 +182,35 @@ from training embeddings, and ten shared noise draws per test point. The
 printed table compares nearest-centroid accuracy with and without noise.
 It demonstrates differentiable composition; the fixed synthetic pairs and
 single seed do not establish a general improvement in representation learning.
+
+## Active selection
+
+```sh
+cargo run --release --features burn --example active_selection
+```
+
+Compare random selection, predictive entropy, analytic disagreement, and
+Monte Carlo disagreement on a synthetic two-moons pool. Each of three seeds
+uses the same 256 pool points, 512 held-out points, 16 initial labels, and
+2–16–2 ReLU network for all policies. The designed initial set is class-balanced;
+subsequent acquisition does not read labels. Each budget refits from the same
+initial weights for 250 epochs, without a variance penalty.
+
+The disagreement policies use independent Gaussian feature noise with standard
+deviation 0.12. They center logits to remove offsets shared by all classes.
+The analytic score is `2 trace(P Cov(logits | x) P)`, where `P = I - 11^T / K`
+and `1` is the length-`K` all-ones column vector. The sampled score estimates
+the same quantity from 64 views. For two classes,
+this is the variance of the logit margin.
+
+Read the learning curves separately from score agreement. In the reference
+CPU NdArray run, entropy reached the highest mean accuracy at 96 labels;
+analytic disagreement fell below random selection. The analytic score also
+took slightly longer than batched Monte Carlo on this small network. Reported
+acquisition times exclude retraining and agreement diagnostics, so they are not
+end-to-end training costs or a general backend comparison.
+
+This experiment isolates selection under one noise model. It does not include
+noisy labels, irrelevant pool points, or a diversity baseline. The
+[selection note](../docs/sensitivity-and-selection.md) explains why accurate
+sensitivity estimates can still select unhelpful labels.

@@ -474,6 +474,86 @@ pub fn propagate_relu_full<B: Backend>(m: &MomentsFull<B>) -> MomentsFull<B> {
     }
 }
 
+/// Transport `Cov(U, V)` through an affine map of the right variable,
+/// `Y = V W + b`: `Cov(U, Y) = Cov(U, V) W`.
+///
+/// `cross_cov` is `[n, d_left, d_in]`, with the left variable on the first
+/// feature axis; `weight` is `[d_in, d_out]`. The result is `[n, d_left, d_out]`.
+/// Bias does not affect covariance. This identity is exact for any joint
+/// distribution with finite second moments. Rows represent separate joint
+/// distributions; covariance between rows is not represented.
+///
+/// # Panics
+/// Panics if the right feature count does not match the weight's input size.
+pub fn propagate_linear_cross_covariance<B: Backend>(
+    cross_cov: Tensor<B, 3>,
+    weight: Tensor<B, 2>,
+) -> Tensor<B, 3> {
+    let [n, _, d_in] = cross_cov.dims();
+    let [w_in, d_out] = weight.dims();
+    assert_eq!(
+        d_in, w_in,
+        "cross-covariance right features must match weight inputs"
+    );
+    cross_cov.matmul(weight.unsqueeze::<3>().expand([n, d_in, d_out]))
+}
+
+/// Transport `Cov(U, V)` through a ReLU of the right variable.
+///
+/// For jointly Gaussian `(U, V)`, Gaussian integration by parts gives
+/// `Cov(U, ReLU(V)) = Cov(U, V) diag(Phi(mean_V / std_V))`.
+/// Only the right marginal means and variances are needed; correlations among
+/// right features may be tracked separately. `cross_cov` is `[n, d_left, d_right]`
+/// and `right` contains those marginal moments as `[n, d_right]` tensors.
+///
+/// The cross-covariance and both margins must describe a valid joint Gaussian.
+/// In particular a deterministic right feature has a zero covariance column.
+/// Values and joint positive semidefiniteness are caller requirements, not
+/// runtime checks. The same numerical tail limits as [`propagate_relu`] apply.
+///
+/// ReLU makes the joint distribution non-Gaussian. Further affine transport
+/// remains exact; another use of this Gaussian ReLU identity is then an
+/// approximation. Use [`propagate_residual_add_correlated`] with the diagonal
+/// of the resulting skip-branch covariance to combine a residual's marginals.
+///
+/// # Panics
+/// Panics if batch sizes, right feature counts, or marginal shapes differ.
+pub fn propagate_relu_cross_covariance<B: Backend>(
+    cross_cov: Tensor<B, 3>,
+    right: &Moments<B>,
+) -> Tensor<B, 3> {
+    let [n, _, d_right] = cross_cov.dims();
+    assert_eq!(
+        right.mean.dims(),
+        [n, d_right],
+        "cross-covariance must match right moments"
+    );
+    assert_eq!(
+        right.var.dims(),
+        [n, d_right],
+        "right mean and variance shapes must match"
+    );
+    // Only the CDF is needed here; avoid evaluating unused rectified moments.
+    let deterministic = right.var.clone().lower_equal_elem(0.0);
+    let sigma = right
+        .var
+        .clone()
+        .mask_fill(deterministic.clone(), 1.0)
+        .sqrt();
+    let alpha = right.mean.clone() / sigma;
+    let gate = alpha
+        .clone()
+        .clamp(-8.0, 8.0)
+        .mul_scalar(FRAC_1_SQRT_2)
+        .erf()
+        .add_scalar(1.0)
+        .mul_scalar(0.5)
+        .mask_fill(alpha.clone().greater_equal_elem(8.0), 1.0)
+        .mask_fill(alpha.lower_equal_elem(-8.0), 0.0)
+        .mask_fill(deterministic, 0.0);
+    cross_cov * gate.unsqueeze_dim::<3>(1)
+}
+
 /// Independent Cauchy distributions per feature: `location` and `scale`, `[n, d]`.
 ///
 /// Cauchy has no finite mean or variance, so we propagate its location (median)

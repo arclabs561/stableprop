@@ -29,6 +29,8 @@ jobs:
         run: cargo test
       - name: test (burn)
         run: cargo test --features burn
+      - name: example controls
+        run: cargo test --features burn --example cora_uncertainty --example active_selection
       - name: docs
         run: cargo doc --no-deps --all-features
         env:

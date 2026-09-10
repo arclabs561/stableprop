@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Affine and Gaussian ReLU cross-covariance transport for supported branches,
+  with a `correlated_residual` example and Monte Carlo and autodiff tests.
+- An `active_selection` experiment comparing entropy, random selection, and
+  analytic and sampled centered-logit disagreement under shared controls.
+
 ### Fixed
 
 - Preserve tiny positive Gaussian variances and avoid cancellation in ReLU
