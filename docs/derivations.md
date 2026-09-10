@@ -225,7 +225,12 @@ $$
 **Proof.** First take $|R_{ij}|\lt 1$. The expectation of the product of the two
 generating functions is
 $e^{R_{ij}st}$. Comparing coefficients yields
-$\mathbb{E}[\mathrm{He}_{k}(Z_{i})\mathrm{He}_\ell(Z_{j})] =1_{k=\ell}k!R_{ij}^k$.
+
+$$
+\mathbb{E}[\mathrm{He}_{k}(Z_{i})\mathrm{He}_{\ell}(Z_{j})]
+=1_{k=\ell}k!R_{ij}^k.
+$$
+
 Expand each centered transform in the orthogonal Hermite basis and take their
 inner product. Parseval's identity gives
 $\mathrm{Var}(h_{i}(Z))=\sum_{k\geq1}c_{ik}^2/k!$.
@@ -254,7 +259,7 @@ value argument above instead uses the Hermite expansion in $L^2$.
 
 Let $\Sigma_{g}=\mathrm{Cov}(g(X))$ denote the exact transformed covariance.
 Write $D_{k}=\mathrm{diag}(c_{1k},\ldots,c_{dk})$ and let
-$R^{\circ k}$ denote an entrywise power. An order-$K$ covariance is
+$R^{\circ k}$ denote an entrywise power. Truncating after order $K$ gives
 
 $$
 S_{K}=\sum_{k=1}^{K}\frac{D_kR^{\circ k}D_{k}}{k!}.
