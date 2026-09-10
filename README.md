@@ -129,12 +129,15 @@ output interval is an approximation after nonlinear propagation.
 
 Use current stable Rust for repository development. The Rust 1.80 floor applies
 to the default library; tests and examples also resolve the Burn dependencies.
+Install [just](https://github.com/casey/just#installation), then run:
 
 ```sh
-cargo fmt --all --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
+just check
 ```
+
+This runs formatting, lints, tests, strict documentation builds, and example
+checks. Run `just` to list individual recipes, or read the [justfile](justfile)
+for the Cargo commands used by CI.
 
 ## License
 

@@ -21,18 +21,11 @@ for mathematical assumptions and provenance, and
 
 ## Validation
 
-[CI](.github/workflows/ci.yml) defines the baseline checks and compiler matrix.
+[justfile](justfile) defines the checks used by [CI](.github/workflows/ci.yml).
 Before committing implementation changes, run:
 
 ```sh
-cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-cargo test --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
-cargo build --release --examples --all-features
+just check
 ```
 
 Run changed examples using the commands in their guide. For numerical changes,
