@@ -31,7 +31,7 @@ the same perturbation distribution given `x`. With finite conditional second mom
 
 $$
 \mathbb{E}\left[\lVert Y_1-Y_2\rVert^2\mid x\right]
-= 2\,\mathrm{tr}\!\left(\mathrm{Cov}(Y\mid x)\right).
+= 2\mathrm{tr}\left(\mathrm{Cov}(Y\mid x)\right).
 $$
 
 This identity is exact. It gives propagated covariance a concrete use:
@@ -74,7 +74,7 @@ and posterior variance `v_model` in its latent mean, expected information about
 the parameters from one observation is:
 
 $$
-I = \tfrac{1}{2}\log\!\left(1+\frac{v_{\mathrm{model}}}{v_{\mathrm{noise}}}\right).
+I = \tfrac{1}{2}\log\left(1+\frac{v_{\mathrm{model}}}{v_{\mathrm{noise}}}\right).
 $$
 
 This is the Gaussian information-gain calculation used in Bayesian experimental
@@ -149,7 +149,7 @@ the best posterior-mean choice:[^kg]
 
 $$
 \mathrm{KG}(a)
-= \mathbb{E}_{Y_a}\!\left[\max_i \mu_i^+(Y_a)\right]-\max_i\mu_i.
+= \mathbb{E}_{Y_a}\left[\max_i \mu_i^+(Y_a)\right]-\max_i\mu_i.
 $$
 
 This is expected value of sample information for a risk-neutral terminal
