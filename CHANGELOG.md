@@ -13,6 +13,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A `metal` feature for Burn's fused WGPU Metal backend, a GPU training example,
   and CPU/Metal value and gradient comparisons.
 - A justfile shared with CI, including explicit local Metal checks and timings.
+- Criterion benchmarks for vector and Burn affine propagation, with independent
+  covariance references checked by CI.
+- Burn properties for rectangular affine maps, cross-covariance composition,
+  ReLU scaling and reflection, and covariance symmetry and signed quadratic forms.
 
 ### Changed
 
@@ -24,6 +28,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   deterministic analytical references. Retain seeded distributional checks.
 - Add full-covariance and ReLU moment properties, and distinguish analytical
   gradients at positive variance from deterministic boundary conventions.
+- Use contiguous weight rows in the vector API's covariance transport, avoiding
+  a transpose allocation.
+- Report output covariance error in the full-covariance example, alongside
+  marginal standard-deviation errors.
 
 ### Fixed
 

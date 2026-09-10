@@ -115,13 +115,6 @@ fn mat_mul(a: &[Vec<f64>], b: &[Vec<f64>]) -> Vec<Vec<f64>> {
         .collect()
 }
 
-/// Transpose of a matrix.
-fn transpose(a: &[Vec<f64>]) -> Vec<Vec<f64>> {
-    let m = a.len();
-    let n = a[0].len();
-    (0..n).map(|j| (0..m).map(|i| a[i][j]).collect()).collect()
-}
-
 // ---------------------------------------------------------------------------
 // Propagation
 // ---------------------------------------------------------------------------
@@ -167,9 +160,8 @@ pub fn propagate_linear(moments: &Moments, weight: &[Vec<f64>], bias: &[f64]) ->
 
     // W * cov
     let wc = mat_mul(weight, &moments.cov);
-    // (W * cov) * W^T
-    let wt = transpose(weight);
-    let new_cov = mat_mul(&wc, &wt);
+    // (W * cov) * W^T: use contiguous rows without allocating the transpose.
+    let new_cov = wc.iter().map(|row| mat_vec(weight, row)).collect();
 
     Moments {
         mean: new_mean,

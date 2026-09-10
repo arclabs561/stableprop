@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3cfc009a7662c9f680408bb2a39a77ecca6adf8849cbe4e7bdccf94686ce7fe4 # shrinks to case = AffineCase { d_in: 3, d_out: 4, mean: [0.0, 0.0, 0.0, -1.226118, 0.0, 0.7811092], cov: [0.09, -0.09, 0.0, -0.09, 0.09, 0.0, 0.0, 0.0, 0.0, 0.11499706, 0.101733655, -0.47027194, 0.101733655, 0.09, -0.41603222, -0.47027194, -0.41603222, 4.0527186], weight: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], bias: [0.0, 0.0, 0.0, 0.0] }

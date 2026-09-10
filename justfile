@@ -6,7 +6,7 @@ default:
     @just --list
 
 # Run the checks used by CI. GPU tests require an explicit Metal run.
-check: fmt-check lint test docs examples smoke
+check: fmt-check lint test docs examples smoke bench-check
 
 # Format Rust source.
 fmt:
@@ -45,6 +45,19 @@ smoke:
 # Run an example on CPU; forward remaining arguments to it.
 example name *args:
     cargo run --release --features burn --example "$1" -- "${@:2}"
+
+# Benchmark the f64 vector API; forward Criterion filters and options.
+bench *args:
+    cargo bench --bench reference -- "$@"
+
+# Benchmark diagonal and full covariance on Burn's f32 CPU backend.
+bench-burn *args:
+    cargo bench --features burn --bench burn -- "$@"
+
+# Execute benchmark fixtures and oracles once, without timing measurements.
+bench-check:
+    cargo bench --bench reference -- --test
+    cargo bench --features burn --bench burn -- --test
 
 # Compile the Metal tests and training example on macOS.
 [macos]

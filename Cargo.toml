@@ -33,6 +33,16 @@ burn-ndarray = "0.21.0"
 ricci = "0.10"
 tuplet = { version = "0.3", features = ["burn-ndarray"] }
 proptest = "1.5"
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "reference"
+harness = false
+
+[[bench]]
+name = "burn"
+harness = false
+required-features = ["burn"]
 
 [[example]]
 name = "gcn_uncertainty"

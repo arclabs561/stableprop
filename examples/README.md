@@ -116,6 +116,10 @@ cargo run --release --features burn --example cauchy_tails
 covariance approximation against 400 Monte Carlo samples through an MLP. Read
 the mean absolute relative standard-deviation error alongside the mean ratio:
 a ratio near one can hide errors that cancel. This seeded comparison does not establish a general ordering.
+It also reports normalized Frobenius error across the within-row output covariance
+matrices, embedding the diagonal prediction on each matrix's diagonal. With one
+hidden ReLU layer, this measures covariance approximation without repeated
+Gaussian closure; the Monte Carlo reference still has sampling error.
 
 `correlated_residual` propagates `Y = X + ReLU(X W + b) V`. It carries
 `Cov(X, branch)` through affine and ReLU helpers, then supplies its diagonal to

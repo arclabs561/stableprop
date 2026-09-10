@@ -119,7 +119,7 @@ affine transport stays exact, but another Gaussian ReLU step is an approximation
 | --- | --- | --- |
 | Local linearization | Uses derivatives of the deterministic network; useful when perturbations stay within a nearly affine region | Can miss activation-boundary crossings and nonlinear mean shifts |
 | Diagonal moment matching | Carries one mean and variance per feature; no feature-pair covariance state | Discards correlations that later layers can amplify or cancel |
-| Full moment matching | Retains correlations needed by later affine maps | Quadratic covariance storage; nonlinear moments still assume Gaussian layer inputs |
+| Full moment matching | Retains within-row feature correlations needed by later affine maps | Quadratic covariance storage; nonlinear moments still assume Gaussian layer inputs |
 | Sigma-point quadrature | Evaluates selected inputs through the whole network without derivatives | A finite quadrature rule can miss activation boundaries; cost grows with input dimension |
 | Monte Carlo | Evaluates the actual model under the chosen noise distribution | Repeated forward passes and sampling error; rare events need many samples |
 
@@ -166,6 +166,10 @@ condition; compare quantiles or coverage instead. For Gaussian paths, compare
 means and per-output errors as well as average ratios: positive and negative
 errors can cancel. Test calibration against the quantity the application
 actually observes, not only agreement with the model's own noisy outputs.
+For correlated outputs, also compare the covariance matrices: correct marginal
+variances can hide incorrect uncertainty in output differences or sums. The
+[full-covariance example](../examples/full_covariance.rs) reports both marginal
+standard-deviation errors and normalized covariance error against Monte Carlo.
 
 ## Developments after 2024
 

@@ -57,11 +57,13 @@ impl<B: Backend> Moments<B> {
 /// Propagate through an affine map `y = x @ weight + bias`.
 ///
 /// `weight` is `[d_in, d_out]` (Burn's `Linear` layout); `bias` is `[d_out]`.
+/// Input moments are `[n, d_in]`; output moments are `[n, d_out]`.
 /// Mean is exact; variance is `var @ weight^2`, which is the exact marginal
 /// variance of each output when the input covariance is diagonal.
 ///
 /// # Panics
-/// Panics if the supplied bias width differs from the output width.
+/// Panics if the input width is incompatible with the weight shape, or if the
+/// supplied bias width differs from the output width.
 pub fn propagate_linear<B: Backend>(
     m: &Moments<B>,
     weight: Tensor<B, 2>,
@@ -369,8 +371,9 @@ fn eye<B: Backend>(d: usize, device: &B::Device) -> Tensor<B, 2> {
 /// Mean and full covariance of a batch of `n` independent Gaussians.
 ///
 /// `mean` is `[n, d]`, `cov` is `[n, d, d]`. Unlike [`Moments`], this keeps the
-/// cross-feature correlations that diagonal propagation drops. Cost is `O(n d^2)` memory and
-/// `O(n d^3)` per linear layer, so it suits small-to-medium feature dimensions.
+/// cross-feature correlations that diagonal propagation drops. Covariance storage
+/// costs `O(n d^2)`. An affine map from `d_in` to `d_out` costs
+/// `O(n d_in d_out (d_in + d_out))` work, or `O(n d^3)` for a square layer.
 #[derive(Clone, Debug)]
 pub struct MomentsFull<B: Backend> {
     pub mean: Tensor<B, 2>,
@@ -417,6 +420,11 @@ impl<B: Backend> MomentsFull<B> {
 ///
 /// Input mean and covariance are `[n, d_in]` and `[n, d_in, d_in]`;
 /// `weight` is `[d_in, d_out]` and optional `bias` is `[d_out]`.
+/// Returns mean `[n, d_out]` and covariance `[n, d_out, d_out]`.
+///
+/// # Panics
+/// Panics if the input width is incompatible with the weight shape, or if the
+/// supplied bias width differs from `d_out`.
 pub fn propagate_linear_full<B: Backend>(
     m: &MomentsFull<B>,
     weight: Tensor<B, 2>,
@@ -542,7 +550,8 @@ pub fn propagate_linear_cross_covariance<B: Backend>(
 /// right features may be tracked separately. `cross_cov` is `[n, d_left, d_right]`
 /// and `right` contains those marginal moments as `[n, d_right]` tensors.
 ///
-/// The cross-covariance and both margins must describe a valid joint Gaussian.
+/// The caller must ensure that the omitted left marginal, `right`, and
+/// `cross_cov` describe a valid joint Gaussian.
 /// In particular a deterministic right feature has a zero covariance column.
 /// Values and joint positive semidefiniteness are caller requirements, not
 /// runtime checks. The same numerical tail limits as [`propagate_relu`] apply.

@@ -78,14 +78,15 @@ transpose of the vector API's layout.
 
 | Representation | What it tracks | Main approximation |
 | --- | --- | --- |
-| `burn_sdp::Moments` | Mean and variance, `[batch, features]` | Drops feature and row correlations |
-| `burn_sdp::MomentsFull` | Mean and covariance, `[batch, features, features]` | Gaussian layer inputs; third-order ReLU covariance series |
-| `burn_sdp::Cauchy` | Location and scale, `[batch, features]` | Drops dependence; local ReLU gate |
+| `burn_sdp::Moments` | Mean and variance, each `[batch, features]` | Drops feature and row correlations |
+| `burn_sdp::MomentsFull` | Mean `[batch, features]`; covariance `[batch, features, features]` | Independent rows; Gaussian layer inputs; third-order ReLU covariance series |
+| `burn_sdp::Cauchy` | Location and scale, each `[batch, features]` | Drops dependence; local ReLU gate |
 
 The tensor API also includes leaky ReLU, diagonal convolution, fixed left
 matrix multiplication, residual addition, and affine propagation with supplied
-weight variances. Affine and Gaussian ReLU cross-covariance helpers carry
-dependence between a skip input and its branch. See the
+weight variances. Cross-covariance helpers propagate supplied within-row
+covariance through affine and Gaussian ReLU steps. Pass the resulting diagonal
+to `propagate_residual_add_correlated` for the residual cross term. See the
 [API documentation](https://docs.rs/stableprop/latest/stableprop/burn_sdp/).
 
 On macOS, `features = ["metal"]` enables Burn's WGPU Metal backend with
@@ -140,9 +141,13 @@ Install [just](https://github.com/casey/just#installation), then run:
 just check
 ```
 
-This runs formatting, lints, tests, strict documentation builds, and example
-checks. Run `just` to list individual recipes, or read the [justfile](justfile)
+This runs formatting, lints, tests, strict documentation builds, example builds
+and smoke runs, and benchmark correctness checks. Run `just` to list individual
+recipes, or read the [justfile](justfile)
 for the Cargo commands used by CI.
+
+Use `just bench` or `just bench-burn` for repeatable CPU measurements; the
+[benchmark guide](benches/README.md) explains fixtures and timing boundaries.
 
 ## License
 
