@@ -11,6 +11,8 @@ Inspired by [distprop](https://github.com/Felix-Petersen/distprop) and
 implementation here uses moment matching; distprop uses local linearization.
 The [method guide](docs/methods.md) explains that distinction, the research
 history, and which applications each approach supports.
+The [derivations](docs/derivations.md) give the moment formulas, covariance-series
+proofs, and numerical assumptions.
 
 ## What uncertainty means here
 

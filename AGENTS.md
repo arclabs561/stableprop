@@ -3,6 +3,8 @@
 Read [README.md](README.md) for the API, [docs/methods.md](docs/methods.md)
 for mathematical assumptions and provenance, and
 [examples/README.md](examples/README.md) before changing examples.
+Use [docs/derivations.md](docs/derivations.md) for the moment identities and
+covariance-series arguments.
 
 ## Implementation
 
@@ -45,11 +47,14 @@ allocation or compilation is included.
 ## Documentation and delivery
 
 - Keep the README focused on use. Method history belongs in `docs/methods.md`;
+  proofs and numerical design belong in `docs/derivations.md`;
   acquisition and learning connections belong in
   `docs/sensitivity-and-selection.md`.
 - Use concise technical prose. State assumptions alongside claims. Distinguish
   sensitivity, parameter uncertainty, calibration, and acquisition value.
   Report example outcomes with their experimental conditions.
+- Define mathematical notation before using it. Connect equations with prose
+  that states the assumptions, the inference, and its use in the implementation.
 - Verify research claims against primary sources. Distinguish publication
   dates, revisions, and preprints. Visually check rendered GitHub math after
   changing equations, and check local links when moving documentation.

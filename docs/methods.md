@@ -1,8 +1,12 @@
 # Methods, history, and applications
 
-Selected literature reviewed in September 2026. This guide covers methods
+Selected literature reviewed through September 10, 2026. This guide covers methods
 relevant to stableprop. Recent results are preprints unless a publication venue
 is named; they describe their own implementations and experiments, not this crate.
+
+The [derivations](derivations.md) give proofs of the moment and cross-covariance
+identities, the Hermite covariance series, its positive-semidefiniteness and
+truncation bounds, and the connections to Bussgang, Price, and Gaussian kernels.
 
 ## What is being approximated?
 
@@ -42,8 +46,11 @@ avoid floating-point cancellation, with numerical approximations in the tails.
 
 | Work | Change in method | Relationship to stableprop |
 | --- | --- | --- |
+| [Bussgang, 1952, *Crosscorrelation Functions of Amplitude-Distorted Gaussian Signals*](https://hdl.handle.net/1721.1/4847) | Relates Gaussian input–output cross-correlation through a memoryless nonlinearity to a scalar gain. | Predecessor of the expected-slope identity used by the ReLU cross-covariance helper. |
+| [Price, 1958, *A Useful Theorem for Nonlinear Devices Having Gaussian Inputs*](https://doi.org/10.1109/TIT.1958.1057444) | Relates derivatives of Gaussian expectations with respect to covariance to derivatives of the nonlinear functions. | Mathematical background for covariance expansions. [Voigtlaender's general form](https://arxiv.org/abs/1710.03576) handles distributional derivatives and states the regularity conditions. |
 | [Frey & Hinton, 1999, *Variational Learning in Nonlinear Gaussian Belief Networks*](https://www.cs.toronto.edu/~hinton/absps/nlgbn.pdf), especially the rectified-unit moments | Analytic expectations of nonlinear Gaussian units support variational inference in belief networks. | Source for Gaussian ReLU marginal moments; stableprop is not the original belief-network learner. |
 | [Minka, UAI 2001, *Expectation Propagation*](https://tminka.github.io/papers/ep/minka-ep-uai.pdf), §§2–3 | Assumed-density filtering repeatedly projects a distribution into a tractable family. EP generalizes it by revisiting approximate factors. | Explains Gaussian closure and why discarded information matters later. Forward propagation here does not implement EP's iterative posterior updates. |
+| [Cho & Saul, NeurIPS 2009, *Kernel Methods for Deep Learning*](https://papers.nips.cc/paper/3628-kernel-methods-for-deep-learning), §2 | Evaluates Gaussian rectified pair integrals as arc-cosine kernels. | Supplies the centered-input pair reference used to measure series truncation error, after subtracting the product of marginal means. |
 | [Hernández-Lobato & Adams, ICML 2015, *Probabilistic Backpropagation*](https://proceedings.mlr.press/v37/hernandez-lobatoc15.html), §3 | Gaussian moment propagation is combined with approximate Bayesian updates to learn weight distributions. | `propagate_linear_bayes` implements an independent-weight moment rule, not the PBP learning algorithm. |
 | [Gast & Roth, CVPR 2018, *Lightweight Probabilistic Deep Networks*](https://openaccess.thecvf.com/content_cvpr_2018/papers/Gast_Lightweight_Probabilistic_Deep_CVPR_2018_paper.pdf), §§3–4 | Carries activation means and variances through CNNs and introduces probabilistic output layers. | Practical precedent for the diagonal tensor path. Output likelihoods and training objectives are separate parts of that system. |
 | [Wu et al., ICLR 2019, *Deterministic Variational Inference*](https://arxiv.org/abs/1810.03958), §3 and Appendix A | Propagates activation covariance with uncertain weights, approximates nonlinear cross-moments, and optimizes a variational objective. | A broader Bayesian framework. The crate's supplied-weight-variance API covers only one propagation operation. |
@@ -232,6 +239,13 @@ standard-deviation errors and normalized covariance error against Monte Carlo.
   integrals. With just one nonlinear layer, no intermediate Gaussian
   approximation is needed. This isolates covariance-series error from the
   additional approximation required by deeper networks.
+- [Bergna et al., *Activation-Space Uncertainty Quantification for Pretrained
+  Networks*](https://arxiv.org/abs/2602.14934), revised February 2026, §2:
+  GAPA adds Gaussian-process uncertainty to activations of a frozen network.
+  It preserves deterministic point predictions and uses diagonal activation
+  kernels with local conditioning on cached training activations. This models
+  epistemic uncertainty in activation space; it is different from propagating
+  supplied input noise through a fixed activation function.
 - [Wieczorek et al., *Calibrated Sampling-Free Uncertainty Estimation in
   Bayesian Deep Learning*](https://arxiv.org/abs/2606.16214), June 2026,
   §§4–6: CVP combines diagonal Bayesian variance propagation, an
@@ -246,6 +260,30 @@ standard-deviation errors and normalized covariance error against Monte Carlo.
   It illustrates a middle ground between independent output coordinates and
   dense output covariance. The method changes the surrogate's representation
   and training; it is not a layerwise replacement for this crate.
+- [Sharma & Precup, *Analytic Planning under Uncertainty with Moment
+  Closure*](https://arxiv.org/abs/2608.02519), August 2026, §§3–5:
+  evaluates Bellman expectations analytically by pairing Gaussian transition
+  predictions with radial-basis value functions and a quadratic action-value
+  model. The useful principle is to choose a downstream function whose
+  expectation is tractable under the propagated distribution. The closed-form
+  backup depends on that model structure, not on arbitrary neural-network
+  moment propagation.
+- [Adams & Venturi, *Uncertainty propagation in auto-regressive random neural
+  network models*](https://arxiv.org/abs/2608.20483), August 2026, §§3–5:
+  uses a joint input–parameter Jacobian and retains state–parameter covariance
+  during recurrent prediction. The joint linearization is a first-order
+  approximation. A fixed activation pattern makes the network affine in its
+  input for fixed parameters; varying both leaves mixed terms. Their longer
+  horizon treatment also uses particles and resampling. Repeated calls to an
+  independent-weight layer rule do not retain these evolving joint statistics.
+
+These results support several directions rather than a single replacement
+method: more accurate Gaussian layer integrals, uncertainty models for frozen
+networks, and propagation designed around a downstream inference or control
+calculation. For stableprop, the immediate comparison is whether better pair
+moments improve covariance-sensitive outputs enough to justify their cost.
+Sequential prediction additionally needs the joint statistics retained by its
+state and parameter model.
 
 ## What is useful in practice?
 
