@@ -13,8 +13,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Keep full-covariance gradients finite at tiny noise scales and apply ReLU
   tail limits consistently to marginal and cross-covariance terms.
 - Reject malformed vector inputs and mismatched tensor moment shapes.
+- Reject residual batch broadcasting and leaky-ReLU coefficients that overflow
+  the backend's scalar type.
+- Train the Cora novel-class baseline with known classes only, and compare
+  abstention with the exact expected accuracy of random selection.
 - Seed example training and sampling; evaluate contrastive embeddings on held-out
-  points with shared noise. Accept a Cora data path without a sibling checkout.
+  points with shared noise. Accept an explicitly supplied Cora data path.
 
 ### Changed
 
@@ -29,10 +33,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - Full-covariance ReLU now uses the Wright et al. (2024) covariance series to
-  3rd order for the off-diagonal terms, replacing the first-order gate. The
-  implementation is checked against Monte Carlo; in the recorded two-layer MLP
-  example, the mean output-standard-deviation ratio is 1.003 for full
-  covariance and 1.120 for diagonal propagation.
+  3rd order for the off-diagonal terms, replacing the first-order gate.
 
 ### Added
 

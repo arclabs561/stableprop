@@ -16,6 +16,8 @@ but it does not by itself measure what a new label would teach the model.
 
 For small perturbations, input covariance is approximated by
 `J_x S_x J_x^T`; parameter covariance by `J_theta S_theta J_theta^T`.
+Here `J_x` and `J_theta` are score Jacobians with respect to inputs and
+parameters; `S_x` is input covariance and `S_theta` is parameter covariance.
 The similar algebra hides different random quantities. The latter represents
 posterior uncertainty only when `S_theta` comes from an appropriate posterior
 model. stableprop's Gaussian paths instead propagate moments through supported

@@ -63,7 +63,8 @@ Subsequent affine layers can mix correlated features, so the paths then differ.
 cheaper for repeated sensitivity evaluations. Even a scalar final output can
 depend on correlations between hidden features.
 
-The third-order series extends the earlier smooth gate. Its first term is
+The third-order series extends the first-order smooth-gate approximation.
+Its first term is
 `Cov(X_i, X_j) * Phi(a_i) * Phi(a_j)`, where `a = mean / std`. The second and
 third terms add nonlinear covariance contributions. Higher order includes more
 of the series, but need not improve every individual covariance entry at each
@@ -80,11 +81,13 @@ $$
 
 SDP and moment matching optimize different approximations. The
 [distprop implementation](https://github.com/Felix-Petersen/distprop/blob/e727da2057ef45f18df31cc8b58597505a0b8b03/distprop/sdp.py)
-returns `f(mean)` and `J * J^T * std^2` for isotropic input noise. Petersen's
-ReLU argument minimizes a univariate total-variation distance. Moment matching
-instead preserves Gaussian-input expectations. At a zero-mean ReLU input,
-the true rectified mean is positive, while local linearization returns zero.
-Neither method contains the other or wins under every error metric.
+returns the deterministic output `f(mu)` and `J * J^T * s^2` for isotropic
+Gaussian input with standard deviation `s`, where `J` is the network Jacobian
+at `mu`. Petersen's ReLU argument minimizes a univariate total-variation
+distance. Moment matching instead preserves Gaussian-input expectations. At a
+zero-mean ReLU input, the true rectified mean is positive, while local
+linearization returns zero. Neither method contains the other or wins under
+every error metric.
 
 Cauchy and Gaussian are members of a broader stable-distribution family.
 Cauchy is not a Gaussian with a larger variance: its mean and variance are
@@ -214,11 +217,13 @@ example uses held-out labels to calibrate a propagated scale.
 | Learned dynamics and state estimation | Affine/activation covariance primitives | A filtering or control system also needs process noise and input-output cross-covariance. [Kuang & Lin's filtering and smoothing study](https://arxiv.org/abs/2511.09016), revised May 2026, constructs those joint distributions and evaluates Lorenz/Wiener systems and feedback control. It argues for scoring the uncertainty as well as RMSE. |
 | GCN or classifier uncertainty | Input-noise propagation and experimental risk/ranking examples | Node correlations, calibration, and suitable softmax/MC baselines. A synthetic graph or one Cora split does not establish general OOD performance. |
 
-For a first use, compare the existing regression and conformal examples. For a
-new application, learned-surrogate state estimation is a closer fit than
-general-purpose classification confidence: there is an explicit uncertain
-input and a downstream consumer of covariance. That is an application
-recommendation, not a capability claim for an implemented Kalman filter.
+For a first use, run
+[`regression_intervals`](../examples/regression_intervals.rs), then
+[`conformal_intervals`](../examples/conformal_intervals.rs). For a new
+application, learned-surrogate state estimation is a closer fit than
+general-purpose classification confidence: there is an explicit uncertain input
+and a downstream consumer of covariance. That is an application recommendation,
+not a capability claim for an implemented Kalman filter.
 
 Choose richer covariance only when the downstream decision benefits from it.
 The exact Gaussian formulas are worth testing against the current series for

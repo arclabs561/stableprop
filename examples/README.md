@@ -1,6 +1,7 @@
 # Examples
 
-Run these commands from the repository root with current stable Rust. `basic`
+Run these commands from the repository root with current stable Rust. The Burn
+examples require Rust 1.89 or newer; `basic` also works with Rust 1.80. `basic`
 uses the dependency-free vector API; the other examples use Burn's CPU NdArray
 backend. Training and sampling use fixed seeds. Floating-point results may
 still differ across backend or dependency versions.
@@ -30,8 +31,8 @@ cargo run --release --example basic
 ```
 
 Two independent Gaussian inputs pass through an affine map and ReLU. The
-preactivation has mean zero and standard deviation 0.5; rectification makes its
-mean positive:
+affine difference has standard deviation `sqrt(0.3^2 + 0.4^2) = 0.5`; its mean
+is zero, and rectification makes the output mean positive:
 
 ```text
 mean = 0.1995, variance = 0.0852
@@ -79,9 +80,9 @@ cargo run --release --features burn --example robust_training
 
 `regression_intervals` trains an MLP and compares output standard deviations
 with 200 Monte Carlo samples. It prints correlation, a scale ratio, and coverage
-of sampled model outputs by Gaussian-reference intervals. High correlation can
-coexist with incorrect scale. This coverage calculation does not test intervals
-against observed targets or account for label noise.
+of sampled model outputs by 90% Gaussian intervals (`mean +/- 1.645 * std`).
+High correlation can coexist with incorrect scale. This coverage calculation
+does not test intervals against observed targets or account for label noise.
 
 `conformal_intervals` compares raw moment-based intervals with adaptive and
 constant-width split-conformal intervals on separate calibration and test data.

@@ -2,9 +2,9 @@
 
 Propagate uncertainty through neural networks analytically.
 
-Start with known input noise and estimate how it changes a network's outputs.
-Gaussian paths carry means and variances or full covariance; the Cauchy path
-carries locations and scales. Compose the layer functions with your model.
+Propagate Gaussian moments through supported neural-network layers. The
+optional Burn backend also propagates Cauchy locations and scales. Compose
+the layer functions to match your model's forward pass.
 
 Inspired by [distprop](https://github.com/Felix-Petersen/distprop) and
 [Petersen et al. (ICLR 2024)](https://arxiv.org/abs/2402.08324). The Gaussian
@@ -14,9 +14,10 @@ history, and which applications each approach supports.
 
 ## What uncertainty means here
 
-You supply an input or embedding distribution, or independent weight variances
-from another model. stableprop estimates the resulting output moments or scales.
-It does not infer those distributions from data.
+You supply Gaussian means with variances or covariance, or locations and scales
+for independent Cauchy inputs. You can also supply independent weight variances
+from another model. stableprop estimates the resulting output moments or scales;
+it does not infer those distributions from data.
 
 | Related method | Its job | Where stableprop fits |
 | --- | --- | --- |
@@ -71,9 +72,9 @@ retain covariance; this API drops off-diagonal covariance at each ReLU.
 
 ## Burn models
 
-Enable `features = ["burn"]` for batched tensors and differentiable propagation.
-Choose a compatible Burn 0.20 backend in your application. Burn weights use
-`[input, output]`, the transpose of the vector API's layout.
+Enable `features = ["burn"]` for batched tensors. Use an autodiff Burn 0.20
+backend for differentiable propagation. Burn weights use `[input, output]`, the
+transpose of the vector API's layout.
 
 | Representation | What it tracks | Main approximation |
 | --- | --- | --- |

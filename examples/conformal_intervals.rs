@@ -1,7 +1,9 @@
 //! Conformalize stableprop's analytic error bars.
 //!
-//! stableprop's propagated std is an uncertainty scale, not a calibrated residual
-//! model. Split-conformal prediction can calibrate it: using
+//! stableprop's propagated std is a chosen Gaussian feature-noise sensitivity
+//! normalizer, not a calibrated residual model. This synthetic generator adds
+//! label noise but does not simulate noisy observed features. Split-conformal
+//! prediction can calibrate the normalizer: using
 //! stableprop's per-point std as the normalizer, it produces intervals with a
 //! finite-sample marginal coverage under exchangeability, while staying adaptive
 //! (wider where stableprop says the input is more uncertain).
@@ -99,7 +101,8 @@ fn main() {
         model = optim.step(1e-3, model, grads);
     }
 
-    // stableprop std under known input noise, on the inner backend.
+    // stableprop std under the chosen Gaussian feature-noise sensitivity model,
+    // on the inner backend. It is separate from the simulated label noise above.
     let idev = <Nd as Backend>::Device::default();
     let w1 = model.lin1.weight.val().inner();
     let b1 = model.lin1.bias.as_ref().map(|p| p.val().inner());

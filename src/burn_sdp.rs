@@ -21,7 +21,7 @@
 //! tail limits at eight standard deviations for numerical stability.
 
 use burn::tensor::backend::Backend;
-use burn::tensor::{Tensor, TensorData};
+use burn::tensor::{ElementConversion, ElementLimits, Tensor, TensorData};
 use core::f64::consts::{FRAC_1_SQRT_2, PI};
 
 /// Mean and per-feature variance of a batch of independent Gaussians.
@@ -84,6 +84,10 @@ pub fn propagate_linear<B: Backend>(
 /// Shared uncertain weights also induce covariance across batch rows. This
 /// function retains only marginal variances; a following left matrix multiply
 /// therefore uses an independence approximation for those rows.
+///
+/// Input moments are `[n, d_in]`; `w_mean` and `w_var` are `[d_in, d_out]`.
+/// Both bias tensors, when supplied, are `[d_out]`. Variances must be finite
+/// and nonnegative, as required by the module's input contract.
 pub fn propagate_linear_bayes<B: Backend>(
     m: &Moments<B>,
     w_mean: Tensor<B, 2>,
@@ -109,6 +113,8 @@ pub fn propagate_linear_bayes<B: Backend>(
 /// For independent rows with diagonal variance, the output variance is
 /// `(a ∘ a) @ var` (cross-row correlations are dropped, matching the diagonal
 /// assumption).
+/// `a` has shape `[n_out, n_in]` and input moments have shape `[n_in, d]`;
+/// both output tensors have shape `[n_out, d]`.
 pub fn propagate_matmul_left<B: Backend>(a: Tensor<B, 2>, m: &Moments<B>) -> Moments<B> {
     let mean = a.clone().matmul(m.mean.clone());
     let a2 = a.clone() * a;
@@ -197,17 +203,36 @@ pub fn propagate_relu<B: Backend>(m: &Moments<B>) -> Moments<B> {
 /// and rectified-Gaussian moments. Reduces to [`propagate_relu`] at `alpha = 0`.
 ///
 /// # Panics
-/// Panics if `alpha` is not finite.
+/// Panics if `alpha` is not finite or the moment coefficients are not finite
+/// and representable in the backend's scalar element type. Large input values
+/// can still overflow the resulting moments.
 pub fn propagate_leaky_relu<B: Backend>(m: &Moments<B>, alpha: f64) -> Moments<B> {
     assert!(alpha.is_finite(), "leaky-ReLU slope must be finite");
+    let one_minus_alpha = 1.0 - alpha;
+    let alpha_sq = alpha * alpha;
+    let complement_sq = one_minus_alpha * one_minus_alpha;
+    let cross_coefficient = 2.0 * alpha * one_minus_alpha;
+    let max_scalar = B::FloatElem::MAX.elem::<f64>();
+    assert!(
+        [
+            alpha,
+            one_minus_alpha,
+            alpha_sq,
+            complement_sq,
+            cross_coefficient
+        ]
+        .iter()
+        .all(|x| x.is_finite() && x.abs() <= max_scalar),
+        "leaky-ReLU moment coefficients must be finite and representable by the backend"
+    );
     let mu = m.mean.clone();
     let terms = gaussian_relu_terms(mu.clone(), m.var.clone());
-    let mean = terms.mean.mul_scalar(1.0 - alpha) + mu.clone().mul_scalar(alpha);
+    let mean = terms.mean.mul_scalar(one_minus_alpha) + mu.clone().mul_scalar(alpha);
     // Cov(X, ReLU(X)) = var * Phi(a). This avoids another unstable
     // second-moment subtraction in the leaky-ReLU variance.
-    let central_var = m.var.clone().mul_scalar(alpha * alpha)
-        + terms.var.mul_scalar((1.0 - alpha) * (1.0 - alpha))
-        + m.var.clone() * terms.p.mul_scalar(2.0 * alpha * (1.0 - alpha));
+    let central_var = m.var.clone().mul_scalar(alpha_sq)
+        + terms.var.mul_scalar(complement_sq)
+        + m.var.clone() * terms.p.mul_scalar(cross_coefficient);
     Moments {
         mean: mean
             .mask_where(terms.active.clone(), m.mean.clone())
@@ -220,7 +245,7 @@ pub fn propagate_leaky_relu<B: Backend>(m: &Moments<B>, alpha: f64) -> Moments<B
             }),
         var: central_var
             .mask_where(terms.active, m.var.clone())
-            .mask_where(terms.inactive, m.var.clone().mul_scalar(alpha * alpha))
+            .mask_where(terms.inactive, m.var.clone().mul_scalar(alpha_sq))
             .mask_fill(terms.deterministic, 0.0),
     }
 }
@@ -232,7 +257,15 @@ pub fn propagate_leaky_relu<B: Backend>(m: &Moments<B>, alpha: f64) -> Moments<B
 /// This ignores the skip-branch covariance (the branch is a function of the
 /// skip's input, so they are correlated). Use
 /// [`propagate_residual_add_correlated`] when that covariance is available.
+///
+/// # Panics
+/// Panics if the residual shapes differ. Batch broadcasting is not supported.
 pub fn propagate_residual_add<B: Backend>(skip: &Moments<B>, branch: &Moments<B>) -> Moments<B> {
+    assert_eq!(
+        skip.mean.dims(),
+        branch.mean.dims(),
+        "residual shapes must match"
+    );
     Moments {
         mean: skip.mean.clone() + branch.mean.clone(),
         var: skip.var.clone() + branch.var.clone(),
@@ -267,11 +300,15 @@ pub fn propagate_residual_add_correlated<B: Backend>(
     }
 }
 
-/// Propagate a diagonal Gaussian through a 2-D convolution. Convolution is a
-/// linear map, so under the diagonal-covariance assumption the moments are
-/// exact: `mean_out = conv(mean, w) + b`, `var_out = conv(var, w^2)`.
+/// Propagate independent Gaussian inputs through a 2-D convolution.
+/// Output means and marginal variances are exact:
+/// `mean_out = conv(mean, w) + b`, `var_out = conv(var, w^2)`.
+/// Shared inputs induce correlations between output positions and channels;
+/// these correlations are not represented by the returned variance tensor.
 ///
-/// `mean` / `var` are `[N, C_in, H, W]`, `weight` is `[C_out, C_in, kh, kw]`.
+/// `mean` and `var` must have matching shape `[N, C_in, H, W]`;
+/// `weight` is `[C_out, C_in / groups, kh, kw]` and optional `bias` is `[C_out]`.
+/// The module's finite-value and nonnegative-variance requirements apply.
 pub fn propagate_conv2d<B: Backend>(
     mean: Tensor<B, 4>,
     var: Tensor<B, 4>,
@@ -305,6 +342,11 @@ pub struct MomentsFull<B: Backend> {
 }
 
 impl<B: Backend> MomentsFull<B> {
+    /// Construct means `[n, d]` and covariance matrices `[n, d, d]`.
+    /// The module's value requirements apply; contents are not inspected.
+    ///
+    /// # Panics
+    /// Panics if the covariance shape does not match the mean shape.
     pub fn new(mean: Tensor<B, 2>, cov: Tensor<B, 3>) -> Self {
         let [n, d] = mean.dims();
         assert_eq!(cov.dims(), [n, d, d], "covariance shape must be [n, d, d]");
@@ -336,6 +378,9 @@ impl<B: Backend> MomentsFull<B> {
 }
 
 /// Full-covariance affine map `y = x W + b`: `Sigma_out = W^T Sigma_in W` (exact).
+///
+/// Input mean and covariance are `[n, d_in]` and `[n, d_in, d_in]`;
+/// `weight` is `[d_in, d_out]` and optional `bias` is `[d_out]`.
 pub fn propagate_linear_full<B: Backend>(
     m: &MomentsFull<B>,
     weight: Tensor<B, 2>,

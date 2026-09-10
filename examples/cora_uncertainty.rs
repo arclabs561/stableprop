@@ -3,8 +3,10 @@
 //! Trains a 2-layer GCN on the Cora citation graph (Kipf & Welling 2017), then
 //! propagates Gaussian input-feature noise through the trained net to obtain a
 //! per-node variance in one pass. It compares accuracy after uncertainty-based
-//! abstention with a random ordering and compares analytic with Monte-Carlo
-//! uncertainty rankings.
+//! abstention with its exact random-ordering expectation and compares analytic
+//! with Monte-Carlo uncertainty rankings. The diagonal path drops feature
+//! covariance and cross-node covariance introduced by graph aggregation, so the
+//! second GCN layer is approximate even when the input features are independent.
 //!
 //! Provide a directory containing raw `cora.content` and `cora.cites` files. Run:
 //! `cargo run --release --example cora_uncertainty --features burn`
@@ -234,6 +236,36 @@ fn split(labels: &[i32], n_classes: usize) -> (Vec<usize>, Vec<usize>) {
     (train, test)
 }
 
+/// Map labels for a classifier trained without `held_out`. Held-out labels are
+/// assigned a harmless placeholder because they are never selected for training
+/// or Fisher estimation.
+fn remap_known_labels(labels: &[i32], held_out: i32, n_classes: usize) -> Vec<i32> {
+    assert!(
+        n_classes > 1,
+        "novel-class scoring needs at least two classes"
+    );
+    assert!(
+        (0..n_classes as i32).contains(&held_out),
+        "held-out class must be in the dataset"
+    );
+    labels
+        .iter()
+        .map(|&label| {
+            assert!(
+                (0..n_classes as i32).contains(&label),
+                "dataset label must be in the declared class range"
+            );
+            if label == held_out {
+                0
+            } else if label < held_out {
+                label
+            } else {
+                label - 1
+            }
+        })
+        .collect()
+}
+
 /// Accuracy over `idx` after retaining the `coverage` fraction with the lowest
 /// uncertainty (uncertainty[k] aligns with idx[k]). `coverage = 1.0` keeps all.
 fn accuracy_at_coverage(
@@ -291,13 +323,18 @@ fn spearman(a: &[f64], b: &[f64]) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::spearman;
+    use super::{remap_known_labels, spearman};
 
     #[test]
     fn spearman_uses_average_ranks_for_ties() {
         let a = [1.0, 1.0, 2.0, 3.0];
         let b = [1.0, 1.0, 3.0, 2.0];
         assert!((spearman(&a, &b) - 7.0 / 9.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn known_class_labels_close_the_held_out_gap() {
+        assert_eq!(remap_known_labels(&[0, 1, 2, 3], 1, 4), vec![0, 0, 1, 2]);
     }
 }
 
@@ -490,23 +527,13 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) -> std::io
         .collect();
     let u_mc: Vec<f64> = test_idx.iter().map(|&i| mc_node_var[i]).collect();
 
-    // --- Accuracy-coverage: abstain on most-uncertain by SDP vs random ---
-    let mut rand_state = 0xACE1u64;
-    let rand_u: Vec<f64> = (0..test_idx.len())
-        .map(|_| {
-            rand_state ^= rand_state << 13;
-            rand_state ^= rand_state >> 7;
-            rand_state ^= rand_state << 17;
-            (rand_state >> 11) as f64
-        })
-        .collect();
+    // A uniform random retained set has expected accuracy equal to the full-set
+    // accuracy at every retained count, avoiding a noisy single permutation.
     println!("accuracy vs coverage (abstain on most-uncertain):");
-    println!("  {:>9}  {:>10}  {:>10}", "coverage", "sdp", "random");
+    println!("  {:>9}  {:>10}  {:>10}", "coverage", "sdp", "random E");
     for &cov in &[1.0, 0.9, 0.8, 0.7, 0.6, 0.5] {
         let a_sdp = accuracy_at_coverage(&logits_v, &g.labels, &test_idx, &u_sdp, g.n_classes, cov);
-        let a_rand =
-            accuracy_at_coverage(&logits_v, &g.labels, &test_idx, &rand_u, g.n_classes, cov);
-        println!("  {cov:>9.2}  {a_sdp:>10.4}  {a_rand:>10.4}");
+        println!("  {cov:>9.2}  {a_sdp:>10.4}  {base_acc:>10.4}");
     }
 
     // --- Misclassification detection: AUROC of uncertainty vs error ---
@@ -563,6 +590,14 @@ fn ood_eval<B: AutodiffBackend>(
 ) -> std::io::Result<()> {
     <B as Backend>::seed(&device, 0xC0A0_0002);
     let g = load_planetoid(dir, name)?;
+    if g.n_classes < 2 || !(0..g.n_classes as i32).contains(&held_out) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "held-out class must be one of at least two dataset classes",
+        ));
+    }
+    let known_classes = g.n_classes - 1;
+    let known_labels = remap_known_labels(&g.labels, held_out, g.n_classes);
     let mut rng = 0x51ce_2026_0bad_f00du64;
     let mut by_class: Vec<Vec<usize>> = vec![Vec::new(); g.n_classes];
     for (i, &c) in g.labels.iter().enumerate() {
@@ -584,7 +619,7 @@ fn ood_eval<B: AutodiffBackend>(
     id_test.truncate(1000);
     let ood: Vec<usize> = (0..g.n).filter(|&i| g.labels[i] == held_out).collect();
     println!(
-        "\n=== transductive novel-class scoring: class {held_out} unlabeled in training ===\nID train: {}  ID test: {}  novel-class nodes: {}",
+        "\n=== transductive novel-class scoring: class {held_out} unseen in a {known_classes}-class head ===\nID train: {}  ID test: {}  novel-class nodes: {}",
         train_idx.len(),
         id_test.len(),
         ood.len()
@@ -595,7 +630,7 @@ fn ood_eval<B: AutodiffBackend>(
         &device,
     );
     let adj = Tensor::<B, 2>::from_data(TensorData::new(g.adj_norm.clone(), [g.n, g.n]), &device);
-    let targets = Tensor::<B, 1, Int>::from_data(TensorData::new(g.labels.clone(), [g.n]), &device);
+    let targets = Tensor::<B, 1, Int>::from_data(TensorData::new(known_labels, [g.n]), &device);
     let train_sel = Tensor::<B, 1, Int>::from_data(
         TensorData::new(
             train_idx.iter().map(|&i| i as i32).collect::<Vec<_>>(),
@@ -604,7 +639,7 @@ fn ood_eval<B: AutodiffBackend>(
         &device,
     );
 
-    let mut model = Gcn::<B>::init(g.n_features, g.n_classes, &device);
+    let mut model = Gcn::<B>::init(g.n_features, known_classes, &device);
     let mut optim = AdamConfig::new()
         .with_weight_decay(Some(WeightDecayConfig::new(5e-4)))
         .init();
@@ -633,7 +668,7 @@ fn ood_eval<B: AutodiffBackend>(
         FISHER_PRIOR_PREC,
     );
     // MSP novel-class score = 1 - max softmax probability (higher = more novel).
-    let c = g.n_classes;
+    let c = known_classes;
     let msp: Vec<f64> = (0..g.n)
         .map(|i| {
             let row = &logits_v[i * c..(i + 1) * c];
