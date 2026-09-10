@@ -165,9 +165,8 @@ stableprop supplies moment calculations within these systems. Posterior
 fitting, conditioning, observation noise, and the acquisition policy belong
 to the surrounding statistical model. Input uncertainty can also support a
 decision to acquire a better measurement, if that measurement's likelihood
-specifies what it reveals. The useful extension is therefore an explicit
-joint-distribution and observation calculation, not a generic rule to explore
-high-variance items.
+specifies what it reveals. An extension for data acquisition would pair a joint
+distribution with a specified observation model and decision objective.
 
 ## Contrastive learning
 

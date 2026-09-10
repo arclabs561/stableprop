@@ -21,12 +21,12 @@ It does not infer those distributions from data.
 | Related method | Its job | Where stableprop fits |
 | --- | --- | --- |
 | Gaussian embeddings | Learn a distribution for each representation | Propagate supplied embedding moments through supported layers |
-| Bayesian models and neural-linear bandits | Learn parameter uncertainty from observations | Map a supplied coefficient posterior to joint scores as output features of a full-covariance affine layer; fit and update the posterior externally |
+| Bayesian models | Learn parameter uncertainty from observations | Propagate supplied moments; posterior fitting and updating are external |
 | Contrastive learning | Train representations using pair relationships | Add a differentiable sensitivity penalty, as in the tuplet example |
 | Conformal prediction | Calibrate prediction sets using held-out observations | Supply an input-dependent scale for calibration |
 
-Sensitivity to input noise is different from uncertainty due to missing reward
-observations. A stable score can still be poorly learned; a well-learned model
+Input sensitivity and parameter uncertainty arise from different random
+quantities. A stable score can still be poorly learned; a well-learned model
 can still be sensitive to noisy measurements. See the
 [method guide](docs/methods.md#uncertainty-sources-and-downstream-methods) for the distinction.
 The [selection note](docs/sensitivity-and-selection.md) connects score covariance

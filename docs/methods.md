@@ -190,14 +190,12 @@ posterior to joint candidate scores. The [selection note](sensitivity-and-select
 shows how their covariance enters Bayesian updates and exploration value.
 [Riquelme et al. (2018)](https://arxiv.org/abs/1802.09127) study neural-linear
 posterior methods; [Su et al. (WSDM 2024)](https://arxiv.org/abs/2305.07764)
-apply one to exploration after candidate generation. Their batch updates refer
-to posterior statistics during training, not contrastive minibatch weighting.
+apply one to exploration after candidate generation.
 
 Contrastive learning defines relationships between embeddings. The
-`tuplet_contrastive` example adds a penalty on variance propagated from chosen
-input noise. This changes the loss; it does not learn a reward posterior,
-select exploratory recommendations, or reweight training pairs. Using
-uncertainty for pair selection would need its own rationale and evaluation:
+`tuplet_contrastive` example adds a penalty on variance propagated from an
+explicit input-noise model. This regularizes sensitivity. Using sensitivity
+to select pairs needs a specified selection objective and controlled evaluation:
 high sensitivity can indicate useful signal or unreliable measurements.
 The [sensitivity and selection note](sensitivity-and-selection.md) develops
 that distinction, its active-learning evidence, and possible extensions.
@@ -228,22 +226,3 @@ modest feature widths. Diagonal propagation remains useful for inexpensive
 sensitivity estimates; learned low-rank structure may be preferable for large
 output fields. Reverse that choice if measured decision quality or covariance
 error justifies the added computation.
-
-## Why this repository took its current form
-
-The commit history records the following changes. Commit titles sometimes
-overstate empirical results; the linked diffs establish what changed, not a
-general performance guarantee.
-
-| Change | Recorded evidence | What it explains |
-| --- | --- | --- |
-| `distprop` → `momentprop` | [fde24b7](https://github.com/arclabs561/stableprop/commit/fde24b7) | Rename followed an initial implementation already using Gaussian moment matching. The diff records no fuller naming rationale. |
-| Diagonal → full covariance | [0bb28d8](https://github.com/arclabs561/stableprop/commit/0bb28d8) | Added affine covariance and a first-order smooth ReLU gate, plus comparison with Monte Carlo. |
-| `momentprop` → `stableprop` | [f4067d2](https://github.com/arclabs561/stableprop/commit/f4067d2) | The commit explicitly names coverage of both Gaussian moments and Cauchy stable distributions as the reason. |
-| First-order gate → third-order covariance series | [4a5f650](https://github.com/arclabs561/stableprop/commit/4a5f650) | Added Wright-series terms and an off-diagonal Monte Carlo check. The history does not record an order sweep proving that three is optimal. |
-| Contrastive training composition | [77751c9](https://github.com/arclabs561/stableprop/commit/77751c9) | Added the tuplet example to combine a contrastive loss with differentiable embedding variance. |
-| Independent → caller-supplied residual covariance | [b5a1864](https://github.com/arclabs561/stableprop/commit/b5a1864) | Corrected the assumption that skip and branch can always be treated independently. |
-
-The vector API keeps the formulas inspectable; the Burn functions make them
-composable and differentiable. This history was reconstructed from commits
-and source.

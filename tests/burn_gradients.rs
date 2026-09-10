@@ -54,7 +54,7 @@ fn tiny_correlated_relu_preserves_scale_and_finite_gradients() {
     .require_grad();
     let out = propagate_relu_full(&MomentsFull::new(mean.clone(), cov.clone()));
     let values = out.cov.to_data().to_vec::<f32>().unwrap();
-    // Independent zero-mean bivariate ReLU formula, scaled by input variance.
+    // Closed-form zero-mean bivariate ReLU covariance, scaled by input variance.
     let rho = 0.5f32;
     let pi = core::f32::consts::PI;
     let exact = ((1.0 - rho * rho).sqrt() + (pi - rho.acos()) * rho - 1.0) / (2.0 * pi);

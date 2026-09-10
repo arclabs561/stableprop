@@ -457,7 +457,7 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) -> std::io
     let node_var = model.sdp_node_variance(x.clone(), adj.clone(), INPUT_STD);
     let u_sdp: Vec<f64> = test_idx.iter().map(|&i| node_var[i]).collect();
 
-    // --- MC per-node uncertainty (oracle) ---
+    // --- Monte Carlo reference under the same input-noise model ---
     let len = g.n * g.n_classes;
     let mut acc_mean = vec![0.0f64; len];
     let mut acc_sq = vec![0.0f64; len];
@@ -527,10 +527,7 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) -> std::io
     let u_epi: Vec<f64> = test_idx.iter().map(|&i| node_epi[i]).collect();
 
     println!("\nmisclassification detection (AUROC of uncertainty vs error):");
-    println!(
-        "  input-noise (aleatoric) AUROC = {:.4}",
-        auroc(&u_sdp, &errors)
-    );
+    println!("  input-noise AUROC = {:.4}", auroc(&u_sdp, &errors));
     println!(
         "  empirical-Fisher proxy AUROC = {:.4}",
         auroc(&u_epi, &errors)
@@ -652,7 +649,7 @@ fn ood_eval<B: AutodiffBackend>(
     let pick = |src: &[f64]| -> Vec<f64> { eval.iter().map(|&i| src[i]).collect() };
     println!("transductive novel-class AUROC (1.0 = score perfectly separates classes):");
     println!(
-        "  input-noise (aleatoric)    = {:.4}",
+        "  input-noise                = {:.4}",
         auroc(&pick(&node_var), &labels)
     );
     println!(

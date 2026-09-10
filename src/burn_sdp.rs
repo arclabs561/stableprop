@@ -1,12 +1,11 @@
-//! Distribution propagation on Burn tensors (diagonal-Gaussian / assumed-density
-//! filtering).
+//! Distribution propagation on Burn tensors.
 //!
 //! Tracks a per-feature mean and variance for a batch of independent Gaussians
 //! and pushes them through linear, fixed-matmul (e.g. a GCN adjacency), and ReLU
 //! layers. Linear and matmul propagate variance exactly under the diagonal
 //! assumption; for Gaussian inputs ReLU evaluates the closed-form univariate
-//! moments from Frey & Hinton (1999) with numerical tail handling. All ops are Burn tensor ops, so the propagation is
-//! differentiable and runs on any backend.
+//! moments from Frey & Hinton (1999) with numerical tail handling. Burn tensor
+//! operations keep propagation differentiable and backend-independent.
 //!
 //! The default [`Moments`] path approximates covariance as diagonal:
 //! cross-feature correlations introduced by a layer are dropped before the

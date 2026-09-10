@@ -1,11 +1,8 @@
 //! Cross-check stableprop's analytic moment propagation against Monte Carlo.
 //!
-//! propagate_linear is exact and propagate_relu evaluates closed-form Gaussian
-//! moments; both checks should agree with empirical moments of sampled Gaussians.
-//! MC is an independent reference that catches a wrong sign or missing term in the closed
-//! forms, which the existing inequality/zero-mean unit tests do not exercise
-//! (they check variance-reduction and one mean point, not the full mean+cov
-//! against samples). Fixed-seed Box-Muller so the statistical check is stable.
+//! Checks affine covariance, scalar Gaussian ReLU moments, and a nonlinear
+//! chain against fixed-seed Box-Muller samples. Affine composition also has an
+//! exact reference; the nonlinear chain uses approximate propagated moments.
 
 use stableprop::{propagate_linear, propagate_relu, propagate_sequential, Layer, Moments};
 

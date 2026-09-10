@@ -121,9 +121,7 @@ fn main() {
     let w2 = model.lin2.weight.val().inner();
     let b2 = model.lin2.bias.as_ref().map(|p| p.val().inner());
 
-    // stableprop: analytic (mean, var) in ONE pass.
-    // Heteroscedastic: each test point carries its own known input-noise std
-    // Each test point has its own input-noise standard deviation.
+    // Each test point has its own known input-noise standard deviation.
     let sigma = Tensor::<Nd, 2>::random([N_TEST, 1], Distribution::Uniform(0.05, 0.4), &idev);
     let var0 = (sigma.clone() * sigma.clone()).expand([N_TEST, D_IN]);
     let m0 = Moments::new(x_test.clone(), var0);
