@@ -1,19 +1,19 @@
 //! Stable distribution propagation through neural network layers.
 //!
 //! Implements moment-matching propagation of Gaussian distributions through
-//! affine (linear) and ReLU layers. The linear case is exact; the ReLU case
-//! uses the Frey & Hinton (1999) moment-matching approximation that computes
-//! post-ReLU mean and variance from the Gaussian CDF and PDF evaluated at
-//! `mu / sigma`.
+//! affine (linear) and ReLU layers. The linear case is exact. For a Gaussian
+//! input, the ReLU step evaluates the closed-form univariate moments from
+//! Frey & Hinton (1999) with numerical CDF and tail approximations, then drops
+//! off-diagonal covariance before the next layer.
 //!
 //! The ReLU step in this module is the Frey & Hinton (1999) Gaussian
-//! moment-matching approximation, with off-diagonal covariance dropped
-//! (diagonal assumption). The full-covariance and heavy-tailed (Cauchy)
-//! cases, the generalization of Petersen et al., "Uncertainty Quantification
-//! via Stable Distribution Propagation" (ICLR 2024), live in [`burn_sdp`]
-//! (`MomentsFull` and `Cauchy`).
+//! moment calculation with off-diagonal covariance dropped (diagonal
+//! assumption). The feature-gated `burn_sdp` module also provides a
+//! third-order full-covariance ReLU approximation and local-linear Cauchy
+//! propagation. Those paths are related to, but do not reproduce, Petersen et
+//! al.'s stable distribution propagation algorithm.
 //!
-//! The [`burn_sdp`] module (feature `burn`) provides the propagation on
+//! The `burn_sdp` module (feature `burn`) provides the propagation on
 //! Burn tensors: batched, differentiable, and composable with Burn models.
 
 #[cfg(feature = "burn")]
@@ -22,6 +22,10 @@ pub mod burn_sdp;
 use std::f64::consts::{FRAC_1_SQRT_2, PI};
 
 /// First two moments of a multivariate Gaussian (mean + full covariance).
+///
+/// Inputs must be nonempty and finite. Covariance must be symmetric and
+/// positive semidefinite; propagation checks dimensions and finiteness but
+/// does not test symmetry or positive semidefiniteness.
 #[derive(Debug, Clone)]
 pub struct Moments {
     pub mean: Vec<f64>,
@@ -77,6 +81,27 @@ fn mat_vec(a: &[Vec<f64>], v: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+fn validate_moments(moments: &Moments) {
+    let n = moments.mean.len();
+    assert!(n > 0, "mean must be non-empty");
+    assert!(
+        moments.mean.iter().all(|x| x.is_finite()),
+        "mean must be finite"
+    );
+    assert_eq!(
+        moments.cov.len(),
+        n,
+        "covariance must have one row per mean element"
+    );
+    for row in &moments.cov {
+        assert_eq!(row.len(), n, "covariance must be square");
+        assert!(
+            row.iter().all(|x| x.is_finite()),
+            "covariance must be finite"
+        );
+    }
+}
+
 /// Matrix multiply: A (m x k) * B (k x n) -> (m x n).
 fn mat_mul(a: &[Vec<f64>], b: &[Vec<f64>]) -> Vec<Vec<f64>> {
     let n = b[0].len();
@@ -107,7 +132,30 @@ fn transpose(a: &[Vec<f64>]) -> Vec<Vec<f64>> {
 /// mean' = W * mean + bias
 /// cov'  = W * cov * W^T
 /// ```
+///
+/// # Panics
+/// Panics on empty inputs, inconsistent dimensions, or non-finite values.
+/// The covariance requirements on [`Moments`] also apply.
 pub fn propagate_linear(moments: &Moments, weight: &[Vec<f64>], bias: &[f64]) -> Moments {
+    validate_moments(moments);
+    assert!(
+        !weight.is_empty(),
+        "weight must have at least one output row"
+    );
+    assert_eq!(
+        bias.len(),
+        weight.len(),
+        "bias length must match weight rows"
+    );
+    for row in weight {
+        assert_eq!(
+            row.len(),
+            moments.mean.len(),
+            "weight columns must match mean length"
+        );
+        assert!(row.iter().all(|x| x.is_finite()), "weight must be finite");
+    }
+    assert!(bias.iter().all(|x| x.is_finite()), "bias must be finite");
     let new_mean: Vec<f64> = mat_vec(weight, &moments.mean)
         .iter()
         .zip(bias)
@@ -139,8 +187,16 @@ pub fn propagate_linear(moments: &Moments, weight: &[Vec<f64>], bias: &[f64]) ->
 /// sigma' = sqrt( (mu^2 + sigma^2) * Phi + mu * sigma * phi - mu'^2 )
 /// ```
 ///
-/// Off-diagonal covariances are zeroed (diagonal approximation).
+/// The implementation evaluates variance without the second-moment subtraction
+/// shown above, approximates the CDF, and uses linear tail limits beyond eight
+/// standard deviations. Off-diagonal covariances are zeroed.
+///
+/// # Panics
+/// Panics on empty inputs, inconsistent dimensions, non-finite values, or
+/// negative diagonal variances. The covariance requirements on [`Moments`]
+/// also apply.
 pub fn propagate_relu(moments: &Moments) -> Moments {
+    validate_moments(moments);
     let n = moments.mean.len();
     let mut new_mean = vec![0.0; n];
     let mut new_cov = vec![vec![0.0; n]; n];
@@ -149,21 +205,41 @@ pub fn propagate_relu(moments: &Moments) -> Moments {
         let mu = moments.mean[i];
         let var = moments.cov[i][i];
 
-        if var < 1e-15 {
-            // Near-deterministic: just apply ReLU to the mean.
+        assert!(
+            var.is_finite() && var >= 0.0,
+            "variance must be finite and non-negative"
+        );
+        if var == 0.0 {
+            // Deterministic: apply ReLU to the mean exactly.
             let relu_mu = mu.max(0.0);
             new_mean[i] = relu_mu;
-            // Variance stays ~0.
+            // Variance stays zero.
             continue;
         }
 
         let sigma = var.sqrt();
         let alpha = mu / sigma;
+        // In the far tails, use the numerically stable linear-limit
+        // approximation rather than forming products that can overflow.
+        if alpha >= 8.0 {
+            new_mean[i] = mu;
+            new_cov[i][i] = var;
+            continue;
+        }
+        if alpha <= -8.0 {
+            continue;
+        }
         let phi = std_normal_pdf(alpha);
         let big_phi = std_normal_cdf(alpha);
 
         let mu_out = mu * big_phi + sigma * phi;
-        let var_out = (mu * mu + var) * big_phi + mu * sigma * phi - mu_out * mu_out;
+        // Algebraically equivalent to E[X_+^2] - E[X_+]^2, but does not
+        // subtract two O(mu^2) values when ReLU is nearly linear.
+        let normalized_var = alpha * alpha * big_phi * (1.0 - big_phi)
+            + big_phi
+            + alpha * phi * (1.0 - 2.0 * big_phi)
+            - phi * phi;
+        let var_out = var * normalized_var;
 
         new_mean[i] = mu_out;
         new_cov[i][i] = var_out.max(0.0); // clamp numerical noise
@@ -176,7 +252,31 @@ pub fn propagate_relu(moments: &Moments) -> Moments {
 }
 
 /// Propagate moments through a sequence of layers.
+///
+/// Inputs are independent Gaussian features described by their means and
+/// standard deviations. Affine layers retain covariance; ReLU drops its
+/// off-diagonal entries. An empty layer sequence returns the input moments.
+///
+/// # Panics
+/// Panics on empty or mismatched input vectors, non-finite inputs, negative
+/// standard deviations, or invalid layer dimensions or values.
 pub fn propagate_sequential(layers: &[Layer], input_mean: &[f64], input_std: &[f64]) -> Moments {
+    assert!(!input_mean.is_empty(), "input mean must be non-empty");
+    assert_eq!(
+        input_std.len(),
+        input_mean.len(),
+        "input std length must match mean length"
+    );
+    assert!(
+        input_mean.iter().all(|x| x.is_finite()),
+        "input mean must be finite"
+    );
+    assert!(
+        input_std
+            .iter()
+            .all(|x| x.is_finite() && *x >= 0.0 && (x * x).is_finite()),
+        "input std must be finite and non-negative, with a finite squared variance"
+    );
     let n = input_mean.len();
     let mut moments = Moments {
         mean: input_mean.to_vec(),
@@ -202,6 +302,12 @@ pub fn propagate_sequential(layers: &[Layer], input_mean: &[f64], input_std: &[f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "finite squared variance")]
+    fn sequential_rejects_variance_overflow_even_without_layers() {
+        let _ = propagate_sequential(&[], &[0.0], &[f64::MAX]);
+    }
 
     fn approx_eq(a: f64, b: f64, tol: f64) {
         assert!(
@@ -270,6 +376,48 @@ mod tests {
 
         // Zero mean: symmetric case, mean = sigma / sqrt(2*pi) ~ 0.3989
         approx_eq(out.mean[2], 1.0 / (2.0 * PI).sqrt(), 1e-4);
+    }
+
+    #[test]
+    fn relu_handles_zero_tiny_and_large_signal_variances() {
+        let moments = Moments {
+            mean: vec![1.0e10, -2.0, 0.0],
+            cov: vec![
+                vec![1.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.0],
+                vec![0.0, 0.0, 1.0e-20],
+            ],
+        };
+
+        let out = propagate_relu(&moments);
+        approx_eq(out.mean[0], 1.0e10, 1e-6);
+        approx_eq(out.cov[0][0], 1.0, 1e-12);
+        assert_eq!(out.mean[1], 0.0);
+        assert_eq!(out.cov[1][1], 0.0);
+        approx_eq(out.mean[2], 1.0e-10 / (2.0 * PI).sqrt(), 1e-18);
+        approx_eq(out.cov[2][2], (0.5 - 1.0 / (2.0 * PI)) * 1.0e-20, 1e-28);
+    }
+
+    #[test]
+    #[should_panic(expected = "bias length")]
+    fn linear_rejects_mismatched_bias() {
+        let moments = Moments {
+            mean: vec![1.0, 2.0],
+            cov: vec![vec![1.0, 0.0], vec![0.0, 1.0]],
+        };
+        let _ = propagate_linear(&moments, &[vec![3.0, 4.0]], &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "input std length")]
+    fn sequential_rejects_extra_std() {
+        let _ = propagate_sequential(&[], &[1.0], &[1.0, 2.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "input std must")]
+    fn sequential_rejects_negative_std() {
+        let _ = propagate_sequential(&[], &[1.0], &[-1.0]);
     }
 
     #[test]

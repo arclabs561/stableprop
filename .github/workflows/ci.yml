@@ -29,3 +29,35 @@ jobs:
         run: cargo test
       - name: test (burn)
         run: cargo test --features burn
+      - name: docs
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: examples
+        run: cargo build --release --examples --all-features
+      - name: basic example
+        run: cargo run --release --example basic
+      - name: moment examples
+        run: |
+          cargo run --release --features burn --example uncertainty_sources
+          cargo run --release --features burn --example pairwise_ranking_risk
+  msrv:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - toolchain: "1.80.0"
+            features: ""
+          - toolchain: "1.89.0"
+            features: "burn"
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - name: check library
+        run: cargo check --lib --no-default-features --features "$CARGO_FEATURES"
+        env:
+          CARGO_FEATURES: ${{ matrix.features }}

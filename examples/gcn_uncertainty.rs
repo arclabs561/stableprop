@@ -1,20 +1,11 @@
-//! Analytic uncertainty on a ricci GCN vs Monte-Carlo input-noise sampling.
+//! Compares diagonal Gaussian propagation with Monte Carlo output variance
+//! in a two-layer ricci GCN (`GCNConv -> ReLU -> GCNConv`).
 //!
-//! This deliberately risks the claim that diagonal Gaussian moment propagation
-//! (stableprop) matches the true output uncertainty. We build a 2-layer GCN
-//! (`GCNConv -> ReLU -> GCNConv`) from ricci, put a Gaussian over the input
-//! node features, then compare two ways of getting the output variance:
+//! The output reports variance correlation and scale agreement. The diagonal
+//! path drops feature covariance after each layer and node covariance after
+//! adjacency aggregation, so the second layer can disagree with Monte Carlo.
 //!
-//! 1. SDP -- propagate (mean, var) analytically through the layers, one pass.
-//! 2. MC -- sample K noisy inputs, run the deterministic GCN on each, take the
-//!    empirical per-output variance.
-//!
-//! If diagonal SDP is faithful, the two variances agree (high correlation,
-//! ratio ~1). The diagonal assumption drops cross-feature covariance after the
-//! ReLU, so the second layer is where any disagreement shows up -- that is the
-//! honest part of the test.
-//!
-//! Run: `cargo run --example gcn_uncertainty --features burn`
+//! Run: `cargo run --release --example gcn_uncertainty --features burn`
 
 use burn::tensor::{backend::Backend, Distribution, Tensor, TensorData};
 use burn_ndarray::NdArray;
@@ -55,7 +46,8 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
 
 fn main() {
     let dev = <B as Backend>::Device::default();
-    let (n, d_in, d_hid, d_out) = (6usize, 8usize, 8usize, 4usize);
+    <B as Backend>::seed(&dev, 0x6C6E_0001);
+    let (n, d_in, d_hid, d_out) = (32usize, 8usize, 8usize, 4usize);
     let input_std = 0.3f64;
     let k = 4000usize;
 
@@ -68,8 +60,7 @@ fn main() {
     }
     let adj = Tensor::<B, 2>::from_data(TensorData::new(adj_v, [n, n]), &dev);
 
-    // Deterministic input means; random-init layers (the SDP-vs-MC agreement is
-    // intrinsic to whatever model gets initialized, so a fixed seed is not needed).
+    // Seeded input means and layers make this comparison repeatable.
     let x_mean = Tensor::<B, 2>::random([n, d_in], Distribution::Normal(0.0, 1.0), &dev);
     let layer1 = GCNConv::<B>::init(d_in, d_hid, &dev);
     let layer2 = GCNConv::<B>::init(d_hid, d_out, &dev);
@@ -130,7 +121,7 @@ fn main() {
     println!("input noise std = {input_std}, MC samples = {k}\n");
     println!("SDP var vs MC var:");
     println!("  Pearson r   = {r:.4}   (1.0 = perfect agreement)");
-    println!("  mean ratio  = {mean_ratio:.3}  (SDP / MC; 1.0 = unbiased)\n");
+    println!("  mean ratio  = {mean_ratio:.3}  (SDP / MC)\n");
 
     println!("per-output predictive std (sqrt var), first 8 of {len}:");
     println!("  {:>10}  {:>10}  {:>8}", "sdp_std", "mc_std", "ratio");
@@ -140,7 +131,8 @@ fn main() {
         println!("  {:>10.4}  {:>10.4}  {:>8.3}", s, m, s / m.max(1e-9));
     }
 
-    // --- Abstention demo: flag the highest-uncertainty nodes by SDP std ---
+    // --- Thresholding mechanics only: this random, unlabeled graph cannot
+    // establish whether deferring improves decisions. ---
     let mut node_std: Vec<(usize, f64)> = (0..n)
         .map(|node| {
             let mean_v =
@@ -150,9 +142,15 @@ fn main() {
         .collect();
     node_std.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
     let thresh = node_std.iter().map(|(_, s)| s).sum::<f64>() / n as f64;
-    println!("\nabstention (SDP node std > mean {thresh:.4} => defer):");
+    println!(
+        "\nrelative-uncertainty thresholding mechanics (mean std {thresh:.4}; no task metric):"
+    );
     for (node, s) in &node_std {
-        let act = if *s > thresh { "ABSTAIN" } else { "predict" };
-        println!("  node {node}: std={s:.4}  -> {act}");
+        let band = if *s > thresh {
+            "above mean"
+        } else {
+            "at or below mean"
+        };
+        println!("  node {node}: std={s:.4}  -> {band}");
     }
 }

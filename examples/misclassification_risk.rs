@@ -1,20 +1,16 @@
-//! Analytic estimate of a classifier's misclassification probability under
-//! Gaussian input noise, with no sampling.
+//! Estimates classifier error under Gaussian input noise from propagated
+//! logit covariance and compares it with Monte Carlo.
 //!
-//! Propagating the input noise with FULL covariance gives a joint Gaussian over
-//! the logits. For the true class `t`, competitor `j` wins when the margin
-//! `logit_t - logit_j` (Gaussian, variance `S_tt + S_jj - 2 S_tj` from the
-//! propagated covariance) goes negative; a union bound over competitors estimates
-//! `P(wrong) ~ sum_j Phi(-margin_mean_j / margin_std_j)`.
+//! For true class `t`, competitor `j` wins when `logit_t - logit_j` is negative.
+//! Its variance is `S_tt + S_jj - 2 S_tj`. Summing Gaussian margin-tail
+//! probabilities gives the risk estimate.
 //!
-//! Honest status: this is an ESTIMATE, not a sound certificate. The propagation
-//! and the Gaussian-logit assumption are approximations, so per input the value
-//! can land just above or below the true rate. It is NOT a guaranteed upper bound
-//! like PROVEN (Weng et al., ICML 2019), which needs interval/Lipschitz methods.
-//! What it gives cheaply is an estimate that tracks the Monte-Carlo rate closely
-//! on average. We report both.
+//! Nonlinear propagation and the Gaussian-logit assumption are approximate,
+//! so this estimate can fall above or below the true per-input error rate.
+//! It is not a robustness certificate. Evaluation uses each test point's true
+//! class, which is unavailable for deployment-time ranking.
 //!
-//! Run: `cargo run --release --example certified_robustness --features burn`
+//! Run: `cargo run --release --example misclassification_risk --features burn`
 
 use burn::backend::Autodiff;
 use burn::module::Module;
@@ -90,6 +86,7 @@ fn make(n: usize, dev: &<Ad as Backend>::Device) -> (Vec<f32>, Vec<i32>) {
 
 fn main() {
     let dev = <Ad as Backend>::Device::default();
+    <Ad as Backend>::seed(&dev, 0xA115_C1A5);
     let idev = <Nd as Backend>::Device::default();
     let (xtr, ytr) = make(N_TRAIN, &dev);
     let (xte, yte) = make(N_TEST, &dev);
@@ -120,7 +117,8 @@ fn main() {
     let mean = m2.mean.to_data().to_vec::<f32>().unwrap(); // [N_TEST * C]
     let cov = m2.cov.to_data().to_vec::<f32>().unwrap(); // [N_TEST * C * C]
 
-    // Certified per-input misclassification bound (union over competitor margins).
+    // Test-only per-input risk estimate: a union of approximate Gaussian margin
+    // probabilities for the known true class, not a certified bound.
     let c = N_CLASS;
     let mut bound = vec![0.0f64; N_TEST];
     for i in 0..N_TEST {
@@ -174,14 +172,14 @@ fn main() {
 
     let mean_bound = bound.iter().sum::<f64>() / N_TEST as f64;
     let mean_mc = mc.iter().sum::<f64>() / N_TEST as f64;
-    let valid = (0..N_TEST).filter(|&i| bound[i] + 1e-3 >= mc[i]).count() as f64 / N_TEST as f64;
+    let above = (0..N_TEST).filter(|&i| bound[i] >= mc[i]).count() as f64 / N_TEST as f64;
+    let mean_abs_error = (0..N_TEST).map(|i| (bound[i] - mc[i]).abs()).sum::<f64>() / N_TEST as f64;
 
     println!("\nanalytic misclassification-risk estimate under input noise std {INPUT_STD}:");
     println!("  mean analytic estimate = {mean_bound:.4}");
     println!("  mean MC rate           = {mean_mc:.4}  ({MC_SAMPLES} samples)");
     println!(
-        "  estimate within {:.4} of MC on average; lands above the per-input rate {:.1}% of the time (an estimate, not a guaranteed bound).",
-        (mean_bound - mean_mc).abs(),
-        100.0 * valid
+        "  mean absolute per-input error = {mean_abs_error:.4}; estimate >= MC on {:.1}% of inputs.",
+        100.0 * above
     );
 }

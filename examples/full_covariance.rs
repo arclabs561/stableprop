@@ -1,11 +1,10 @@
-//! Full-covariance vs diagonal propagation: keeping the cross-feature
-//! correlations a layer introduces makes the output variance more accurate.
+//! Compares full and diagonal covariance propagation through a two-layer MLP
+//! against Monte Carlo.
 //!
-//! Diagonal propagation drops the off-diagonal covariance after each layer, so a
-//! second linear layer (which recombines correlated hidden units) gets the
-//! variance wrong. Full-covariance propagation (`MomentsFull`) keeps it. This
-//! pushes input noise through a 2-layer MLP both ways and compares each to Monte
-//! Carlo; the full-covariance output std is closer.
+//! A second affine layer recombines correlated hidden units. Full covariance
+//! retains those cross-terms; the diagonal path drops them. ReLU covariance
+//! uses a third-order approximation, so the seeded result does not establish
+//! a general ordering of the methods.
 //!
 //! Run: `cargo run --release --example full_covariance --features burn`
 
@@ -54,8 +53,19 @@ fn mean_ratio(est: &[f64], mc: &[f64]) -> f64 {
     r.iter().sum::<f64>() / r.len() as f64
 }
 
+fn mean_abs_relative_error(est: &[f64], mc: &[f64]) -> f64 {
+    let errors: Vec<f64> = est
+        .iter()
+        .zip(mc)
+        .filter(|(_, m)| **m > 1e-6)
+        .map(|(e, m)| (e - m).abs() / m)
+        .collect();
+    errors.iter().sum::<f64>() / errors.len() as f64
+}
+
 fn main() {
     let dev = <Nd as Backend>::Device::default();
+    <Nd as Backend>::seed(&dev, 0xF011_C0A1);
     let model = Mlp::<Nd>::init(&dev);
     let w1 = model.lin1.weight.val();
     let b1 = model.lin1.bias.as_ref().map(|p| p.val());
@@ -124,8 +134,24 @@ fn main() {
         })
         .collect();
 
-    println!("output std vs {MC_SAMPLES}-sample Monte Carlo (mean ratio, 1.0 = unbiased):");
-    println!("  diagonal       {:.3}", mean_ratio(&diag_std, &mc_std));
-    println!("  full covariance {:.3}", mean_ratio(&full_std, &mc_std));
-    println!("\nfull covariance keeps the cross-feature correlations the diagonal drops.");
+    println!("output std vs {MC_SAMPLES}-sample Monte Carlo:");
+    println!(
+        "  {:<17} {:>11} {:>11}",
+        "method", "mean ratio", "mean abs rel err"
+    );
+    println!(
+        "  {:<17} {:>11.3} {:>11.3}",
+        "diagonal",
+        mean_ratio(&diag_std, &mc_std),
+        mean_abs_relative_error(&diag_std, &mc_std)
+    );
+    println!(
+        "  {:<17} {:>11.3} {:>11.3}",
+        "full covariance",
+        mean_ratio(&full_std, &mc_std),
+        mean_abs_relative_error(&full_std, &mc_std)
+    );
+    println!(
+        "\nRatios are analytic / MC per output; lower relative error is closer on this seeded comparison."
+    );
 }

@@ -1,14 +1,9 @@
-//! stableprop composed with tuplet: contrastive embeddings with analytic
-//! embedding uncertainty, and a noise-robust training variant.
+//! Combines tuplet's pairwise contrastive loss with an embedding-variance penalty.
 //!
-//! tuplet supplies the contrastive loss; the encoder (a Burn MLP) is where
-//! stableprop applies. Propagating input noise through the encoder gives the
-//! analytic variance of the EMBEDDING. Penalizing it during training nudges the
-//! embeddings to move less under input noise. This trains two encoders (plain
-//! contrastive vs contrastive + the stableprop variance penalty) from the same
-//! init and evaluates nearest-centroid accuracy on noisy inputs. The point is
-//! that the two crates compose in Burn end to end; the robustness gain here is
-//! modest.
+//! tuplet supplies the loss; stableprop propagates input noise through the
+//! Burn MLP to estimate embedding variance. The example compares encoders
+//! from the same initialization on held-out clean and noisy inputs. This fixed
+//! synthetic comparison does not establish general robustness.
 //!
 //! Run: `cargo run --release --example tuplet_contrastive --features burn`
 
@@ -29,8 +24,10 @@ const D_IN: usize = 6;
 const HIDDEN: usize = 32;
 const EMBED: usize = 4;
 const N_CLASS: usize = 3;
-const PER_CLASS: usize = 400;
-const N: usize = N_CLASS * PER_CLASS;
+const TRAIN_PER_CLASS: usize = 400;
+const TEST_PER_CLASS: usize = 200;
+const N_TRAIN: usize = N_CLASS * TRAIN_PER_CLASS;
+const N_TEST: usize = N_CLASS * TEST_PER_CLASS;
 const TRAIN_STD: f64 = 0.3;
 const TEST_STD: f64 = 0.5;
 const MARGIN: f32 = 1.0;
@@ -68,42 +65,55 @@ fn main() {
     let dev = <Ad as Backend>::Device::default();
 
     // Class blobs: class c shifted along a per-class direction.
-    let base = Tensor::<Ad, 2>::random([N, D_IN], Distribution::Normal(0.0, 0.7), &dev)
-        .to_data()
-        .to_vec::<f32>()
-        .unwrap();
-    let labels: Vec<i64> = (0..N).map(|i| (i / PER_CLASS) as i64).collect();
-    let mut xv = base;
-    for i in 0..N {
-        let c = labels[i] as f32;
-        xv[i * D_IN] += 1.8 * c;
-        xv[i * D_IN + 1] -= 1.4 * c;
-        xv[i * D_IN + 2] += 1.0 * c;
-    }
-    let x = Tensor::<Ad, 2>::from_data(TensorData::new(xv, [N, D_IN]), &dev);
+    let make_split = |per_class: usize, seed: u64| -> (Tensor<Ad, 2>, Vec<i64>) {
+        let n = N_CLASS * per_class;
+        <Ad as Backend>::seed(&dev, seed);
+        let mut xv = Tensor::<Ad, 2>::random([n, D_IN], Distribution::Normal(0.0, 0.7), &dev)
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap();
+        let labels: Vec<i64> = (0..n).map(|i| (i / per_class) as i64).collect();
+        for i in 0..n {
+            let c = labels[i] as f32;
+            xv[i * D_IN] += 1.8 * c;
+            xv[i * D_IN + 1] -= 1.4 * c;
+            xv[i * D_IN + 2] += 1.0 * c;
+        }
+        (
+            Tensor::<Ad, 2>::from_data(TensorData::new(xv, [n, D_IN]), &dev),
+            labels,
+        )
+    };
+    let (x_train, train_labels) = make_split(TRAIN_PER_CLASS, 0x7A91_0001);
+    let (x_test, test_labels) = make_split(TEST_PER_CLASS, 0x7A91_0002);
 
-    // Fixed pairing: each anchor paired with a shifted partner; label = same class.
-    let perm: Vec<usize> = (0..N).map(|i| (i * 7 + 13) % N).collect();
-    let same: Vec<i64> = (0..N)
-        .map(|i| (labels[i] == labels[perm[i]]) as i64)
+    // One deterministic pair per anchor; this exercises pairwise contrastive loss,
+    // not a triplet or multi-negative objective.
+    let perm: Vec<usize> = (0..N_TRAIN).map(|i| (i * 7 + 13) % N_TRAIN).collect();
+    let same: Vec<i64> = (0..N_TRAIN)
+        .map(|i| (train_labels[i] == train_labels[perm[i]]) as i64)
         .collect();
     let perm_t = Tensor::<Ad, 1, Int>::from_data(
-        TensorData::new(perm.iter().map(|&p| p as i64).collect::<Vec<_>>(), [N]),
+        TensorData::new(
+            perm.iter().map(|&p| p as i64).collect::<Vec<_>>(),
+            [N_TRAIN],
+        ),
         &dev,
     );
-    let same_t = Tensor::<Ad, 1, Int>::from_data(TensorData::new(same, [N]), &dev);
+    let same_t = Tensor::<Ad, 1, Int>::from_data(TensorData::new(same, [N_TRAIN]), &dev);
 
+    <Ad as Backend>::seed(&dev, 0x7A91_1000);
     let init = Encoder::<Ad>::init(&dev);
     let train = |mut model: Encoder<Ad>, lambda: f64| -> Encoder<Ad> {
         let mut optim = AdamConfig::new().init();
         for _ in 0..600 {
-            let ea = model.forward(x.clone());
-            let eb = model.forward(x.clone().select(0, perm_t.clone()));
+            let ea = model.forward(x_train.clone());
+            let eb = model.forward(x_train.clone().select(0, perm_t.clone()));
             let mut loss = contrastive_loss(ea, eb, same_t.clone(), MARGIN);
             if lambda > 0.0 {
                 loss = loss
                     + model
-                        .embedding_var(x.clone(), TRAIN_STD)
+                        .embedding_var(x_train.clone(), TRAIN_STD)
                         .mean()
                         .mul_scalar(lambda);
             }
@@ -115,33 +125,36 @@ fn main() {
     let plain = train(init.clone(), 0.0);
     let robust = train(init, 0.3);
 
-    // Nearest-class-centroid accuracy on noisy inputs (same noise for both).
+    // Train-set centroids; evaluate only on the held-out split.
     let centroids = |model: &Encoder<Ad>| -> Vec<f32> {
         let e = model
-            .forward(x.clone())
+            .forward(x_train.clone())
             .into_data()
             .to_vec::<f32>()
             .unwrap();
         let mut c = vec![0.0f32; N_CLASS * EMBED];
-        for i in 0..N {
+        for i in 0..N_TRAIN {
             for k in 0..EMBED {
-                c[labels[i] as usize * EMBED + k] += e[i * EMBED + k] / PER_CLASS as f32;
+                c[train_labels[i] as usize * EMBED + k] +=
+                    e[i * EMBED + k] / TRAIN_PER_CLASS as f32;
             }
         }
         c
     };
-    let acc = |model: &Encoder<Ad>, cen: &[f32]| -> f64 {
+    <Ad as Backend>::seed(&dev, 0x7A91_2000);
+    let draws = 10;
+    let noisy_test_draws: Vec<Tensor<Ad, 2>> = (0..draws)
+        .map(|_| Tensor::<Ad, 2>::random([N_TEST, D_IN], Distribution::Normal(0.0, TEST_STD), &dev))
+        .collect();
+    let accuracy = |model: &Encoder<Ad>, cen: &[f32], noise_draws: &[Tensor<Ad, 2>]| -> f64 {
         let mut correct = 0;
-        let draws = 10;
-        for _ in 0..draws {
-            let noise =
-                Tensor::<Ad, 2>::random([N, D_IN], Distribution::Normal(0.0, TEST_STD), &dev);
+        for noise in noise_draws {
             let e = model
-                .forward(x.clone() + noise)
+                .forward(x_test.clone() + noise.clone())
                 .into_data()
                 .to_vec::<f32>()
                 .unwrap();
-            for i in 0..N {
+            for i in 0..N_TEST {
                 let mut best = (0usize, f32::MAX);
                 for cl in 0..N_CLASS {
                     let dist: f32 = (0..EMBED)
@@ -151,21 +164,26 @@ fn main() {
                         best = (cl, dist);
                     }
                 }
-                if best.0 as i64 == labels[i] {
+                if best.0 as i64 == test_labels[i] {
                     correct += 1;
                 }
             }
         }
-        correct as f64 / (N * draws) as f64
+        correct as f64 / (N_TEST * noise_draws.len()) as f64
     };
 
-    let p_acc = acc(&plain, &centroids(&plain));
-    let r_acc = acc(&robust, &centroids(&robust));
-    println!("nearest-centroid accuracy on noisy inputs (test std {TEST_STD}):");
-    println!("  plain contrastive              {p_acc:.3}");
-    println!("  contrastive + variance penalty {r_acc:.3}");
+    let clean_draw = vec![Tensor::<Ad, 2>::zeros([N_TEST, D_IN], &dev)];
+    let p_clean = accuracy(&plain, &centroids(&plain), &clean_draw);
+    let r_clean = accuracy(&robust, &centroids(&robust), &clean_draw);
+    let p_noisy = accuracy(&plain, &centroids(&plain), &noisy_test_draws);
+    let r_noisy = accuracy(&robust, &centroids(&robust), &noisy_test_draws);
+    println!("nearest-centroid accuracy on held-out inputs:");
+    println!("  model                         clean    noisy (std {TEST_STD})");
+    println!("  plain contrastive              {p_clean:.3}    {p_noisy:.3}");
+    println!("  contrastive + variance penalty {r_clean:.3}    {r_noisy:.3}");
     println!("\nstableprop and tuplet compose in Burn end to end: the encoder trains under");
     println!(
-        "tuplet's contrastive loss while stableprop supplies the analytic embedding variance."
+        "tuplet's pairwise contrastive loss while stableprop supplies the analytic embedding variance."
     );
+    println!("This fixed-pair synthetic comparison is not a general performance guarantee.");
 }

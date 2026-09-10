@@ -1,15 +1,12 @@
-//! Train *with* the propagated variance: noise-robust regression without
-//! adversarial sampling.
+//! Train with a propagated-variance penalty under input noise.
 //!
 //! Because stableprop's propagation is differentiable, the analytic output
 //! variance under input noise can go straight into the loss. Penalizing it
-//! `loss = MSE + lambda * mean(output_variance)` trains a network whose
-//! predictions move less when the input is perturbed -- robustness in one extra
-//! forward pass, no sampling or attack generation.
+//! `loss = MSE + lambda * mean(output_variance)` changes the training objective.
+//! The example reports clean and noisy test RMSE for that objective and plain MSE.
 //!
-//! Fair A/B: both nets start from the SAME initial weights (only the loss
-//! differs) and are evaluated on the SAME noisy test draws, so the difference is
-//! the penalty, not random initialization.
+//! Both nets start from the same weights and use the same noisy test draws,
+//! so only the loss differs.
 //!
 //! Run: `cargo run --release --example robust_training --features burn`
 
@@ -49,7 +46,7 @@ impl<B: Backend> Mlp<B> {
     fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
         self.lin2.forward(activation::relu(self.lin1.forward(x)))
     }
-    /// Mean prediction AND analytic output variance under input noise `std`.
+    /// Mean prediction and analytic output variance under input noise `std`.
     fn forward_with_var(&self, x: Tensor<B, 2>, std: f64) -> (Tensor<B, 2>, Tensor<B, 2>) {
         let [n, d] = x.dims();
         let var0 = Tensor::<B, 2>::full([n, d], std * std, &x.device());
@@ -70,6 +67,7 @@ fn target(x: &[f32]) -> f32 {
 
 fn main() {
     let dev = <Ad as Backend>::Device::default();
+    <Ad as Backend>::seed(&dev, 0xA0B5_7001);
     let make = |n: usize| -> (Tensor<Ad, 2>, Tensor<Ad, 2>) {
         let xt = Tensor::<Ad, 2>::random([n, D_IN], Distribution::Normal(0.0, 1.0), &dev);
         let xv = xt.to_data().to_vec::<f32>().unwrap();
@@ -138,5 +136,5 @@ fn main() {
         rmse(&robust, &clean),
         rmse(&robust, &noisy)
     );
-    println!("\nthe penalized net trades clean accuracy for lower error under input noise.");
+    println!("\nCompare clean and noisy RMSE; the variance penalty can change either metric.");
 }

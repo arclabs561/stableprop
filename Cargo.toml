@@ -17,7 +17,7 @@ publish = true
 
 [features]
 default = []
-# Burn-tensor backend: differentiable, batched moment propagation.
+# Burn-tensor backend: differentiable, batched moment propagation (Rust 1.89+).
 burn = ["dep:burn"]
 
 [dependencies]
@@ -69,4 +69,12 @@ required-features = ["burn"]
 
 [[example]]
 name = "tuplet_contrastive"
+required-features = ["burn"]
+
+[[example]]
+name = "pairwise_ranking_risk"
+required-features = ["burn"]
+
+[[example]]
+name = "uncertainty_sources"
 required-features = ["burn"]

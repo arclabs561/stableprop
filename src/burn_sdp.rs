@@ -4,15 +4,22 @@
 //! Tracks a per-feature mean and variance for a batch of independent Gaussians
 //! and pushes them through linear, fixed-matmul (e.g. a GCN adjacency), and ReLU
 //! layers. Linear and matmul propagate variance exactly under the diagonal
-//! assumption; ReLU uses Frey & Hinton (1999) moment matching. All ops are Burn
-//! tensor ops, so the propagation is differentiable and runs on any backend.
+//! assumption; for Gaussian inputs ReLU evaluates the closed-form univariate
+//! moments from Frey & Hinton (1999) with numerical tail handling. All ops are Burn tensor ops, so the propagation is
+//! differentiable and runs on any backend.
 //!
 //! The default [`Moments`] path approximates covariance as diagonal:
 //! cross-feature correlations introduced by a layer are dropped before the
-//! next layer. [`MomentsFull`] keeps the full covariance (the "stable
-//! distribution propagation" of Petersen et al., ICLR 2024) and [`Cauchy`]
-//! covers the heavy-tailed stable case; both cost more per layer than the
-//! diagonal path.
+//! next layer. [`MomentsFull`] retains it with a third-order covariance series,
+//! while [`Cauchy`] applies a local-linear marginal approximation. These are
+//! related to, but do not reproduce, the Jacobian propagation in Petersen et
+//! al. (ICLR 2024).
+//!
+//! Callers must supply finite tensor values, nonnegative variances and scales,
+//! and valid positive-semidefinite covariance matrices. Constructors check
+//! shapes, but do not inspect tensor contents or synchronize devices to validate
+//! values. Public fields carry the same requirements. ReLU formulas use linear
+//! tail limits at eight standard deviations for numerical stability.
 
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
@@ -29,7 +36,17 @@ pub struct Moments<B: Backend> {
 }
 
 impl<B: Backend> Moments<B> {
+    /// Construct matching mean and variance tensors. See the module's value
+    /// requirements; tensor contents are not checked.
+    ///
+    /// # Panics
+    /// Panics if the tensor shapes differ.
     pub fn new(mean: Tensor<B, 2>, var: Tensor<B, 2>) -> Self {
+        assert_eq!(
+            mean.dims(),
+            var.dims(),
+            "mean and variance shapes must match"
+        );
         Self { mean, var }
     }
 }
@@ -54,16 +71,20 @@ pub fn propagate_linear<B: Backend>(
     Moments { mean, var }
 }
 
-/// Propagate through `y = x @ W + b` where BOTH inputs and weights are uncertain
+/// Propagate through `y = x @ W + b` where both inputs and weights are uncertain
 /// (mean-field: all elements independent). This is the linear step of
 /// Probabilistic Backpropagation (Hernandez-Lobato 2015) / Deterministic
-/// Variational Inference (Wu 2019): the weight variance `w_var` is what turns
-/// input sensitivity into *epistemic* uncertainty. Reduces to
-/// [`propagate_linear`] when `w_var` is zero.
+/// Variational Inference (Wu 2019). The supplied weight variances can describe
+/// posterior uncertainty or a chosen parameter-noise model; this function does
+/// not fit them. Reduces to [`propagate_linear`] when both `w_var` and any
+/// supplied bias variance are zero.
 ///
 /// `var_out = mean_x^2 @ w_var  +  var_x @ mean_W^2  +  var_x @ w_var  +  b_var`
-/// (the first term is the new epistemic contribution, the second is the existing
+/// (the first term is the parameter-variance contribution, the second is the
 /// input-variance propagation, the third is the cross term).
+/// Shared uncertain weights also induce covariance across batch rows. This
+/// function retains only marginal variances; a following left matrix multiply
+/// therefore uses an independence approximation for those rows.
 pub fn propagate_linear_bayes<B: Backend>(
     m: &Moments<B>,
     w_mean: Tensor<B, 2>,
@@ -96,79 +117,120 @@ pub fn propagate_matmul_left<B: Backend>(a: Tensor<B, 2>, m: &Moments<B>) -> Mom
     Moments { mean, var }
 }
 
+struct GaussianReluTerms<B: Backend> {
+    mean: Tensor<B, 2>,
+    var: Tensor<B, 2>,
+    p: Tensor<B, 2>,
+    alpha: Tensor<B, 2>,
+    deterministic: Tensor<B, 2, burn::tensor::Bool>,
+    active: Tensor<B, 2, burn::tensor::Bool>,
+    inactive: Tensor<B, 2, burn::tensor::Bool>,
+}
+
+/// Central-region Gaussian ReLU terms, with zero variance made safe only for
+/// intermediate division. Callers restore deterministic outputs with the masks.
+fn gaussian_relu_terms<B: Backend>(
+    mu: Tensor<B, 2>,
+    input_var: Tensor<B, 2>,
+) -> GaussianReluTerms<B> {
+    let deterministic = input_var.clone().lower_equal_elem(0.0);
+    let var = input_var.clone().mask_fill(deterministic.clone(), 1.0);
+    let sigma = var.clone().sqrt();
+    let alpha_raw = mu.clone() / sigma.clone();
+    let alpha = alpha_raw.clone().clamp(-8.0, 8.0);
+    let p = alpha
+        .clone()
+        .mul_scalar(FRAC_1_SQRT_2)
+        .erf()
+        .add_scalar(1.0)
+        .mul_scalar(0.5);
+    let phi = (alpha.clone() * alpha.clone())
+        .mul_scalar(-0.5)
+        .exp()
+        .mul_scalar(1.0 / (2.0 * PI).sqrt());
+    let mean = mu.clone() * p.clone() + sigma * phi.clone();
+    let normalized_var =
+        alpha.clone() * alpha.clone() * p.clone() * p.clone().mul_scalar(-1.0).add_scalar(1.0)
+            + p.clone()
+            + alpha.clone() * phi.clone() * p.clone().mul_scalar(-2.0).add_scalar(1.0)
+            - phi.clone() * phi;
+    GaussianReluTerms {
+        mean,
+        var: (var * normalized_var).clamp_min(0.0),
+        p,
+        alpha,
+        deterministic,
+        active: alpha_raw.clone().greater_equal_elem(8.0),
+        inactive: alpha_raw.lower_equal_elem(-8.0),
+    }
+}
+
 /// Propagate through an element-wise ReLU via Frey & Hinton (1999) moment
 /// matching.
 ///
 /// Per element with mean `mu`, std `sigma`, `alpha = mu / sigma`:
 /// `mu'    = mu * Phi(alpha) + sigma * phi(alpha)`
-/// `var'   = (mu^2 + var) * Phi(alpha) + mu * sigma * phi(alpha) - mu'^2`
-/// where `Phi` / `phi` are the standard normal CDF / PDF.
+/// `var'` is evaluated in an algebraically equivalent form that avoids
+/// cancellation when ReLU is nearly linear. `Phi` / `phi` are the standard
+/// normal CDF / PDF, with numerical tail limits described at module level.
 pub fn propagate_relu<B: Backend>(m: &Moments<B>) -> Moments<B> {
-    let eps = 1e-12;
-    let var = m.var.clone().clamp_min(eps);
-    let sigma = var.clone().sqrt();
     let mu = m.mean.clone();
-    let alpha = mu.clone() / sigma.clone();
-
-    // Phi(alpha) = 0.5 * (1 + erf(alpha / sqrt(2)))
-    let big_phi = alpha
-        .clone()
-        .mul_scalar(FRAC_1_SQRT_2)
-        .erf()
-        .add_scalar(1.0)
-        .mul_scalar(0.5);
-    // phi(alpha) = exp(-alpha^2 / 2) / sqrt(2 pi)
-    let phi = (alpha.clone() * alpha.clone())
-        .mul_scalar(-0.5)
-        .exp()
-        .mul_scalar(1.0 / (2.0 * PI).sqrt());
-
-    let mu_out = mu.clone() * big_phi.clone() + sigma.clone() * phi.clone();
-    let var_out = (mu.clone() * mu.clone() + var) * big_phi + mu * sigma * phi
-        - mu_out.clone() * mu_out.clone();
+    let terms = gaussian_relu_terms(mu.clone(), m.var.clone());
 
     Moments {
-        mean: mu_out,
-        var: var_out.clamp_min(0.0),
+        mean: terms
+            .mean
+            .mask_where(terms.active.clone(), mu.clone())
+            .mask_fill(terms.inactive.clone(), 0.0)
+            .mask_where(terms.deterministic.clone(), mu.clamp_min(0.0)),
+        var: terms
+            .var
+            .mask_where(terms.active, m.var.clone())
+            .mask_fill(terms.inactive, 0.0)
+            .mask_fill(terms.deterministic, 0.0),
     }
 }
 
-/// Propagate through leaky ReLU `max(x, alpha * x)` via exact Gaussian moments.
+/// Propagate through leaky ReLU `x` for `x >= 0` and `alpha * x` otherwise via
+/// closed-form Gaussian moments with numerical tail handling.
 ///
 /// Uses `leaky(x) = alpha*x + (1-alpha)*relu(x)`, so the moments combine the raw
 /// and rectified-Gaussian moments. Reduces to [`propagate_relu`] at `alpha = 0`.
+///
+/// # Panics
+/// Panics if `alpha` is not finite.
 pub fn propagate_leaky_relu<B: Backend>(m: &Moments<B>, alpha: f64) -> Moments<B> {
-    let var = m.var.clone().clamp_min(1e-12);
-    let sigma = var.clone().sqrt();
+    assert!(alpha.is_finite(), "leaky-ReLU slope must be finite");
     let mu = m.mean.clone();
-    let a = mu.clone() / sigma.clone();
-    let big_phi = a
-        .clone()
-        .mul_scalar(FRAC_1_SQRT_2)
-        .erf()
-        .add_scalar(1.0)
-        .mul_scalar(0.5);
-    let phi = (a.clone() * a.clone())
-        .mul_scalar(-0.5)
-        .exp()
-        .mul_scalar(1.0 / (2.0 * PI).sqrt());
-
-    let mu2_plus_var = mu.clone() * mu.clone() + var.clone();
-    // E[relu] and E[relu^2].
-    let e_r = mu.clone() * big_phi.clone() + sigma.clone() * phi.clone();
-    let e_r2 = mu2_plus_var.clone() * big_phi + mu * sigma * phi;
-
-    let mean = e_r.mul_scalar(1.0 - alpha) + m.mean.clone().mul_scalar(alpha);
-    let e_y2 = mu2_plus_var.mul_scalar(alpha * alpha) + e_r2.mul_scalar(1.0 - alpha * alpha);
-    let var_out = (e_y2 - mean.clone() * mean.clone()).clamp_min(0.0);
-    Moments { mean, var: var_out }
+    let terms = gaussian_relu_terms(mu.clone(), m.var.clone());
+    let mean = terms.mean.mul_scalar(1.0 - alpha) + mu.clone().mul_scalar(alpha);
+    // Cov(X, ReLU(X)) = var * Phi(a). This avoids another unstable
+    // second-moment subtraction in the leaky-ReLU variance.
+    let central_var = m.var.clone().mul_scalar(alpha * alpha)
+        + terms.var.mul_scalar((1.0 - alpha) * (1.0 - alpha))
+        + m.var.clone() * terms.p.mul_scalar(2.0 * alpha * (1.0 - alpha));
+    Moments {
+        mean: mean
+            .mask_where(terms.active.clone(), m.mean.clone())
+            .mask_where(terms.inactive.clone(), m.mean.clone().mul_scalar(alpha))
+            .mask_where(terms.deterministic.clone(), {
+                let x = m.mean.clone();
+                x.clone()
+                    .clamp_min(0.0)
+                    .add(x.clamp_max(0.0).mul_scalar(alpha))
+            }),
+        var: central_var
+            .mask_where(terms.active, m.var.clone())
+            .mask_where(terms.inactive, m.var.clone().mul_scalar(alpha * alpha))
+            .mask_fill(terms.deterministic, 0.0),
+    }
 }
 
 /// Combine a residual skip and a branch `y = skip + branch` under the
 /// independence approximation: `mean = skip.mean + branch.mean`,
 /// `var = skip.var + branch.var`.
 ///
-/// This IGNORES the skip-branch covariance (the branch is a function of the
+/// This ignores the skip-branch covariance (the branch is a function of the
 /// skip's input, so they are correlated). Use
 /// [`propagate_residual_add_correlated`] when that covariance is available.
 pub fn propagate_residual_add<B: Backend>(skip: &Moments<B>, branch: &Moments<B>) -> Moments<B> {
@@ -182,11 +244,24 @@ pub fn propagate_residual_add<B: Backend>(skip: &Moments<B>, branch: &Moments<B>
 ///
 /// `skip_branch_cov[i]` is `Cov(skip[i], branch[i])`, giving the exact marginal
 /// variance `Var(y[i]) = Var(skip[i]) + Var(branch[i]) + 2 Cov(skip[i], branch[i])`.
+/// All tensors must have the same shape and describe a valid joint distribution;
+/// in particular `abs(skip_branch_cov) <= sqrt(skip.var * branch.var)`.
+/// Values are not checked; invalid joint moments can produce negative variance.
 pub fn propagate_residual_add_correlated<B: Backend>(
     skip: &Moments<B>,
     branch: &Moments<B>,
     skip_branch_cov: Tensor<B, 2>,
 ) -> Moments<B> {
+    assert_eq!(
+        skip.mean.dims(),
+        branch.mean.dims(),
+        "residual shapes must match"
+    );
+    assert_eq!(
+        skip.mean.dims(),
+        skip_branch_cov.dims(),
+        "cross-covariance shape must match residuals"
+    );
     Moments {
         mean: skip.mean.clone() + branch.mean.clone(),
         var: skip.var.clone() + branch.var.clone() + skip_branch_cov.mul_scalar(2.0),
@@ -219,11 +294,10 @@ fn eye<B: Backend>(d: usize, device: &B::Device) -> Tensor<B, 2> {
     Tensor::<B, 2>::from_data(TensorData::new(v, [d, d]), device)
 }
 
-/// Mean and FULL covariance of a batch of `n` independent Gaussians.
+/// Mean and full covariance of a batch of `n` independent Gaussians.
 ///
 /// `mean` is `[n, d]`, `cov` is `[n, d, d]`. Unlike [`Moments`], this keeps the
-/// cross-feature correlations that diagonal propagation drops (Petersen et al.,
-/// ICLR 2024). Cost is `O(n d^2)` memory and
+/// cross-feature correlations that diagonal propagation drops. Cost is `O(n d^2)` memory and
 /// `O(n d^3)` per linear layer, so it suits small-to-medium feature dimensions.
 #[derive(Clone, Debug)]
 pub struct MomentsFull<B: Backend> {
@@ -233,12 +307,19 @@ pub struct MomentsFull<B: Backend> {
 
 impl<B: Backend> MomentsFull<B> {
     pub fn new(mean: Tensor<B, 2>, cov: Tensor<B, 3>) -> Self {
+        let [n, d] = mean.dims();
+        assert_eq!(cov.dims(), [n, d, d], "covariance shape must be [n, d, d]");
         Self { mean, cov }
     }
 
     /// Build from a diagonal variance `[n, d]` (independent input features):
     /// `cov = diag(var)` per row.
     pub fn from_diagonal(mean: Tensor<B, 2>, var: Tensor<B, 2>) -> Self {
+        assert_eq!(
+            mean.dims(),
+            var.dims(),
+            "mean and variance shapes must match"
+        );
         let [n, d] = var.dims();
         let eye_d = eye::<B>(d, &var.device());
         let cov = var.unsqueeze_dim::<3>(2).expand([n, d, d]) * eye_d.unsqueeze::<3>();
@@ -276,61 +357,72 @@ pub fn propagate_linear_full<B: Backend>(
     MomentsFull { mean, cov }
 }
 
-/// Full-covariance ReLU: exact Frey-Hinton moments on the diagonal, smooth-gated
-/// (`g_i = Phi(alpha_i)`) cross-terms off-diagonal.
+/// Full-covariance ReLU: closed-form Gaussian marginal moments on the diagonal
+/// with numerical tail handling, and a third-order covariance series off-diagonal.
 ///
-/// The smooth gate `Phi(alpha)` is the expected ReLU derivative, which fixes the
-/// decision-boundary brittleness of the hard 0/1 Jacobian gate that the local-
-/// linearization method of Petersen et al. (2024) lists as a limitation.
+/// The leading series term is the smooth gate `Phi(alpha_i) Phi(alpha_j)`.
 pub fn propagate_relu_full<B: Backend>(m: &MomentsFull<B>) -> MomentsFull<B> {
     let [n, d, _] = m.cov.dims();
     let dev = m.cov.device();
     let eye_d = eye::<B>(d, &dev);
 
-    let var = (m.cov.clone() * eye_d.clone().unsqueeze::<3>())
+    let input_var = (m.cov.clone() * eye_d.clone().unsqueeze::<3>())
         .sum_dim(2)
-        .reshape([n, d])
-        .clamp_min(1e-12);
-    let sigma = var.clone().sqrt();
+        .reshape([n, d]);
     let mu = m.mean.clone();
-    let alpha = mu.clone() / sigma.clone();
-    let big_phi = alpha
-        .clone()
-        .mul_scalar(FRAC_1_SQRT_2)
-        .erf()
-        .add_scalar(1.0)
-        .mul_scalar(0.5);
-    let phi = (alpha.clone() * alpha.clone())
-        .mul_scalar(-0.5)
-        .exp()
-        .mul_scalar(1.0 / (2.0 * PI).sqrt());
-    let mu_out = mu.clone() * big_phi.clone() + sigma.clone() * phi.clone();
-    let var_out = ((mu.clone() * mu.clone() + var.clone()) * big_phi.clone()
-        + mu.clone() * sigma.clone() * phi.clone()
-        - mu_out.clone() * mu_out.clone())
-    .clamp_min(0.0);
+    let terms = gaussian_relu_terms(mu.clone(), input_var.clone());
+    let var_out = terms
+        .var
+        .mask_where(terms.active.clone(), input_var.clone())
+        .mask_fill(terms.inactive.clone(), 0.0)
+        .mask_fill(terms.deterministic.clone(), 0.0);
+    let mu_out = terms
+        .mean
+        .mask_where(terms.active.clone(), mu.clone())
+        .mask_fill(terms.inactive.clone(), 0.0)
+        .mask_where(terms.deterministic.clone(), mu.clone().clamp_min(0.0));
 
     // Off-diagonal: post-ReLU covariance via the Wright et al. (2024) series
     // Cov_ij = sum_k (Sigma_ij^k / k!) d_k(i) d_k(j), to 3rd order. The k=1 term
     // is the smooth gate Phi(a_i) Phi(a_j) Sigma_ij; the derivatives of E[relu]
     // in the input mean are d1 = Phi(a), d2 = phi(a)/sigma, d3 = -a phi(a)/sigma^2.
-    // The diagonal is then overwritten with the exact variance.
-    let d1 = big_phi;
-    let d2 = phi.clone() / sigma.clone();
-    let d3 = (alpha * phi).mul_scalar(-1.0) / var;
-    let outer = |t: Tensor<B, 2>| t.clone().unsqueeze_dim::<3>(2) * t.unsqueeze_dim::<3>(1);
-    let cov1 = m.cov.clone();
-    let cov2 = cov1.clone() * cov1.clone();
-    let cov3 = cov2.clone() * cov1.clone();
+    // The diagonal is then overwritten with the univariate variance.
+    let safe_var = input_var
+        .clone()
+        .mask_fill(terms.deterministic.clone(), 1.0);
+    let sigma = safe_var.clone().sqrt();
+    let sigma_outer = sigma.clone().unsqueeze_dim::<3>(2) * sigma.clone().unsqueeze_dim::<3>(1);
     let off_mask = eye_d
         .clone()
         .mul_scalar(-1.0)
         .add_scalar(1.0)
         .unsqueeze::<3>();
-    let off = (cov1 * outer(d1)
-        + cov2.mul_scalar(0.5) * outer(d2)
-        + cov3.mul_scalar(1.0 / 6.0) * outer(d3))
-        * off_mask;
+    // Normalize one axis at a time: dividing by sigma_i * sigma_j directly
+    // makes its squared denominator underflow during f32 autodiff at tiny
+    // variances. Exclude the diagonal, which is replaced below.
+    let rho = ((m.cov.clone() * off_mask / sigma.clone().unsqueeze_dim::<3>(2))
+        / sigma.unsqueeze_dim::<3>(1))
+    .clamp(-1.0, 1.0);
+    let phi = (terms.alpha.clone() * terms.alpha.clone())
+        .mul_scalar(-0.5)
+        .exp()
+        .mul_scalar(1.0 / (2.0 * PI).sqrt());
+    let outer = |t: Tensor<B, 2>| t.clone().unsqueeze_dim::<3>(2) * t.unsqueeze_dim::<3>(1);
+    let rho2 = rho.clone() * rho.clone();
+    let rho3 = rho2.clone() * rho.clone();
+    // Apply the same linear tail limits to covariance as to marginal moments.
+    // An inactive output cannot covary; an active output is the input itself.
+    let tail = terms.active.clone().bool_or(terms.inactive.clone());
+    let off_p = terms
+        .p
+        .mask_fill(terms.active, 1.0)
+        .mask_fill(terms.inactive, 0.0);
+    let off_phi = phi.mask_fill(tail.bool_or(terms.deterministic), 0.0);
+    let off_alpha_phi = terms.alpha * off_phi.clone();
+    let off = sigma_outer
+        * (rho * outer(off_p)
+            + rho2.mul_scalar(0.5) * outer(off_phi)
+            + rho3.mul_scalar(1.0 / 6.0) * outer(off_alpha_phi));
     let diag = var_out.unsqueeze_dim::<3>(2).expand([n, d, d]) * eye_d.unsqueeze::<3>();
     MomentsFull {
         mean: mu_out,
@@ -340,11 +432,10 @@ pub fn propagate_relu_full<B: Backend>(m: &MomentsFull<B>) -> MomentsFull<B> {
 
 /// Independent Cauchy distributions per feature: `location` and `scale`, `[n, d]`.
 ///
-/// Cauchy is the heavy-tailed stable distribution. It has NO mean or variance
-/// (both integrals diverge), so we propagate its location (median) and scale
-/// (half-width) rather than moments. This is the Cauchy mode of Petersen et al.
-/// (2024). Like Gaussians, Cauchys are closed under linear maps, so the linear
-/// step is exact.
+/// Cauchy has no finite mean or variance, so we propagate its location (median)
+/// and scale rather than moments. An affine map of independent Cauchy inputs
+/// has Cauchy output marginals, but mixing creates dependence between outputs
+/// that this type does not represent.
 #[derive(Clone, Debug)]
 pub struct Cauchy<B: Backend> {
     pub location: Tensor<B, 2>,
@@ -352,13 +443,22 @@ pub struct Cauchy<B: Backend> {
 }
 
 impl<B: Backend> Cauchy<B> {
+    /// Construct matching location and scale tensors. Scales must be finite and
+    /// nonnegative; tensor contents are not checked.
+    ///
+    /// # Panics
+    /// Panics if the tensor shapes differ.
     pub fn new(location: Tensor<B, 2>, scale: Tensor<B, 2>) -> Self {
+        assert_eq!(
+            location.dims(),
+            scale.dims(),
+            "location and scale shapes must match"
+        );
         Self { location, scale }
     }
 
     /// Half-width of the symmetric central interval of probability mass `p`:
-    /// `scale * tan(pi p / 2)` (e.g. p=0.9 -> scale * 6.31). Far wider than the
-    /// Gaussian `1.64 * sigma` -- the heavy-tail signature.
+    /// `scale * tan(pi p / 2)` (e.g. p=0.9 -> scale * 6.31).
     pub fn interval_halfwidth(&self, p: f64) -> Tensor<B, 2> {
         assert!(
             p.is_finite() && (0.0..1.0).contains(&p),
@@ -369,9 +469,12 @@ impl<B: Backend> Cauchy<B> {
 }
 
 /// Cauchy propagation through `y = x W + b`. Location maps linearly; scale adds
-/// under ABSOLUTE weights: `scale_out = scale @ |W|` (vs `var @ W^2` for
+/// under absolute weights: `scale_out = scale @ |W|` (vs `var @ W^2` for
 /// Gaussians -- the `|.|` and the lack of squaring are the heavy-tail signature).
-/// Exact: Cauchy is closed under linear maps.
+/// Exact for independent Cauchy input marginals; dependencies between features
+/// are not represented by this type.
+/// Shared inputs create dependent output features. Treating the returned
+/// marginals as independent in a subsequent affine layer is an approximation.
 pub fn propagate_linear_cauchy<B: Backend>(
     c: &Cauchy<B>,
     weight: Tensor<B, 2>,
@@ -387,8 +490,8 @@ pub fn propagate_linear_cauchy<B: Backend>(
 }
 
 /// Cauchy propagation through ReLU via local linearization (Petersen 2024): the
-/// gate is 1 where the location is positive, 0 otherwise; the location is
-/// rectified and the scale is gated.
+/// gate is 1 where the location is strictly positive (including 0 uses the
+/// inactive branch); the location is rectified and the scale is gated.
 pub fn propagate_relu_cauchy<B: Backend>(c: &Cauchy<B>) -> Cauchy<B> {
     let gate = c.location.clone().clamp_min(0.0).sign();
     Cauchy {
@@ -506,64 +609,45 @@ mod tests {
         }
     }
 
-    /// Linear -> ReLU -> Linear: full-covariance output variance must match Monte
-    /// Carlo AND be closer than diagonal propagation (which drops the ReLU's
-    /// cross-correlations the second linear layer recombines).
+    /// Correlated ReLU outputs are recombined by a following linear layer. A
+    /// fixed covariance fixture keeps this ordering check deterministic.
     #[test]
-    fn full_cov_beats_diagonal_vs_monte_carlo() {
+    fn full_cov_beats_diagonal_on_correlated_relu_fixture() {
         let dev = <B as Backend>::Device::default();
-        let (n, d_in, h, d_out, k) = (4usize, 5usize, 8usize, 3usize, 80_000usize);
-        let sig = 0.3f64;
+        let mean = Tensor::<B, 2>::zeros([1, 2], &dev);
+        let cov = Tensor::<B, 3>::from_data(
+            TensorData::new(vec![1.0f32, 0.5, 0.5, 1.0], [1, 2, 2]),
+            &dev,
+        );
+        let weight = Tensor::<B, 2>::ones([2, 1], &dev);
 
-        let w1 = Tensor::<B, 2>::random([d_in, h], Distribution::Normal(0.0, 1.0), &dev);
-        let b1 = Tensor::<B, 1>::random([h], Distribution::Normal(0.0, 0.3), &dev);
-        let w2 = Tensor::<B, 2>::random([h, d_out], Distribution::Normal(0.0, 1.0), &dev);
-        let b2 = Tensor::<B, 1>::random([d_out], Distribution::Normal(0.0, 0.3), &dev);
-        let mean = Tensor::<B, 2>::random([n, d_in], Distribution::Normal(0.0, 1.0), &dev);
-        let var = Tensor::<B, 2>::full([n, d_in], sig * sig, &dev);
+        let full = propagate_linear_full(
+            &propagate_relu_full(&MomentsFull::new(mean.clone(), cov)),
+            weight.clone(),
+            None,
+        );
+        let diagonal = propagate_linear(
+            &propagate_relu(&Moments::new(mean, Tensor::<B, 2>::ones([1, 2], &dev))),
+            weight,
+            None,
+        );
+        let full_var = full.variance().to_data().to_vec::<f32>().unwrap()[0];
+        let diagonal_var = diagonal.var.to_data().to_vec::<f32>().unwrap()[0];
 
-        // Full covariance.
-        let m0 = MomentsFull::from_diagonal(mean.clone(), var.clone());
-        let m1 = propagate_relu_full(&propagate_linear_full(&m0, w1.clone(), Some(b1.clone())));
-        let m2 = propagate_linear_full(&m1, w2.clone(), Some(b2.clone()));
-        let f_var = m2.variance().to_data().to_vec::<f32>().unwrap();
-
-        // Diagonal.
-        let d0 = Moments::new(mean.clone(), var.clone());
-        let d1 = propagate_relu(&propagate_linear(&d0, w1.clone(), Some(b1.clone())));
-        let d2 = propagate_linear(&d1, w2.clone(), Some(b2.clone()));
-        let d_var = d2.var.to_data().to_vec::<f32>().unwrap();
-
-        // Monte Carlo oracle.
-        let len = n * d_out;
-        let mut samples = Vec::with_capacity(k);
-        for _ in 0..k {
-            let noise = Tensor::<B, 2>::random([n, d_in], Distribution::Normal(0.0, sig), &dev);
-            let xk = mean.clone() + noise;
-            let hk = (xk.matmul(w1.clone()) + b1.clone().reshape([1, h])).clamp_min(0.0);
-            let yk = hk.matmul(w2.clone()) + b2.clone().reshape([1, d_out]);
-            samples.push(
-                yk.to_data()
-                    .to_vec::<f32>()
-                    .unwrap()
-                    .iter()
-                    .map(|x| *x as f64)
-                    .collect(),
-            );
-        }
-        let (_, mc_var) = mc_moments(&samples, len);
-
-        let rel_err = |est: &[f32]| -> f64 {
-            (0..len)
-                .map(|i| (est[i] as f64 - mc_var[i]).abs() / mc_var[i].max(1e-9))
-                .sum::<f64>()
-                / len as f64
-        };
-        let (fe, de) = (rel_err(&f_var), rel_err(&d_var));
-        assert!(fe < 0.12, "full-cov mean rel err {fe} vs MC too high");
+        // Exact zero-mean ReLU covariance kernel for rho = 0.5.
+        let rho = 0.5f32;
+        let relu_var = 0.5 - 1.0 / (2.0 * core::f32::consts::PI);
+        let relu_cov = ((1.0 - rho * rho).sqrt() + (core::f32::consts::PI - rho.acos()) * rho
+            - 1.0)
+            / (2.0 * core::f32::consts::PI);
+        let expected = 2.0 * (relu_var + relu_cov);
         assert!(
-            fe < de,
-            "full-cov ({fe}) should beat diagonal ({de}) against MC"
+            (full_var - expected).abs() < 0.01,
+            "full variance: {full_var}"
+        );
+        assert!(
+            full_var > diagonal_var + 0.2,
+            "full ({full_var}) should retain the covariance diagonal ({diagonal_var}) drops"
         );
     }
 
@@ -877,6 +961,88 @@ mod tests {
         }
     }
 
+    #[test]
+    fn activation_variance_is_stable_at_large_means_and_tiny_noise() {
+        let dev = <B as Backend>::Device::default();
+        let mean = Tensor::<B, 2>::from_data(
+            TensorData::new(vec![10_000.0f32, -1.0, 0.0, 0.0], [1, 4]),
+            &dev,
+        );
+        let var = Tensor::<B, 2>::from_data(
+            TensorData::new(vec![1.0f32, 0.0, 1.0e-16, 0.0], [1, 4]),
+            &dev,
+        );
+        let relu = propagate_relu(&Moments::new(mean.clone(), var.clone()));
+        let relu_mean = relu.mean.to_data().to_vec::<f32>().unwrap();
+        let relu_var = relu.var.to_data().to_vec::<f32>().unwrap();
+        assert!((relu_mean[0] - 10_000.0).abs() < 1e-3);
+        assert!(
+            (relu_var[0] - 1.0).abs() < 1e-5,
+            "large-mean ReLU variance: {}",
+            relu_var[0]
+        );
+        assert_eq!(relu_mean[1], 0.0);
+        assert_eq!(relu_var[1], 0.0);
+        assert!(
+            (relu_var[2] - (0.5 - 1.0 / (2.0 * core::f32::consts::PI)) * 1.0e-16).abs() < 1e-20,
+            "tiny-noise ReLU variance: {}",
+            relu_var[2]
+        );
+        assert_eq!(relu_var[3], 0.0);
+
+        let leaky = propagate_leaky_relu(&Moments::new(mean, var), 0.3);
+        let leaky_var = leaky.var.to_data().to_vec::<f32>().unwrap();
+        assert!(
+            (leaky_var[0] - 1.0).abs() < 1e-5,
+            "large-mean leaky-ReLU variance: {}",
+            leaky_var[0]
+        );
+        assert_eq!(leaky_var[1], 0.0);
+        assert_eq!(leaky_var[3], 0.0);
+    }
+
+    #[test]
+    fn full_relu_variance_is_stable_at_large_means() {
+        let dev = <B as Backend>::Device::default();
+        let mean = Tensor::<B, 2>::from_data(TensorData::new(vec![10_000.0f32], [1, 1]), &dev);
+        let cov = Tensor::<B, 3>::from_data(TensorData::new(vec![1.0f32], [1, 1, 1]), &dev);
+        let out = propagate_relu_full(&MomentsFull::new(mean, cov));
+        let var = out.variance().to_data().to_vec::<f32>().unwrap();
+        assert!(
+            (var[0] - 1.0).abs() < 1e-5,
+            "large-mean full-ReLU variance: {}",
+            var[0]
+        );
+    }
+
+    #[test]
+    fn full_relu_handles_zero_and_tiny_covariances() {
+        let dev = <B as Backend>::Device::default();
+        let zero_mean =
+            Tensor::<B, 2>::from_data(TensorData::new(vec![0.0f32, -2.0], [1, 2]), &dev);
+        let zero_cov = Tensor::<B, 3>::zeros([1, 2, 2], &dev);
+        let zero = propagate_relu_full(&MomentsFull::new(zero_mean, zero_cov));
+        assert_eq!(zero.mean.to_data().to_vec::<f32>().unwrap(), vec![0.0, 0.0]);
+        assert_eq!(zero.cov.to_data().to_vec::<f32>().unwrap(), vec![0.0; 4]);
+
+        let tiny_mean =
+            Tensor::<B, 2>::from_data(TensorData::new(vec![0.0f32, 1.0e-8], [1, 2]), &dev);
+        let tiny_cov = Tensor::<B, 3>::from_data(
+            TensorData::new(vec![1.0e-24f32, 0.5e-24, 0.5e-24, 1.0e-24], [1, 2, 2]),
+            &dev,
+        );
+        let tiny = propagate_relu_full(&MomentsFull::new(tiny_mean, tiny_cov));
+        assert!(
+            tiny.cov
+                .to_data()
+                .to_vec::<f32>()
+                .unwrap()
+                .iter()
+                .all(|x| x.is_finite()),
+            "tiny covariance produced non-finite output"
+        );
+    }
+
     /// All propagated variances stay non-negative.
     #[test]
     fn variance_stays_nonnegative() {
@@ -977,7 +1143,7 @@ mod tests {
         );
     }
 
-    /// Weight-uncertainty propagation with non-zero weight AND bias variance:
+    /// Weight-uncertainty propagation with non-zero weight and bias variance:
     /// the mean and variance must match Monte Carlo over inputs, weights, bias.
     #[test]
     fn bayes_weight_uncertainty_matches_mc() {
@@ -1088,7 +1254,7 @@ mod tests {
         let _ = c.interval_halfwidth(1.0);
     }
 
-    /// Full post-ReLU covariance (diagonal AND off-diagonal) must match Monte
+    /// Full post-ReLU covariance (diagonal and off-diagonal) must match Monte
     /// Carlo. This exercises the Wright-series off-diagonal terms; correlated
     /// pre-activations are produced by a linear layer from a diagonal input.
     #[test]
@@ -1096,8 +1262,13 @@ mod tests {
         let dev = <B as Backend>::Device::default();
         let (n, din, dh, k) = (2usize, 4usize, 5usize, 150_000usize);
         let std = 0.6f64;
-        let w = Tensor::<B, 2>::random([din, dh], Distribution::Normal(0.0, 0.8), &dev);
-        let mean = Tensor::<B, 2>::random([n, din], Distribution::Normal(0.0, 1.0), &dev);
+        let weights = vec![
+            0.8f32, -0.3, 0.6, 0.1, -0.7, 0.2, 0.9, -0.4, 0.5, 0.3, -0.5, 0.4, 0.7, -0.8, 0.2, 0.3,
+            -0.6, 0.2, 0.4, 0.9,
+        ];
+        let means = vec![0.0f32, 0.0, 0.0, 0.0, 0.3, -0.2, 0.4, -0.1];
+        let w = Tensor::<B, 2>::from_data(TensorData::new(weights.clone(), [din, dh]), &dev);
+        let mean = Tensor::<B, 2>::from_data(TensorData::new(means.clone(), [n, din]), &dev);
         let var = Tensor::<B, 2>::full([n, din], std * std, &dev);
 
         let pre = propagate_linear_full(
@@ -1110,21 +1281,37 @@ mod tests {
 
         let mut sh = vec![0.0f64; n * dh];
         let mut shh = vec![0.0f64; n * dh * dh];
+        // Local seeded noise is independent of Burn's shared RNG and test order.
+        let mut state = 0x5eed_c0a1_u64;
+        let mut uniform = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 11) as f64 + 0.5) / ((1u64 << 53) as f64)
+        };
         for _ in 0..k {
-            let xk = mean.clone()
-                + Tensor::<B, 2>::random([n, din], Distribution::Normal(0.0, std), &dev);
-            let h = xk
-                .matmul(w.clone())
-                .clamp_min(0.0)
-                .to_data()
-                .to_vec::<f32>()
-                .unwrap();
+            let x: Vec<f64> = means
+                .iter()
+                .map(|&mu| {
+                    let z = (-2.0 * uniform().ln()).sqrt() * (2.0 * PI * uniform()).cos();
+                    mu as f64 + std * z
+                })
+                .collect();
+            let mut h = vec![0.0f64; n * dh];
             for i in 0..n {
                 for a in 0..dh {
-                    let ha = h[i * dh + a] as f64;
+                    h[i * dh + a] = (0..din)
+                        .map(|j| x[i * din + j] * weights[j * dh + a] as f64)
+                        .sum::<f64>()
+                        .max(0.0);
+                }
+            }
+            for i in 0..n {
+                for a in 0..dh {
+                    let ha = h[i * dh + a];
                     sh[i * dh + a] += ha;
                     for b in 0..dh {
-                        shh[i * dh * dh + a * dh + b] += ha * h[i * dh + b] as f64;
+                        shh[i * dh * dh + a * dh + b] += ha * h[i * dh + b];
                     }
                 }
             }

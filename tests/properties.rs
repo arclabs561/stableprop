@@ -1,5 +1,5 @@
 //! Property-based tests for the f64 reference propagation: invariants that must
-//! hold for ANY diagonal-Gaussian input, checked with proptest.
+//! hold for generated diagonal-Gaussian inputs, checked with proptest.
 
 use proptest::prelude::*;
 use stableprop::{propagate_linear, propagate_relu, Moments};

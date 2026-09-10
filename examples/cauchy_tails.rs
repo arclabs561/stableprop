@@ -1,11 +1,12 @@
-//! Why Cauchy: under heavy-tailed input noise, Gaussian intervals under-cover
-//! and Cauchy (stable) intervals do not.
+//! Compare Gaussian propagation with a local-linear Cauchy approximation under
+//! heavy-tailed input noise.
 //!
-//! When the true input perturbation is heavy-tailed (occasional large outliers),
-//! propagating it as a Gaussian gives intervals that are too narrow -- the tail
-//! events escape. Propagating it as a Cauchy keeps the heavy tails. This pushes
-//! the same net both ways and measures interval coverage of Cauchy-perturbed
-//! outputs.
+//! The synthetic inputs are Cauchy-perturbed. The example propagates Gaussian
+//! moments and Cauchy location/scale through the same network, then reports
+//! observed interval coverage for both descriptions in one seeded synthetic
+//! run. Affine Cauchy propagation is exact for independent marginals, but the
+//! ReLU step is a local-linear approximation: its output is not generally
+//! Cauchy, so its nominal interval has no coverage guarantee.
 //!
 //! Run: `cargo run --release --example cauchy_tails --features burn`
 
@@ -47,6 +48,7 @@ impl<B: Backend> Mlp<B> {
 
 fn main() {
     let dev = <Nd as Backend>::Device::default();
+    <Nd as Backend>::seed(&dev, 0xCA0C_0001);
     let model = Mlp::<Nd>::init(&dev);
     let w1 = model.lin1.weight.val();
     let b1 = model.lin1.bias.as_ref().map(|p| p.val());
@@ -54,9 +56,8 @@ fn main() {
     let b2 = model.lin2.bias.as_ref().map(|p| p.val());
 
     let x = Tensor::<Nd, 2>::random([N, D_IN], Distribution::Normal(0.0, 1.0), &dev);
-    let _len = N * D_OUT;
-
-    // Cauchy propagation: location + scale, then a 90% interval half-width.
+    // Exact affine Cauchy propagation followed by the local-linear ReLU
+    // approximation; use its location + scale for a nominal 90% half-width.
     let c0 = Cauchy::new(x.clone(), Tensor::<Nd, 2>::full([N, D_IN], GAMMA, &dev));
     let c1 = propagate_relu_cauchy(&propagate_linear_cauchy(&c0, w1.clone(), b1.clone()));
     let c2 = propagate_linear_cauchy(&c1, w2.clone(), b2.clone());
@@ -84,7 +85,8 @@ fn main() {
         .map(|v| (*v as f64).max(0.0).sqrt())
         .collect();
 
-    // True outputs under Cauchy input noise; measure coverage of each interval.
+    // True outputs under Cauchy input noise; record observed coverage of each
+    // nominal interval in this synthetic draw.
     let mut rng = 0x0CA0_C1A0_u64;
     let mut next = || {
         rng ^= rng << 13;
@@ -135,8 +137,13 @@ fn main() {
         }
     }
 
-    println!("90% interval coverage under heavy-tailed (Cauchy) input noise:");
+    println!("observed coverage of nominal 90% intervals under Cauchy input noise:");
     println!("  Gaussian propagation  {:.3}", g_cov as f64 / total as f64);
-    println!("  Cauchy propagation    {:.3}", c_cov as f64 / total as f64);
-    println!("\nGaussian intervals are too narrow for heavy tails; Cauchy keeps them.");
+    println!(
+        "  local-linear Cauchy    {:.3}",
+        c_cov as f64 / total as f64
+    );
+    println!(
+        "\nThe Cauchy ReLU approximation is not a calibrated interval construction; compare this run with 0.90, not as a guarantee."
+    );
 }

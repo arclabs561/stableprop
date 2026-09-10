@@ -1,8 +1,7 @@
 //! Conformalize stableprop's analytic error bars.
 //!
-//! stableprop's propagated std is a *heuristic* uncertainty scale -- accurate as
-//! a relative signal, but not calibrated to real residuals (we measured ~0.90
-//! coverage where 0.95 was wanted). Split-conformal prediction fixes that: using
+//! stableprop's propagated std is an uncertainty scale, not a calibrated residual
+//! model. Split-conformal prediction can calibrate it: using
 //! stableprop's per-point std as the normalizer, it produces intervals with a
 //! finite-sample marginal coverage under exchangeability, while staying adaptive
 //! (wider where stableprop says the input is more uncertain).
@@ -65,7 +64,8 @@ fn target(x: &[f32]) -> f32 {
 fn main() {
     let dev = <Ad as Backend>::Device::default();
 
-    let make = |n: usize, noisy: bool, seed_mul: usize| -> (Vec<f32>, Vec<f32>) {
+    let make = |n: usize, noisy: bool, seed: u64| -> (Vec<f32>, Vec<f32>) {
+        <Ad as Backend>::seed(&dev, seed);
         let xt = Tensor::<Ad, 2>::random([n, D_IN], Distribution::Normal(0.0, 1.0), &dev);
         let xv = xt.to_data().to_vec::<f32>().unwrap();
         let noise = if noisy {
@@ -76,19 +76,19 @@ fn main() {
         } else {
             vec![0.0; n]
         };
-        let _ = seed_mul;
         let yv: Vec<f32> = (0..n)
             .map(|i| target(&xv[i * D_IN..(i + 1) * D_IN]) + noise[i])
             .collect();
         (xv, yv)
     };
-    let (xtr, ytr) = make(N_TRAIN, true, 1);
-    let (xca, yca) = make(N_CAL, true, 2);
-    let (xte, yte) = make(N_TEST, true, 3);
+    let (xtr, ytr) = make(N_TRAIN, true, 0xC0A1_0001);
+    let (xca, yca) = make(N_CAL, true, 0xC0A1_0002);
+    let (xte, yte) = make(N_TEST, true, 0xC0A1_0003);
 
     let x_train = Tensor::<Ad, 2>::from_data(TensorData::new(xtr, [N_TRAIN, D_IN]), &dev);
     let y_train = Tensor::<Ad, 2>::from_data(TensorData::new(ytr, [N_TRAIN, 1]), &dev);
 
+    <Ad as Backend>::seed(&dev, 0xC0A1_1000);
     let mut model = Mlp::<Ad>::init(&dev);
     let mut optim = AdamConfig::new().init();
     println!("training regressor ({N_TRAIN} samples)...");
@@ -175,8 +175,8 @@ fn main() {
         "  {:<34} {:>8.3} {:>10.3}",
         "constant-width conformal", const_cov, const_w
     );
+    println!("\nThe conformal intervals use held-out calibration scores.");
     println!(
-        "\nraw is miscalibrated in this run; conformal intervals use held-out calibration scores."
+        "The adaptive interval uses stableprop's per-point scale; the constant interval does not."
     );
-    println!("the conformalized-stableprop width adapts per point (stableprop's sigma), the constant one does not.");
 }

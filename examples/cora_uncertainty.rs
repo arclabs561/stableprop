@@ -1,15 +1,12 @@
-//! Real-data calibration eval: does stableprop's analytic uncertainty actually
-//! flag the nodes a GCN gets wrong on Cora?
+//! Real-data evaluation of propagated uncertainty on Cora nodes.
 //!
 //! Trains a 2-layer GCN on the Cora citation graph (Kipf & Welling 2017), then
-//! puts a Gaussian over the input features and propagates it through the trained
-//! net with stableprop to get a per-node predictive variance in one pass. The test
-//! that risks the claim: rank test nodes by that variance and **abstain on the
-//! most-uncertain ones** -- if the uncertainty is meaningful, accuracy on the
-//! retained nodes climbs above the random-abstention baseline. We also check that
-//! the analytic ranking agrees with Monte-Carlo sampling (Spearman).
+//! propagates Gaussian input-feature noise through the trained net to obtain a
+//! per-node variance in one pass. It compares accuracy after uncertainty-based
+//! abstention with a random ordering and compares analytic with Monte-Carlo
+//! uncertainty rankings.
 //!
-//! Data is reused from ricci's example (gitignored). Run:
+//! Provide a directory containing raw `cora.content` and `cora.cites` files. Run:
 //! `cargo run --release --example cora_uncertainty --features burn`
 //! (optionally pass a path to a dir holding `cora.content` + `cora.cites`).
 
@@ -36,7 +33,7 @@ use stableprop::burn_sdp::{
 const HIDDEN: usize = 16;
 const INPUT_STD: f64 = 0.1;
 const MC_SAMPLES: usize = 200;
-const LAPLACE_PRIOR_PREC: f64 = 1e-2;
+const FISHER_PRIOR_PREC: f64 = 1e-2;
 
 struct Graph {
     n: usize,
@@ -47,22 +44,32 @@ struct Graph {
     adj_norm: Vec<f32>,
 }
 
-/// LBC-format loader (same parser ricci's cora example uses).
+/// Load tab-separated raw Cora content and citation files.
 fn load_planetoid(dir: &Path, name: &str) -> std::io::Result<Graph> {
     let content = std::fs::read_to_string(dir.join(format!("{name}.content")))?;
     let cites = std::fs::read_to_string(dir.join(format!("{name}.cites")))?;
+    let invalid = |message: String| std::io::Error::new(std::io::ErrorKind::InvalidData, message);
 
     let n_features = content
         .lines()
         .find(|l| !l.trim().is_empty())
         .map(|l| l.split('\t').count().saturating_sub(2))
-        .unwrap_or(0);
+        .ok_or_else(|| invalid(format!("{} has no nonempty rows", dir.display())))?;
+    if n_features == 0 {
+        return Err(invalid(
+            "Cora content rows need an id, at least one feature, and a label".into(),
+        ));
+    }
 
     let mut label_names: Vec<&str> = content
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| l.rsplit('\t').next().unwrap())
-        .collect();
+        .map(|l| {
+            l.rsplit('\t')
+                .next()
+                .ok_or_else(|| invalid("Cora content row has no label".into()))
+        })
+        .collect::<Result<_, _>>()?;
     label_names.sort_unstable();
     label_names.dedup();
     let n_classes = label_names.len();
@@ -77,12 +84,27 @@ fn load_planetoid(dir: &Path, name: &str) -> std::io::Result<Graph> {
     let mut labels = Vec::new();
     for line in content.lines().filter(|l| !l.trim().is_empty()) {
         let cols: Vec<&str> = line.split('\t').collect();
-        let idx = id_to_idx.len();
-        id_to_idx.insert(cols[0].to_string(), idx);
-        for f in &cols[1..=n_features] {
-            features.push(f.parse::<f32>().unwrap_or(0.0));
+        if cols.len() != n_features + 2 || cols[0].is_empty() {
+            return Err(invalid(format!("malformed Cora content row: {line}")));
         }
-        labels.push(class_id[cols[n_features + 1]]);
+        let idx = id_to_idx.len();
+        if id_to_idx.insert(cols[0].to_string(), idx).is_some() {
+            return Err(invalid(format!("duplicate Cora node id: {}", cols[0])));
+        }
+        for f in &cols[1..=n_features] {
+            let value = f
+                .parse::<f32>()
+                .map_err(|_| invalid(format!("non-numeric Cora feature: {f}")))?;
+            if !value.is_finite() {
+                return Err(invalid(format!("non-finite Cora feature: {f}")));
+            }
+            features.push(value);
+        }
+        labels.push(
+            *class_id
+                .get(cols[n_features + 1])
+                .ok_or_else(|| invalid("unknown Cora label".into()))?,
+        );
     }
     let n = labels.len();
 
@@ -92,7 +114,10 @@ fn load_planetoid(dir: &Path, name: &str) -> std::io::Result<Graph> {
     }
     for line in cites.lines().filter(|l| !l.trim().is_empty()) {
         let mut it = line.split_whitespace();
-        let (a, b) = (it.next().unwrap(), it.next().unwrap());
+        let (a, b) = match (it.next(), it.next(), it.next()) {
+            (Some(a), Some(b), None) => (a, b),
+            _ => return Err(invalid(format!("malformed Cora citation row: {line}"))),
+        };
         if let (Some(&i), Some(&j)) = (id_to_idx.get(a), id_to_idx.get(b)) {
             adj[i * n + j] = 1.0;
             adj[j * n + i] = 1.0;
@@ -235,8 +260,18 @@ fn spearman(a: &[f64], b: &[f64]) -> f64 {
         let mut idx: Vec<usize> = (0..v.len()).collect();
         idx.sort_by(|&i, &j| v[i].partial_cmp(&v[j]).unwrap());
         let mut r = vec![0.0; v.len()];
-        for (rank, &i) in idx.iter().enumerate() {
-            r[i] = rank as f64;
+        let mut start = 0;
+        while start < idx.len() {
+            let mut end = start;
+            while end + 1 < idx.len() && v[idx[end + 1]] == v[idx[start]] {
+                end += 1;
+            }
+            // Zero-based average rank for tied values.
+            let average = (start + end) as f64 / 2.0;
+            for &i in &idx[start..=end] {
+                r[i] = average;
+            }
+            start = end + 1;
         }
         r
     };
@@ -252,6 +287,18 @@ fn spearman(a: &[f64], b: &[f64]) -> f64 {
         vb += (y - mb).powi(2);
     }
     cov / (va.sqrt() * vb.sqrt())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spearman;
+
+    #[test]
+    fn spearman_uses_average_ranks_for_ties() {
+        let a = [1.0, 1.0, 2.0, 3.0];
+        let b = [1.0, 1.0, 3.0, 2.0];
+        assert!((spearman(&a, &b) - 7.0 / 9.0).abs() < 1e-12);
+    }
 }
 
 /// AUROC of `score` as a detector of the boolean `positive` label (here:
@@ -284,11 +331,11 @@ fn auroc(score: &[f64], positive: &[bool]) -> f64 {
     (sum_pos - (n_pos * (n_pos + 1)) as f64 / 2.0) / (n_pos as f64 * n_neg as f64)
 }
 
-/// Diagonal-Laplace EPISTEMIC per-node variance: estimate each weight's
-/// posterior variance from the empirical Fisher (sum of per-train-node squared
-/// gradients), then propagate that weight uncertainty with zero input noise.
-/// This is the "make it better" path -- weight uncertainty is epistemic, unlike
-/// the input-noise (aleatoric) signal `sdp_node_variance` computes.
+/// Diagonal empirical-Fisher weight-uncertainty proxy: invert the per-weight
+/// Fisher diagonal plus a chosen prior precision, then propagate it with zero
+/// input noise. This is neither a calibrated posterior nor a full Laplace
+/// approximation; it omits bias uncertainty and parameter correlations. It is
+/// distinct from the input-noise signal `sdp_node_variance` computes.
 fn epistemic_node_variance<B: AutodiffBackend>(
     model: &Gcn<B>,
     x: &Tensor<B, 2>,
@@ -319,7 +366,7 @@ fn epistemic_node_variance<B: AutodiffBackend>(
             Some(a) => a + g2.clone() * g2,
         });
     }
-    // Posterior variance = 1 / (prior precision + Fisher).
+    // Mean-field variance proxy = 1 / (chosen prior precision + Fisher).
     let wvar1 = f1.unwrap().add_scalar(prior_prec).recip();
     let wvar2 = f2.unwrap().add_scalar(prior_prec).recip();
     let wmean1 = model.lin1.weight.val().inner();
@@ -336,7 +383,7 @@ fn epistemic_node_variance<B: AutodiffBackend>(
         .as_ref()
         .map(|b| (b.val().inner(), zeros_like(&b.val().inner())));
 
-    // Propagate weight uncertainty with zero input noise (pure epistemic).
+    // Propagate the weight-uncertainty proxy with zero input noise.
     let xi = x.clone().inner();
     let adji = adj.clone().inner();
     let [n, _] = xi.dims();
@@ -354,8 +401,9 @@ fn epistemic_node_variance<B: AutodiffBackend>(
         .collect()
 }
 
-fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) {
-    let g = load_planetoid(dir, name).unwrap();
+fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) -> std::io::Result<()> {
+    <B as Backend>::seed(&device, 0xC0A0_0001);
+    let g = load_planetoid(dir, name)?;
     let (train_idx, test_idx) = split(&g.labels, g.n_classes);
     println!(
         "dataset: {name}  nodes: {}  features: {}  classes: {}  test: {}",
@@ -444,7 +492,7 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) {
 
     // --- Accuracy-coverage: abstain on most-uncertain by SDP vs random ---
     let mut rand_state = 0xACE1u64;
-    let mut rand_u: Vec<f64> = (0..test_idx.len())
+    let rand_u: Vec<f64> = (0..test_idx.len())
         .map(|_| {
             rand_state ^= rand_state << 13;
             rand_state ^= rand_state >> 7;
@@ -452,9 +500,6 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) {
             (rand_state >> 11) as f64
         })
         .collect();
-    // normalize random key magnitude irrelevant; used only for ordering
-    rand_u.iter_mut().for_each(|v| *v = v.fract());
-
     println!("accuracy vs coverage (abstain on most-uncertain):");
     println!("  {:>9}  {:>10}  {:>10}", "coverage", "sdp", "random");
     for &cov in &[1.0, 0.9, 0.8, 0.7, 0.6, 0.5] {
@@ -469,7 +514,7 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) {
         .iter()
         .map(|&i| !argmax_correct(&logits_v, &g.labels, i, g.n_classes))
         .collect();
-    // Epistemic (weight-uncertainty) signal via diagonal Laplace.
+    // Weight-uncertainty signal via the diagonal empirical-Fisher proxy.
     let node_epi = epistemic_node_variance(
         &model,
         &x,
@@ -477,7 +522,7 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) {
         &targets,
         &train_idx,
         &device,
-        LAPLACE_PRIOR_PREC,
+        FISHER_PRIOR_PREC,
     );
     let u_epi: Vec<f64> = test_idx.iter().map(|&i| node_epi[i]).collect();
 
@@ -487,7 +532,7 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) {
         auroc(&u_sdp, &errors)
     );
     println!(
-        "  weight-Laplace (epistemic) AUROC = {:.4}",
+        "  empirical-Fisher proxy AUROC = {:.4}",
         auroc(&u_epi, &errors)
     );
     println!(
@@ -496,8 +541,8 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) {
     );
     println!("  (0.5 = uninformative, 1.0 = flags every wrong prediction)");
 
-    // Accuracy-coverage for the epistemic signal too.
-    println!("\nepistemic accuracy vs coverage (abstain on most-uncertain):");
+    // Accuracy-coverage for the empirical-Fisher proxy too.
+    println!("\nempirical-Fisher proxy accuracy vs coverage (abstain on most-uncertain):");
     for &cov in &[1.0, 0.9, 0.8, 0.7, 0.6, 0.5] {
         let a = accuracy_at_coverage(&logits_v, &g.labels, &test_idx, &u_epi, g.n_classes, cov);
         println!("  {cov:>9.2}  {a:>10.4}");
@@ -505,15 +550,22 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) {
 
     let rho = spearman(&u_sdp, &u_mc);
     println!("\nSDP vs MC per-node uncertainty (test nodes): Spearman rho = {rho:.4}");
+    Ok(())
 }
 
-/// Leave-one-class-out OOD detection (the fair test for epistemic uncertainty):
-/// train WITHOUT the `held_out` class, then test whether uncertainty is higher on
-/// held-out-class nodes (OOD) than on in-distribution test nodes. Compares
-/// input-noise (aleatoric), weight-Laplace (epistemic), and max-softmax
-/// probability (MSP -- the standard free baseline, Hendrycks & Gimpel 2017).
-fn ood_eval<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str, held_out: i32) {
-    let g = load_planetoid(dir, name).unwrap();
+/// Transductive novel-class scoring: train without labels from `held_out`, then
+/// score its nodes against in-distribution nodes. The full graph, including
+/// held-out node features and edges, remains visible to message passing, so this
+/// is not an inductive OOD evaluation. Compares input-noise, the empirical-Fisher
+/// weight-uncertainty proxy, and max-softmax probability (MSP).
+fn ood_eval<B: AutodiffBackend>(
+    device: B::Device,
+    dir: &Path,
+    name: &str,
+    held_out: i32,
+) -> std::io::Result<()> {
+    <B as Backend>::seed(&device, 0xC0A0_0002);
+    let g = load_planetoid(dir, name)?;
     let mut rng = 0x51ce_2026_0bad_f00du64;
     let mut by_class: Vec<Vec<usize>> = vec![Vec::new(); g.n_classes];
     for (i, &c) in g.labels.iter().enumerate() {
@@ -528,13 +580,14 @@ fn ood_eval<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str, held_
         train_idx.extend(bucket.iter().take(20).copied());
     }
     let train_set: std::collections::HashSet<usize> = train_idx.iter().copied().collect();
-    let id_test: Vec<usize> = (0..g.n)
+    let mut id_test: Vec<usize> = (0..g.n)
         .filter(|&i| g.labels[i] != held_out && !train_set.contains(&i))
-        .take(1000)
         .collect();
+    shuffle(&mut id_test, &mut rng);
+    id_test.truncate(1000);
     let ood: Vec<usize> = (0..g.n).filter(|&i| g.labels[i] == held_out).collect();
     println!(
-        "\n=== OOD detection: class {held_out} held out ===\nID train: {}  ID test: {}  OOD nodes: {}",
+        "\n=== transductive novel-class scoring: class {held_out} unlabeled in training ===\nID train: {}  ID test: {}  novel-class nodes: {}",
         train_idx.len(),
         id_test.len(),
         ood.len()
@@ -580,9 +633,9 @@ fn ood_eval<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str, held_
         &targets,
         &train_idx,
         &device,
-        LAPLACE_PRIOR_PREC,
+        FISHER_PRIOR_PREC,
     );
-    // MSP OOD score = 1 - max softmax prob (higher = more OOD).
+    // MSP novel-class score = 1 - max softmax probability (higher = more novel).
     let c = g.n_classes;
     let msp: Vec<f64> = (0..g.n)
         .map(|i| {
@@ -597,35 +650,51 @@ fn ood_eval<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str, held_
     let eval: Vec<usize> = id_test.iter().chain(ood.iter()).copied().collect();
     let labels: Vec<bool> = eval.iter().map(|&i| g.labels[i] == held_out).collect();
     let pick = |src: &[f64]| -> Vec<f64> { eval.iter().map(|&i| src[i]).collect() };
-    println!("OOD-detection AUROC (1.0 = uncertainty perfectly separates novel-class nodes):");
+    println!("transductive novel-class AUROC (1.0 = score perfectly separates classes):");
     println!(
         "  input-noise (aleatoric)    = {:.4}",
         auroc(&pick(&node_var), &labels)
     );
     println!(
-        "  weight-Laplace (epistemic) = {:.4}",
+        "  empirical-Fisher proxy      = {:.4}",
         auroc(&pick(&node_epi), &labels)
     );
     println!(
         "  max-softmax-prob (baseline) = {:.4}",
         auroc(&pick(&msp), &labels)
     );
+    Ok(())
 }
 
 fn main() -> ExitCode {
-    let arg = std::env::args().nth(1);
-    let dir: PathBuf = match arg {
-        Some(p) => PathBuf::from(p),
-        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../ricci/data/cora"),
+    let (dir, explicit_dir): (PathBuf, bool) = match std::env::args().nth(1) {
+        Some(p) => (PathBuf::from(p), true),
+        None => match std::env::var_os("STABLEPROP_CORA_DIR") {
+            Some(p) => (PathBuf::from(p), true),
+            None => (
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("data/cora"),
+                false,
+            ),
+        },
     };
-    if !dir.join("cora.content").exists() {
+    if !dir.join("cora.content").exists() || !dir.join("cora.cites").exists() {
         eprintln!(
-            "cora data not found at {}\nfetch it via ricci: (cd ../ricci && ./scripts/fetch_cora.sh)",
+            "Cora data not found at {}\npass a data directory as the first argument or set STABLEPROP_CORA_DIR; it must contain cora.content and cora.cites.",
             dir.display()
         );
-        return ExitCode::SUCCESS;
+        return if explicit_dir {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        };
     }
-    run::<Autodiff<NdArray<f32>>>(Default::default(), &dir, "cora");
-    ood_eval::<Autodiff<NdArray<f32>>>(Default::default(), &dir, "cora", 0);
+    if let Err(err) = run::<Autodiff<NdArray<f32>>>(Default::default(), &dir, "cora") {
+        eprintln!("could not run Cora evaluation: {err}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(err) = ood_eval::<Autodiff<NdArray<f32>>>(Default::default(), &dir, "cora", 0) {
+        eprintln!("could not run Cora transductive novel-class evaluation: {err}");
+        return ExitCode::FAILURE;
+    }
     ExitCode::SUCCESS
 }
