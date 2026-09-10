@@ -172,6 +172,17 @@ fn normal_tail_ratios<B: Backend>(t: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 2
     (r1, r)
 }
 
+// Bound the numerator before dividing: clamping mu/sigma afterward leaves
+// -mu/sigma² in division's backward pass, where an unused tail can overflow.
+fn bounded_relu_alpha<B: Backend>(mu: Tensor<B, 2>, sigma: Tensor<B, 2>) -> Tensor<B, 2> {
+    let limit = sigma.clone().mul_scalar(8.0);
+    let bounded = mu
+        .clone()
+        .mask_where(mu.clone().greater(limit.clone()), limit.clone())
+        .mask_where(mu.lower(limit.clone().neg()), limit.neg());
+    bounded / sigma
+}
+
 /// Gaussian ReLU terms, with zero variance made safe only for
 /// intermediate division. Callers restore deterministic outputs with the masks.
 fn gaussian_relu_terms<B: Backend>(
@@ -181,8 +192,7 @@ fn gaussian_relu_terms<B: Backend>(
     let deterministic = input_var.clone().lower_equal_elem(0.0);
     let var = input_var.clone().mask_fill(deterministic.clone(), 1.0);
     let sigma = var.clone().sqrt();
-    let alpha_raw = mu.clone() / sigma.clone();
-    let alpha = alpha_raw.clone().clamp(-8.0, 8.0);
+    let alpha = bounded_relu_alpha(mu.clone(), sigma.clone());
     let p = alpha
         .clone()
         .mul_scalar(FRAC_1_SQRT_2)
@@ -211,10 +221,10 @@ fn gaussian_relu_terms<B: Backend>(
         mean: mean.mask_where(tail.clone(), sigma * tail_mean),
         var: (var * normalized_var.mask_where(tail.clone(), tail_var)).clamp_min(0.0),
         p: p.mask_where(tail, tail_p),
-        alpha,
+        alpha: alpha.clone(),
         deterministic,
-        active: alpha_raw.clone().greater_equal_elem(8.0),
-        inactive: alpha_raw.lower_equal_elem(-8.0),
+        active: alpha.clone().greater_equal_elem(8.0),
+        inactive: alpha.lower_equal_elem(-8.0),
     }
 }
 
@@ -511,18 +521,23 @@ pub fn propagate_relu_full<B: Backend>(m: &MomentsFull<B>) -> MomentsFull<B> {
         .clone()
         .mask_fill(terms.deterministic.clone(), 1.0);
     let sigma = safe_var.clone().sqrt();
-    let sigma_outer = sigma.clone().unsqueeze_dim::<3>(2) * sigma.clone().unsqueeze_dim::<3>(1);
+    let sigma_i = sigma.clone().unsqueeze_dim::<3>(2);
+    let sigma_j = sigma.unsqueeze_dim::<3>(1);
+    let sigma_outer = sigma_i.clone() * sigma_j.clone();
     let off_mask = eye_d
         .clone()
         .mul_scalar(-1.0)
         .add_scalar(1.0)
         .unsqueeze::<3>();
-    // Normalize one axis at a time: dividing by sigma_i * sigma_j directly
-    // makes its squared denominator underflow during f32 autodiff at tiny
-    // variances. Exclude the diagonal, which is replaced below.
-    let rho = ((m.cov.clone() * off_mask / sigma.clone().unsqueeze_dim::<3>(2))
-        / sigma.unsqueeze_dim::<3>(1))
-    .clamp(-1.0, 1.0);
+    // Divide by the larger std first. For valid covariance, both division
+    // derivatives remain representable even when feature scales differ widely.
+    // A shared mask preserves both derivative paths when the stds are equal.
+    let i_smaller = sigma_i.clone().lower(sigma_j.clone());
+    let larger = sigma_i
+        .clone()
+        .mask_where(i_smaller.clone(), sigma_j.clone());
+    let smaller = sigma_j.mask_where(i_smaller, sigma_i);
+    let rho = ((m.cov.clone() * off_mask / larger) / smaller).clamp(-1.0, 1.0);
     let phi = (terms.alpha.clone() * terms.alpha.clone())
         .mul_scalar(-0.5)
         .exp()
@@ -617,22 +632,21 @@ pub fn propagate_relu_cross_covariance<B: Backend>(
         .clone()
         .mask_fill(deterministic.clone(), 1.0)
         .sqrt();
-    let alpha = right.mean.clone() / sigma;
-    let bounded_alpha = alpha.clone().clamp(-8.0, 8.0);
-    let t = bounded_alpha.clone().neg().clamp_min(2.0);
+    let alpha = bounded_relu_alpha(right.mean.clone(), sigma);
+    let t = alpha.clone().neg().clamp_min(2.0);
     let (r1, _) = normal_tail_ratios(t.clone());
-    let tail_p = (bounded_alpha.clone() * bounded_alpha.clone())
+    let tail_p = (alpha.clone() * alpha.clone())
         .mul_scalar(-0.5)
         .exp()
         .mul_scalar(1.0 / (2.0 * PI).sqrt())
         / (t + r1);
-    let gate = bounded_alpha
+    let gate = alpha
         .clone()
         .mul_scalar(FRAC_1_SQRT_2)
         .erf()
         .add_scalar(1.0)
         .mul_scalar(0.5)
-        .mask_where(bounded_alpha.lower_elem(-2.0), tail_p)
+        .mask_where(alpha.clone().lower_elem(-2.0), tail_p)
         .mask_fill(alpha.clone().greater_equal_elem(8.0), 1.0)
         .mask_fill(alpha.lower_equal_elem(-8.0), 0.0)
         .mask_fill(deterministic, 0.0);

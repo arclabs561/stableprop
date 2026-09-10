@@ -215,6 +215,106 @@ fn metal_tail_relu_values_and_gradients_match_erfc_references() {
     <Autodiff<GpuEager> as Backend>::sync(&device).unwrap();
 }
 
+fn assert_distant_tail_gradients<B: Backend>(device: &B::Device) {
+    // All inputs are normal f32 values. The old division backward still
+    // overflows: mean / variance is 1e50 even though the selected slope is 0 or 1.
+    for mode in ["relu", "leaky", "full", "cross"] {
+        let mean = Tensor::<Autodiff<B>, 2>::from_data([[1e20, -1e20]], device).require_grad();
+        let var = Tensor::<Autodiff<B>, 2>::from_data([[1e-30; 2]], device).require_grad();
+        let moments = Moments::new(mean.clone(), var.clone());
+        let (output_mean, output_var) = match mode {
+            "relu" => {
+                let out = propagate_relu(&moments);
+                (out.mean, out.var)
+            }
+            "leaky" => {
+                let out = propagate_leaky_relu(&moments, 0.25);
+                (out.mean, out.var)
+            }
+            "full" => {
+                let out =
+                    propagate_relu_full(&MomentsFull::from_diagonal(mean.clone(), var.clone()));
+                let variance = out.variance();
+                (out.mean, variance)
+            }
+            "cross" => {
+                let cross = Tensor::<Autodiff<B>, 3>::from_data([[[5e-31; 2]]], device);
+                let out = propagate_relu_cross_covariance(cross, &moments).reshape([1, 2]);
+                (out.clone(), out)
+            }
+            _ => unreachable!(),
+        };
+        let slope = if mode == "leaky" { 0.25 } else { 0.0 };
+        let (expected_mean, expected_var, mean_grad, var_grad) = if mode == "cross" {
+            ([5e-31, 0.0], [5e-31, 0.0], [0.0; 2], [0.0; 2])
+        } else {
+            (
+                [1e20, -slope * 1e20],
+                [1e-30, slope * slope * 1e-30],
+                [1.0, slope],
+                [1.0, slope * slope],
+            )
+        };
+        assert_eq!(data(output_mean.clone()), expected_mean, "{mode} mean");
+        assert_eq!(data(output_var.clone()), expected_var, "{mode} variance");
+        let gradients = (output_mean.sum() + output_var.sum()).backward();
+        assert_eq!(
+            data(mean.grad(&gradients).unwrap()),
+            mean_grad,
+            "{mode} d/dmean"
+        );
+        assert_eq!(
+            data(var.grad(&gradients).unwrap()),
+            var_grad,
+            "{mode} d/dvariance"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a Metal GPU"]
+fn metal_distant_relu_tails_have_linear_gradients() {
+    let device = metal_device();
+    assert_distant_tail_gradients::<GpuMsl>(&device);
+    assert_distant_tail_gradients::<GpuEager>(&device);
+}
+
+fn assert_mixed_scale_covariance_gradients<B: Backend>(device: &B::Device) {
+    let v0 = 1e-30f32;
+    let v1 = 1e30f32;
+    let cross = 0.25f32;
+    let cov =
+        Tensor::<Autodiff<B>, 3>::from_data([[[v0, cross], [cross, v1]]], device).require_grad();
+    let out = propagate_relu_full(&MomentsFull::new(
+        Tensor::<Autodiff<B>, 2>::zeros([1, 2], device),
+        cov.clone(),
+    ));
+    let gradients = out.cov.sum().backward();
+    let actual = data(cov.grad(&gradients).unwrap());
+    // Centered third-order series: C/4 + C²/(4*pi*sqrt(v0*v1)).
+    let scale = (v0 as f64 * v1 as f64).sqrt();
+    let correction = (cross as f64).powi(2) / (4.0 * std::f64::consts::PI * scale);
+    let marginal = 0.5 - 0.5 / std::f64::consts::PI;
+    let cross_grad = 0.25 + cross as f64 / (2.0 * std::f64::consts::PI * scale);
+    let expected = [
+        marginal - correction / v0 as f64,
+        cross_grad,
+        cross_grad,
+        marginal - correction / v1 as f64,
+    ];
+    for (actual, expected) in actual.into_iter().zip(expected) {
+        relative(actual, expected as f32, "mixed-scale covariance gradient");
+    }
+}
+
+#[test]
+#[ignore = "requires a Metal GPU"]
+fn metal_mixed_scale_covariance_gradients_match_centered_series() {
+    let device = metal_device();
+    assert_mixed_scale_covariance_gradients::<GpuMsl>(&device);
+    assert_mixed_scale_covariance_gradients::<GpuEager>(&device);
+}
+
 fn fixture<B: Backend>(device: &B::Device) -> Vec<Vec<f32>> {
     // Includes zero variance, a central input, tiny scale, and linear tails.
     let mean = Tensor::<B, 2>::from_data([[0.0, 1e-12, 9.0, -9.0]], device);

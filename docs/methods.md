@@ -151,7 +151,7 @@ both switch to continued fractions at `a < -2`, with 32 levels for Burn
 [convergent CDF series](https://www.jstatsoft.org/v11/i04/) and Burn uses its
 backend's error function. Tensor
 masks evaluate both branches, so this accuracy costs arithmetic even for
-central inputs; the [benchmarks](../benches/README.md) separate both regimes.
+central inputs; the [Burn benchmarks](../benches/README.md) separate both regimes.
 These numerical choices do not remove Gaussian closure or covariance-series
 truncation error.
 
@@ -161,6 +161,11 @@ variance `v` diverges as `v` approaches zero. The Burn path selects finite
 gradients for exactly deterministic inputs. Those are computational conventions,
 not limits of every positive-variance derivative. Tests separate these boundary
 conventions from analytical gradient checks at positive variance.
+
+Finite forward values do not ensure finite autodiff gradients: an overflowing
+intermediate derivative can contaminate a masked branch. Burn bounds the mean
+before dividing by the standard deviation and normalizes covariance by the
+larger standard deviation first to avoid these intermediate overflows.
 
 The [unscented transform (Julier & Uhlmann, 1997)](https://www.robots.ox.ac.uk/~cvrg/hilary2003/Julier1997_SPIE_KF.pdf)
 and [cubature Kalman methods (Arasaratnam & Haykin, 2009)](https://doi.org/10.1109/TAC.2009.2019800)

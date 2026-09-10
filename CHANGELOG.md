@@ -13,6 +13,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   central CDF approximation with a convergent series.
 - Preserve the input dtype in full-covariance helpers, and check leaky-ReLU
   coefficients against the actual tensor dtype under Burn 0.21.
+- Bound ReLU standardization before division to keep tail gradients finite
+  when the mean is large relative to a tiny variance.
+- Order full-covariance normalization by feature scale to avoid intermediate
+  gradient overflow for correlated inputs with very different variances.
 
 ### Changed
 
