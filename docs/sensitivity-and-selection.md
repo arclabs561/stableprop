@@ -10,7 +10,7 @@ but it does not by itself measure what a new label would teach the model.
 | --- | --- | --- |
 | Input-noise variance | Inputs, with model parameters fixed | How much does this prediction change under the chosen perturbations? |
 | Parameter-posterior variance | Parameters drawn from a fitted posterior | How uncertain is the model about this prediction under that posterior? |
-| Predictive label entropy | Possible labels under the predictive model | How ambiguous is the predicted label? |
+| Predictive label entropy | Labels under the predictive model | How diffuse is the predicted label distribution? |
 | Per-example parameter gradient | Parameters in a specified loss | Which update would this labeled or pseudo-labeled example induce? |
 | Acquisition utility | Possible observations followed by an update | Which observation is expected to improve the chosen learning objective? |
 

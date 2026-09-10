@@ -6,8 +6,9 @@ is named; they describe their own implementations and experiments, not this crat
 
 ## What is being approximated?
 
-Given uncertain input `X`, the target is the distribution of `f(X)`. Three
-choices determine what a propagation method returns:
+Given a distribution over inputs, parameters, or both, the target is the
+induced output distribution. For fixed weights and uncertain input `X`, this
+is the distribution of `f(X)`. Three choices determine what propagation returns:
 
 - Representation: independent marginals, full covariance, a structured
   covariance, or a distribution with no finite moments such as Cauchy.
@@ -127,6 +128,13 @@ For a dense square layer of width `d`, diagonal affine propagation costs
 and `O(d^2)` storage, per input. ReLU's fixed third-order pairwise series costs
 `O(d^2)`. These are operation counts, not measured speedups: device kernels,
 batch size, covariance structure, and graph aggregation affect runtime.
+
+Differentiability also depends on the coordinates and boundary. At zero mean,
+the Gaussian ReLU mean is `sqrt(v / (2 pi))`, whose derivative with respect to
+variance `v` diverges as `v` approaches zero. The Burn path selects finite
+gradients for exactly deterministic inputs. Those are computational conventions,
+not limits of every positive-variance derivative. Tests separate these boundary
+conventions from analytical gradient checks at positive variance.
 
 The [unscented transform (Julier & Uhlmann, 1997)](https://www.robots.ox.ac.uk/~cvrg/hilary2003/Julier1997_SPIE_KF.pdf)
 and [cubature Kalman methods (Arasaratnam & Haykin, 2009)](https://doi.org/10.1109/TAC.2009.2019800)

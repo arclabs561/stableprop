@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Replace unseeded tensor Monte Carlo checks for exact operations with
+  deterministic analytical references. Retain seeded distributional checks.
+- Add full-covariance and ReLU moment properties, and distinguish analytical
+  gradients at positive variance from deterministic boundary conventions.
+
 ### Fixed
 
 - Reject standard deviations whose squared variance underflows to zero.

@@ -430,49 +430,4 @@ mod tests {
     fn sequential_rejects_negative_std() {
         let _ = propagate_sequential(&[], &[1.0], &[-1.0]);
     }
-
-    #[test]
-    fn sequential_three_layer_network() {
-        // input(2) -> Linear(2->3) -> ReLU -> Linear(3->2) -> ReLU -> Linear(2->1)
-        let layers = vec![
-            Layer::Linear {
-                weight: vec![vec![1.0, 0.5], vec![-0.5, 1.0], vec![0.3, -0.3]],
-                bias: vec![0.1, 0.0, -0.1],
-            },
-            Layer::ReLU,
-            Layer::Linear {
-                weight: vec![vec![1.0, -1.0, 0.5], vec![0.5, 1.0, -0.5]],
-                bias: vec![0.0, 0.0],
-            },
-            Layer::ReLU,
-            Layer::Linear {
-                weight: vec![vec![1.0, 1.0]],
-                bias: vec![0.0],
-            },
-        ];
-
-        let input_mean = vec![1.0, 0.5];
-        let input_std = vec![0.3, 0.2];
-
-        let out = propagate_sequential(&layers, &input_mean, &input_std);
-
-        // Output is 1-dimensional.
-        assert_eq!(out.mean.len(), 1);
-        assert_eq!(out.cov.len(), 1);
-        assert_eq!(out.cov[0].len(), 1);
-
-        // After ReLU layers, mean should be non-negative.
-        assert!(out.mean[0] >= 0.0, "output mean = {}", out.mean[0]);
-        // Variance should be non-negative.
-        assert!(out.cov[0][0] >= 0.0, "output var = {}", out.cov[0][0]);
-        // Should have finite, reasonable values.
-        assert!(out.mean[0].is_finite());
-        assert!(out.cov[0][0].is_finite());
-        // Propagation should produce non-zero output for this input.
-        assert!(
-            out.mean[0] > 0.01,
-            "output mean suspiciously small: {}",
-            out.mean[0]
-        );
-    }
 }

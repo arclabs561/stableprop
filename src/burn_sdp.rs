@@ -19,6 +19,10 @@
 //! shapes, but do not inspect tensor contents or synchronize devices to validate
 //! values. Public fields carry the same requirements. ReLU formulas use linear
 //! tail limits at eight standard deviations for numerical stability.
+//! At zero variance, masks select deterministic outputs and finite gradients.
+//! These boundary conventions are not limits of every positive-variance
+//! derivative: at zero mean, the mean's variance derivative diverges as
+//! variance approaches zero.
 
 use burn::tensor::backend::Backend;
 use burn::tensor::{ElementConversion, ElementLimits, Tensor, TensorData};
@@ -656,7 +660,6 @@ pub fn propagate_relu_cauchy<B: Backend>(c: &Cauchy<B>) -> Cauchy<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::tensor::Distribution;
     use burn_ndarray::NdArray;
 
     type B = NdArray<f32>;
@@ -684,82 +687,51 @@ mod tests {
         (mean, var)
     }
 
-    /// One linear map of a diagonal Gaussian: the marginal output variance is
-    /// exact (`var @ W^2`), so SDP must match Monte Carlo to within sampling
-    /// noise. This is the load-bearing exactness claim of `propagate_linear`.
+    /// Fixed affine moments exercise the `mean @ W + bias` and `var @ W^2`
+    /// identities with a rectangular weight matrix. The expected values are
+    /// hand-calculated, rather than sampled from the implementation's backend.
     #[test]
-    fn linear_variance_matches_monte_carlo() {
+    fn linear_affine_moments_match_fixed_oracle() {
         let dev = <B as Backend>::Device::default();
-        let (n, d_in, d_out, k) = (3usize, 5usize, 4usize, 40_000usize);
-        let std = 0.25f64;
+        let mean = Tensor::<B, 2>::from_data([[1.0, -2.0], [0.5, 3.0]], &dev);
+        let var = Tensor::<B, 2>::from_data([[0.25, 4.0], [1.0, 0.5]], &dev);
+        let weight = Tensor::<B, 2>::from_data([[2.0, -1.0, 0.5], [-0.25, 3.0, 2.0]], &dev);
+        let bias = Tensor::<B, 1>::from_data([0.75, -1.25, 2.0], &dev);
 
-        let w = Tensor::<B, 2>::random([d_in, d_out], Distribution::Normal(0.0, 1.0), &dev);
-        let mean = Tensor::<B, 2>::random([n, d_in], Distribution::Normal(0.0, 1.0), &dev);
-        let var = Tensor::<B, 2>::full([n, d_in], std * std, &dev);
-
-        let out = propagate_linear(&Moments::new(mean.clone(), var), w.clone(), None);
-        let sdp_var = out.var.to_data().to_vec::<f32>().unwrap();
-
-        let len = n * d_out;
-        let mut samples = Vec::with_capacity(k);
-        for _ in 0..k {
-            let noise = Tensor::<B, 2>::random([n, d_in], Distribution::Normal(0.0, std), &dev);
-            let y = (mean.clone() + noise).matmul(w.clone());
-            samples.push(
-                y.to_data()
-                    .to_vec::<f32>()
-                    .unwrap()
-                    .iter()
-                    .map(|x| *x as f64)
-                    .collect(),
-            );
-        }
-        let (_, mc_var) = mc_moments(&samples, len);
-        for i in 0..len {
-            let rel = (sdp_var[i] as f64 - mc_var[i]).abs() / mc_var[i].max(1e-9);
-            assert!(rel < 0.10, "output {i}: sdp={} mc={mc_var:?}", sdp_var[i]);
-        }
+        let actual = propagate_linear(&Moments::new(mean, var), weight, Some(bias));
+        let expected_mean =
+            Tensor::<B, 2>::from_data([[3.25, -8.25, -1.5], [1.0, 7.25, 8.25]], &dev);
+        let expected_var =
+            Tensor::<B, 2>::from_data([[1.25, 36.25, 16.0625], [4.03125, 5.5, 2.25]], &dev);
+        close(&actual.mean, &expected_mean, 1e-6);
+        close(&actual.var, &expected_var, 1e-6);
     }
 
-    /// A single ReLU on a Gaussian: Frey-Hinton gives the *exact* moments of
-    /// `max(0, X)`, so SDP mean and variance must match Monte Carlo tightly.
+    /// Frey-Hinton's closed-form Gaussian ReLU moments give these central,
+    /// tail, and deterministic expected values without sampling noise.
     #[test]
-    fn relu_moments_match_monte_carlo() {
+    fn relu_gaussian_moments_match_fixed_oracle() {
         let dev = <B as Backend>::Device::default();
-        let (n, d, k) = (2usize, 3usize, 60_000usize);
-        let std = 0.8f64;
+        let mean = Tensor::<B, 2>::from_data([[1.0, -1.0, 0.0, 9.0], [-9.0, 2.0, -2.0, 0.0]], &dev);
+        let var = Tensor::<B, 2>::from_data([[1.0, 1.0, 1.0, 1.0], [1.0, 0.0, 0.0, 0.0]], &dev);
 
-        let mean = Tensor::<B, 2>::random([n, d], Distribution::Normal(0.0, 0.5), &dev);
-        let var = Tensor::<B, 2>::full([n, d], std * std, &dev);
-        let out = propagate_relu(&Moments::new(mean.clone(), var));
-        let sdp_mean = out.mean.to_data().to_vec::<f32>().unwrap();
-        let sdp_var = out.var.to_data().to_vec::<f32>().unwrap();
-
-        let len = n * d;
-        let mut samples = Vec::with_capacity(k);
-        for _ in 0..k {
-            let noise = Tensor::<B, 2>::random([n, d], Distribution::Normal(0.0, std), &dev);
-            let y = (mean.clone() + noise).clamp_min(0.0);
-            samples.push(
-                y.to_data()
-                    .to_vec::<f32>()
-                    .unwrap()
-                    .iter()
-                    .map(|x| *x as f64)
-                    .collect(),
-            );
-        }
-        let (mc_mean, mc_var) = mc_moments(&samples, len);
-        for i in 0..len {
-            assert!(
-                (sdp_mean[i] as f64 - mc_mean[i]).abs() < 0.02,
-                "mean {i}: sdp={} mc={}",
-                sdp_mean[i],
-                mc_mean[i]
-            );
-            let rel = (sdp_var[i] as f64 - mc_var[i]).abs() / mc_var[i].max(1e-9);
-            assert!(rel < 0.08, "var {i}: sdp={} mc={}", sdp_var[i], mc_var[i]);
-        }
+        let actual = propagate_relu(&Moments::new(mean, var));
+        let expected_mean = Tensor::<B, 2>::from_data(
+            [
+                [1.083_315_5, 0.083_315_46, 0.398_942_3, 9.0],
+                [0.0, 2.0, 0.0, 0.0],
+            ],
+            &dev,
+        );
+        let expected_var = Tensor::<B, 2>::from_data(
+            [
+                [0.751_087_8, 0.068_398_34, 0.340_845_05, 1.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ],
+            &dev,
+        );
+        close(&actual.mean, &expected_mean, 2e-5);
+        close(&actual.var, &expected_var, 2e-5);
     }
 
     /// Correlated ReLU outputs are recombined by a following linear layer. A
@@ -810,12 +782,11 @@ mod tests {
     #[test]
     fn cauchy_linear_exact_vs_monte_carlo() {
         let dev = <B as Backend>::Device::default();
-        let (n, d_in, d_out, k) = (3usize, 4usize, 3usize, 40_000usize);
-
-        let loc = Tensor::<B, 2>::random([n, d_in], Distribution::Normal(0.0, 1.0), &dev);
-        let scale = Tensor::<B, 2>::full([n, d_in], 0.5, &dev);
-        let w = Tensor::<B, 2>::random([d_in, d_out], Distribution::Normal(0.0, 1.0), &dev);
-        let b = Tensor::<B, 1>::random([d_out], Distribution::Normal(0.0, 0.2), &dev);
+        let (n, d_in, d_out, k) = (2usize, 3usize, 2usize, 40_000usize);
+        let loc = Tensor::<B, 2>::from_data([[1.0, -2.0, 0.5], [-0.5, 1.5, 2.0]], &dev);
+        let scale = Tensor::<B, 2>::from_data([[0.5, 0.25, 1.0], [0.75, 0.4, 0.6]], &dev);
+        let w = Tensor::<B, 2>::from_data([[1.0, -0.5], [-0.25, 2.0], [0.75, 0.4]], &dev);
+        let b = Tensor::<B, 1>::from_data([0.2, -0.3], &dev);
 
         let out = propagate_linear_cauchy(
             &Cauchy::new(loc.clone(), scale.clone()),
@@ -874,61 +845,53 @@ mod tests {
         }
     }
 
-    /// Leaky-ReLU moments must match Monte Carlo.
+    /// Closed-form Gaussian leaky-ReLU moments for a nonzero slope, with
+    /// central, tail, and deterministic inputs. Values come from the
+    /// Frey-Hinton Gaussian ReLU moments and `leaky(x) = 0.3x + 0.7 relu(x)`.
     #[test]
-    fn leaky_relu_matches_monte_carlo() {
+    fn leaky_relu_moments_match_fixed_oracle() {
         let dev = <B as Backend>::Device::default();
-        let (n, d, k) = (2usize, 4usize, 80_000usize);
-        let (alpha, std) = (0.3f64, 0.7f64);
-
-        let mean = Tensor::<B, 2>::random([n, d], Distribution::Normal(0.0, 0.5), &dev);
-        let var = Tensor::<B, 2>::full([n, d], std * std, &dev);
-        let out = propagate_leaky_relu(&Moments::new(mean.clone(), var.clone()), alpha);
-        let sm = out.mean.to_data().to_vec::<f32>().unwrap();
-        let sv = out.var.to_data().to_vec::<f32>().unwrap();
-
-        let len = n * d;
-        let mut samples = Vec::with_capacity(k);
-        for _ in 0..k {
-            let noise = Tensor::<B, 2>::random([n, d], Distribution::Normal(0.0, std), &dev);
-            let x = mean.clone() + noise;
-            let y = x.clone().clamp_min(0.0) + x.clamp_max(0.0).mul_scalar(alpha);
-            samples.push(
-                y.to_data()
-                    .to_vec::<f32>()
-                    .unwrap()
-                    .iter()
-                    .map(|v| *v as f64)
-                    .collect(),
-            );
-        }
-        let (mc_mean, mc_var) = mc_moments(&samples, len);
-        for i in 0..len {
-            assert!(
-                (sm[i] as f64 - mc_mean[i]).abs() < 0.02,
-                "mean {i}: {} vs {}",
-                sm[i],
-                mc_mean[i]
-            );
-            let rel = (sv[i] as f64 - mc_var[i]).abs() / mc_var[i].max(1e-9);
-            assert!(rel < 0.08, "var {i}: {} vs {}", sv[i], mc_var[i]);
-        }
+        let mean = Tensor::<B, 2>::from_data([[1.0, -1.0, 0.0, 9.0], [-9.0, 2.0, -2.0, 0.0]], &dev);
+        let var = Tensor::<B, 2>::from_data([[1.0, 1.0, 1.0, 1.0], [1.0, 0.25, 0.25, 0.0]], &dev);
+        let actual = propagate_leaky_relu(&Moments::new(mean, var), 0.3);
+        let expected_mean = Tensor::<B, 2>::from_data(
+            [
+                [1.058_320_9, -0.241_679_18, 0.279_259_6, 9.0],
+                [-2.7, 2.000_002_4, -0.599_997_5, 0.0],
+            ],
+            &dev,
+        );
+        let expected_var = Tensor::<B, 2>::from_data(
+            [
+                [0.811_397_8, 0.190_150_4, 0.467_014_07, 1.0],
+                [0.09, 0.249_989_32, 0.022_503_736, 0.0],
+            ],
+            &dev,
+        );
+        close(&actual.mean, &expected_mean, 2e-5);
+        close(&actual.var, &expected_var, 2e-5);
     }
 
     /// Residual `y = x + branch(x)` with a SMALL branch: the independence
-    /// approximation of `propagate_residual_add` should be close to Monte Carlo.
+    /// approximation of `propagate_residual_add` should be close to an
+    /// independently sampled forward pass when the branch is small.
     #[test]
     fn residual_add_matches_monte_carlo_small_branch() {
         let dev = <B as Backend>::Device::default();
-        let (n, d, h, k) = (3usize, 4usize, 8usize, 80_000usize);
+        let (n, d, k) = (2usize, 2usize, 80_000usize);
         let std = 0.5f64;
 
-        // Small branch weights so the skip dominates.
-        let w1 = Tensor::<B, 2>::random([d, h], Distribution::Normal(0.0, 0.07), &dev);
-        let b1 = Tensor::<B, 1>::random([h], Distribution::Normal(0.0, 0.1), &dev);
-        let w2 = Tensor::<B, 2>::random([h, d], Distribution::Normal(0.0, 0.07), &dev);
-        let b2 = Tensor::<B, 1>::random([d], Distribution::Normal(0.0, 0.1), &dev);
-        let mean = Tensor::<B, 2>::random([n, d], Distribution::Normal(0.0, 1.0), &dev);
+        // Small fixed branch weights make the skip variance dominate.
+        let w1_values = [[0.05f32, -0.04], [0.03, 0.06]];
+        let b1_values = [0.02f32, -0.01];
+        let w2_values = [[0.04f32, -0.02], [0.01, 0.03]];
+        let b2_values = [0.01f32, -0.02];
+        let mean_values = [[0.2f32, -0.1], [0.5, 0.3]];
+        let w1 = Tensor::<B, 2>::from_data(w1_values, &dev);
+        let b1 = Tensor::<B, 1>::from_data(b1_values, &dev);
+        let w2 = Tensor::<B, 2>::from_data(w2_values, &dev);
+        let b2 = Tensor::<B, 1>::from_data(b2_values, &dev);
+        let mean = Tensor::<B, 2>::from_data(mean_values, &dev);
         let var = Tensor::<B, 2>::full([n, d], std * std, &dev);
 
         let skip = Moments::new(mean.clone(), var.clone());
@@ -942,23 +905,44 @@ mod tests {
         let r_var = res.var.to_data().to_vec::<f32>().unwrap();
 
         let len = n * d;
+        let mut state = 0xC0A1_5EED_u64;
+        let mut uniform = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
         let mut samples = Vec::with_capacity(k);
         for _ in 0..k {
-            let noise = Tensor::<B, 2>::random([n, d], Distribution::Normal(0.0, std), &dev);
-            let x = mean.clone() + noise;
-            let br = (x.clone().matmul(w1.clone()) + b1.clone().reshape([1, h]))
-                .clamp_min(0.0)
-                .matmul(w2.clone())
-                + b2.clone().reshape([1, d]);
-            let y = x + br;
-            samples.push(
-                y.to_data()
-                    .to_vec::<f32>()
-                    .unwrap()
-                    .iter()
-                    .map(|v| *v as f64)
-                    .collect(),
-            );
+            let mut x = [[0.0f64; 2]; 2];
+            for row in 0..n {
+                for col in 0..d {
+                    let z = (-2.0 * uniform().ln()).sqrt() * (2.0 * PI * uniform()).cos();
+                    x[row][col] = mean_values[row][col] as f64 + std * z;
+                }
+            }
+            let mut y = Vec::with_capacity(n * d);
+            for row in &x {
+                let hidden = [
+                    (row[0] * w1_values[0][0] as f64
+                        + row[1] * w1_values[1][0] as f64
+                        + b1_values[0] as f64)
+                        .max(0.0),
+                    (row[0] * w1_values[0][1] as f64
+                        + row[1] * w1_values[1][1] as f64
+                        + b1_values[1] as f64)
+                        .max(0.0),
+                ];
+                for col in 0..d {
+                    y.push(
+                        row[col]
+                            + hidden[0] * w2_values[0][col] as f64
+                            + hidden[1] * w2_values[1][col] as f64
+                            + b2_values[col] as f64,
+                    );
+                }
+            }
+            samples.push(y);
         }
         let (mc_mean, mc_var) = mc_moments(&samples, len);
         for i in 0..len {
@@ -970,7 +954,7 @@ mod tests {
             );
             let rel = (r_var[i] as f64 - mc_var[i]).abs() / mc_var[i].max(1e-9);
             assert!(
-                rel < 0.15,
+                rel < 0.05,
                 "var {i}: {} vs {} (rel {rel})",
                 r_var[i],
                 mc_var[i]
@@ -978,54 +962,82 @@ mod tests {
         }
     }
 
-    /// Conv2d is linear, so `propagate_conv2d` variance is exact: it must match
-    /// Monte Carlo tightly.
+    /// Convolutional mean and variance use independent scalar reference loops
+    /// over a fixed two-channel, two-output fixture with bias.
     #[test]
-    fn conv2d_variance_matches_monte_carlo() {
+    fn conv2d_moments_match_fixed_oracle() {
         let dev = <B as Backend>::Device::default();
-        let (n, cin, hw, cout, ksz, k) = (2usize, 3usize, 6usize, 4usize, 3usize, 20_000usize);
-        let std = 0.3f64;
+        let (n, cin, h, w, cout, kh, kw) = (2usize, 2usize, 3usize, 4usize, 2usize, 2usize, 2usize);
         let opts = burn::tensor::ops::ConvOptions::new([1, 1], [0, 0], [1, 1], 1);
-
-        let weight =
-            Tensor::<B, 4>::random([cout, cin, ksz, ksz], Distribution::Normal(0.0, 0.4), &dev);
-        let bias = Tensor::<B, 1>::random([cout], Distribution::Normal(0.0, 0.2), &dev);
-        let mean = Tensor::<B, 4>::random([n, cin, hw, hw], Distribution::Normal(0.0, 1.0), &dev);
-        let var = Tensor::<B, 4>::full([n, cin, hw, hw], std * std, &dev);
-
-        let (_, var_out) = propagate_conv2d(
-            mean.clone(),
-            var,
-            weight.clone(),
-            Some(bias.clone()),
-            opts.clone(),
+        let mean_data: Vec<f32> = (0..n * cin * h * w).map(|i| i as f32 * 0.1 - 1.0).collect();
+        let var_data: Vec<f32> = (0..n * cin * h * w)
+            .map(|i| 0.05 + (i % 5) as f32 * 0.1)
+            .collect();
+        let weight_data = vec![
+            0.5, -0.25, 1.0, 0.75, -0.4, 0.2, 0.3, -0.6, -0.7, 0.1, 0.4, -0.2, 0.6, 0.9, -0.3, 0.5,
+        ];
+        let bias_data = vec![0.25, -0.5];
+        let mean =
+            Tensor::<B, 4>::from_data(TensorData::new(mean_data.clone(), [n, cin, h, w]), &dev);
+        let var =
+            Tensor::<B, 4>::from_data(TensorData::new(var_data.clone(), [n, cin, h, w]), &dev);
+        let weight = Tensor::<B, 4>::from_data(
+            TensorData::new(weight_data.clone(), [cout, cin, kh, kw]),
+            &dev,
         );
-        let p_var = var_out.to_data().to_vec::<f32>().unwrap();
-        let len = p_var.len();
+        let bias = Tensor::<B, 1>::from_data(TensorData::new(bias_data.clone(), [cout]), &dev);
 
-        let mut samples = Vec::with_capacity(k);
-        for _ in 0..k {
-            let noise =
-                Tensor::<B, 4>::random([n, cin, hw, hw], Distribution::Normal(0.0, std), &dev);
-            let y = burn::tensor::module::conv2d(
-                mean.clone() + noise,
-                weight.clone(),
-                Some(bias.clone()),
-                opts.clone(),
-            );
-            samples.push(
-                y.to_data()
-                    .to_vec::<f32>()
-                    .unwrap()
-                    .iter()
-                    .map(|v| *v as f64)
-                    .collect(),
-            );
+        let (actual_mean, actual_var) = propagate_conv2d(mean, var, weight, Some(bias), opts);
+        let (oh, ow) = (h - kh + 1, w - kw + 1);
+        let mut expected_mean = vec![0.0; n * cout * oh * ow];
+        let mut expected_var = vec![0.0; n * cout * oh * ow];
+        for batch in 0..n {
+            for (out_channel, &bias) in bias_data.iter().enumerate() {
+                for row in 0..oh {
+                    for col in 0..ow {
+                        let output = ((batch * cout + out_channel) * oh + row) * ow + col;
+                        expected_mean[output] = bias;
+                        for in_channel in 0..cin {
+                            for kernel_row in 0..kh {
+                                for kernel_col in 0..kw {
+                                    let input = ((batch * cin + in_channel) * h + row + kernel_row)
+                                        * w
+                                        + col
+                                        + kernel_col;
+                                    let kernel =
+                                        ((out_channel * cin + in_channel) * kh + kernel_row) * kw
+                                            + kernel_col;
+                                    expected_mean[output] += mean_data[input] * weight_data[kernel];
+                                    expected_var[output] +=
+                                        var_data[input] * weight_data[kernel].powi(2);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-        let (_, mc_var) = mc_moments(&samples, len);
-        for i in 0..len {
-            let rel = (p_var[i] as f64 - mc_var[i]).abs() / mc_var[i].max(1e-9);
-            assert!(rel < 0.10, "var {i}: {} vs {}", p_var[i], mc_var[i]);
+        let expected_mean =
+            Tensor::<B, 4>::from_data(TensorData::new(expected_mean, [n, cout, oh, ow]), &dev);
+        let expected_var =
+            Tensor::<B, 4>::from_data(TensorData::new(expected_var, [n, cout, oh, ow]), &dev);
+        let actual_mean = actual_mean.to_data().to_vec::<f32>().unwrap();
+        let actual_var = actual_var.to_data().to_vec::<f32>().unwrap();
+        let expected_mean = expected_mean.to_data().to_vec::<f32>().unwrap();
+        let expected_var = expected_var.to_data().to_vec::<f32>().unwrap();
+        for i in 0..actual_mean.len() {
+            assert!(
+                (actual_mean[i] - expected_mean[i]).abs() < 1e-5,
+                "mean {i}: {} vs {}",
+                actual_mean[i],
+                expected_mean[i]
+            );
+            assert!(
+                (actual_var[i] - expected_var[i]).abs() < 1e-5,
+                "var {i}: {} vs {}",
+                actual_var[i],
+                expected_var[i]
+            );
         }
     }
 
@@ -1048,7 +1060,15 @@ mod tests {
 
     fn fixture() -> (Tensor<B, 2>, Moments<B>) {
         let dev = <B as Backend>::Device::default();
-        let mean = Tensor::<B, 2>::random([4, 5], Distribution::Normal(0.0, 1.0), &dev);
+        let mean = Tensor::<B, 2>::from_data(
+            [
+                [-1.0, 0.5, 2.0, -0.25, 1.0],
+                [0.3, -2.0, 1.5, 0.75, -0.5],
+                [2.0, -1.0, 0.0, 0.2, -0.8],
+                [0.1, 1.0, -1.5, 2.5, 0.4],
+            ],
+            &dev,
+        );
         let var = Tensor::<B, 2>::full([4, 5], 0.4, &dev);
         (mean.clone(), Moments::new(mean, var))
     }
@@ -1068,7 +1088,16 @@ mod tests {
     fn bayes_reduces_to_linear_at_zero_weight_var() {
         let dev = <B as Backend>::Device::default();
         let (_, m) = fixture();
-        let w = Tensor::<B, 2>::random([5, 3], Distribution::Normal(0.0, 1.0), &dev);
+        let w = Tensor::<B, 2>::from_data(
+            [
+                [0.5, -0.25, 1.0],
+                [-0.4, 0.2, 0.3],
+                [0.7, -0.6, 0.1],
+                [0.25, 0.8, -0.5],
+                [-0.3, 0.4, 0.9],
+            ],
+            &dev,
+        );
         let lin = propagate_linear(&m, w.clone(), None);
         let wvar = w.clone().zeros_like();
         let bayes = propagate_linear_bayes(&m, w, wvar, None);
@@ -1082,7 +1111,16 @@ mod tests {
     fn full_cov_diagonal_matches_diagonal_linear() {
         let dev = <B as Backend>::Device::default();
         let (mean, m) = fixture();
-        let w = Tensor::<B, 2>::random([5, 3], Distribution::Normal(0.0, 1.0), &dev);
+        let w = Tensor::<B, 2>::from_data(
+            [
+                [0.5, -0.25, 1.0],
+                [-0.4, 0.2, 0.3],
+                [0.7, -0.6, 0.1],
+                [0.25, 0.8, -0.5],
+                [-0.3, 0.4, 0.9],
+            ],
+            &dev,
+        );
         let diag = propagate_linear(&m, w.clone(), None);
         let full = propagate_linear_full(&MomentsFull::from_diagonal(mean, m.var.clone()), w, None);
         close(&diag.var, &full.variance(), 1e-4);
@@ -1201,7 +1239,16 @@ mod tests {
     fn variance_stays_nonnegative() {
         let dev = <B as Backend>::Device::default();
         let (mean, m) = fixture();
-        let w = Tensor::<B, 2>::random([5, 5], Distribution::Normal(0.0, 2.0), &dev);
+        let w = Tensor::<B, 2>::from_data(
+            [
+                [0.5, -0.25, 1.0, 0.2, -0.1],
+                [-0.4, 0.2, 0.3, -0.7, 0.6],
+                [0.7, -0.6, 0.1, 0.5, -0.2],
+                [0.25, 0.8, -0.5, 0.4, 0.3],
+                [-0.3, 0.4, 0.9, -0.2, 0.7],
+            ],
+            &dev,
+        );
         let chain = propagate_relu(&propagate_linear(
             &propagate_leaky_relu(&propagate_linear(&m, w.clone(), None), 0.1),
             w,
@@ -1248,37 +1295,19 @@ mod tests {
         assert!((v[0] - 0.5).abs() < 1e-4, "bias leaked into variance");
     }
 
-    /// GCN-adjacency propagation: `var_out = (a*a) @ var`. Validate vs MC.
+    /// GCN-adjacency propagation: `var_out = (a*a) @ var` on a rectangular,
+    /// signed fixed adjacency matrix.
     #[test]
-    fn matmul_left_variance_matches_monte_carlo() {
+    fn matmul_left_moments_match_fixed_oracle() {
         let dev = <B as Backend>::Device::default();
-        let (n, d, k) = (4usize, 3usize, 60_000usize);
-        let std = 0.4f64;
-        let a = Tensor::<B, 2>::random([n, n], Distribution::Normal(0.0, 0.6), &dev);
-        let mean = Tensor::<B, 2>::random([n, d], Distribution::Normal(0.0, 1.0), &dev);
-        let var = Tensor::<B, 2>::full([n, d], std * std, &dev);
-        let out = propagate_matmul_left(a.clone(), &Moments::new(mean.clone(), var));
-        let pv = out.var.to_data().to_vec::<f32>().unwrap();
-
-        let len = n * d;
-        let mut samples = Vec::with_capacity(k);
-        for _ in 0..k {
-            let noise = Tensor::<B, 2>::random([n, d], Distribution::Normal(0.0, std), &dev);
-            let y = a.clone().matmul(mean.clone() + noise);
-            samples.push(
-                y.to_data()
-                    .to_vec::<f32>()
-                    .unwrap()
-                    .iter()
-                    .map(|x| *x as f64)
-                    .collect(),
-            );
-        }
-        let (_, mc_var) = mc_moments(&samples, len);
-        for i in 0..len {
-            let rel = (pv[i] as f64 - mc_var[i]).abs() / mc_var[i].max(1e-9);
-            assert!(rel < 0.10, "var {i}: {} vs {}", pv[i], mc_var[i]);
-        }
+        let a = Tensor::<B, 2>::from_data([[1.0, -2.0, 0.5], [0.25, 3.0, -1.0]], &dev);
+        let mean = Tensor::<B, 2>::from_data([[1.0, -2.0], [0.5, 4.0], [-3.0, 2.0]], &dev);
+        let var = Tensor::<B, 2>::from_data([[0.25, 1.0], [4.0, 0.5], [1.5, 2.0]], &dev);
+        let actual = propagate_matmul_left(a, &Moments::new(mean, var));
+        let expected_mean = Tensor::<B, 2>::from_data([[-1.5, -9.0], [4.75, 9.5]], &dev);
+        let expected_var = Tensor::<B, 2>::from_data([[16.625, 3.5], [37.515_625, 6.5625]], &dev);
+        close(&actual.mean, &expected_mean, 1e-6);
+        close(&actual.var, &expected_var, 1e-6);
     }
 
     /// Cauchy interval half-width is `scale * tan(pi p / 2)`.
@@ -1296,69 +1325,37 @@ mod tests {
         );
     }
 
-    /// Weight-uncertainty propagation with non-zero weight and bias variance:
-    /// the mean and variance must match Monte Carlo over inputs, weights, bias.
+    /// Weight-uncertainty propagation with nonzero input, weight, and bias
+    /// variances has a hand-calculated mean-field oracle.
     #[test]
-    fn bayes_weight_uncertainty_matches_mc() {
+    fn bayes_weight_uncertainty_matches_fixed_oracle() {
         let dev = <B as Backend>::Device::default();
-        let (n, din, dout, k) = (3usize, 4usize, 3usize, 60_000usize);
-        let (in_std, w_std, b_std) = (0.3f64, 0.2f64, 0.15f64);
-
-        let w_mean = Tensor::<B, 2>::random([din, dout], Distribution::Normal(0.0, 1.0), &dev);
-        let w_var = Tensor::<B, 2>::full([din, dout], w_std * w_std, &dev);
-        let b_mean = Tensor::<B, 1>::random([dout], Distribution::Normal(0.0, 0.5), &dev);
-        let b_var = Tensor::<B, 1>::full([dout], b_std * b_std, &dev);
-        let mean = Tensor::<B, 2>::random([n, din], Distribution::Normal(0.0, 1.0), &dev);
-        let var = Tensor::<B, 2>::full([n, din], in_std * in_std, &dev);
-
-        let out = propagate_linear_bayes(
-            &Moments::new(mean.clone(), var.clone()),
-            w_mean.clone(),
+        let mean = Tensor::<B, 2>::from_data([[1.0, -2.0], [0.5, 3.0]], &dev);
+        let var = Tensor::<B, 2>::from_data([[0.25, 4.0], [1.0, 0.5]], &dev);
+        let w_mean = Tensor::<B, 2>::from_data([[2.0, -1.0, 0.5], [-0.25, 3.0, 2.0]], &dev);
+        let w_var = Tensor::<B, 2>::from_data([[0.04, 0.01, 0.09], [0.16, 0.25, 0.04]], &dev);
+        let b_mean = Tensor::<B, 1>::from_data([0.75, -1.25, 2.0], &dev);
+        let b_var = Tensor::<B, 1>::from_data([0.01, 0.04, 0.09], &dev);
+        let actual = propagate_linear_bayes(
+            &Moments::new(mean, var),
+            w_mean,
             w_var,
-            Some((b_mean.clone(), b_var)),
+            Some((b_mean, b_var)),
         );
-        let p_mean = out.mean.to_data().to_vec::<f32>().unwrap();
-        let p_var = out.var.to_data().to_vec::<f32>().unwrap();
-
-        let len = n * dout;
-        let mut samples = Vec::with_capacity(k);
-        for _ in 0..k {
-            let wk = w_mean.clone()
-                + Tensor::<B, 2>::random([din, dout], Distribution::Normal(0.0, w_std), &dev);
-            let bk = b_mean.clone()
-                + Tensor::<B, 1>::random([dout], Distribution::Normal(0.0, b_std), &dev);
-            let xk = mean.clone()
-                + Tensor::<B, 2>::random([n, din], Distribution::Normal(0.0, in_std), &dev);
-            let yk = xk.matmul(wk) + bk.reshape([1, dout]);
-            samples.push(
-                yk.to_data()
-                    .to_vec::<f32>()
-                    .unwrap()
-                    .iter()
-                    .map(|v| *v as f64)
-                    .collect(),
-            );
-        }
-        let (mc_mean, mc_var) = mc_moments(&samples, len);
-        for i in 0..len {
-            assert!(
-                (p_mean[i] as f64 - mc_mean[i]).abs() < 0.03,
-                "mean {i}: {} vs {}",
-                p_mean[i],
-                mc_mean[i]
-            );
-            let rel = (p_var[i] as f64 - mc_var[i]).abs() / mc_var[i].max(1e-9);
-            assert!(rel < 0.10, "var {i}: {} vs {}", p_var[i], mc_var[i]);
-        }
+        let expected_mean =
+            Tensor::<B, 2>::from_data([[3.25, -8.25, -1.5], [1.0, 7.25, 8.25]], &dev);
+        let expected_var =
+            Tensor::<B, 2>::from_data([[2.59, 38.3025, 16.585], [5.61125, 7.9275, 2.8325]], &dev);
+        close(&actual.mean, &expected_mean, 1e-6);
+        close(&actual.var, &expected_var, 1e-5);
     }
 
     /// On a diagonal input the full-covariance ReLU diagonal equals the plain
     /// diagonal ReLU (the off-diagonal gating contributes nothing).
     #[test]
     fn full_cov_relu_diagonal_matches_diagonal_relu() {
-        let dev = <B as Backend>::Device::default();
-        let mean = Tensor::<B, 2>::random([4, 5], Distribution::Normal(0.0, 1.0), &dev);
-        let var = Tensor::<B, 2>::full([4, 5], 0.4, &dev);
+        let (mean, m) = fixture();
+        let var = m.var.clone();
         let diag = propagate_relu(&Moments::new(mean.clone(), var.clone()));
         let full = propagate_relu_full(&MomentsFull::from_diagonal(mean, var));
         close(&diag.var, &full.variance(), 1e-4);
@@ -1369,9 +1366,9 @@ mod tests {
     #[test]
     fn residual_add_is_exact_sum() {
         let dev = <B as Backend>::Device::default();
-        let m1 = Tensor::<B, 2>::random([2, 3], Distribution::Normal(0.0, 1.0), &dev);
+        let m1 = Tensor::<B, 2>::from_data([[1.0, -2.0, 0.5], [-0.25, 3.0, 1.5]], &dev);
         let v1 = Tensor::<B, 2>::full([2, 3], 0.5, &dev);
-        let m2 = Tensor::<B, 2>::random([2, 3], Distribution::Normal(0.0, 1.0), &dev);
+        let m2 = Tensor::<B, 2>::from_data([[-0.5, 1.0, 2.0], [0.75, -1.5, 0.25]], &dev);
         let v2 = Tensor::<B, 2>::full([2, 3], 0.3, &dev);
         let r = propagate_residual_add(
             &Moments::new(m1.clone(), v1.clone()),

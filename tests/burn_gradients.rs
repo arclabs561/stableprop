@@ -10,7 +10,7 @@ use stableprop::burn_sdp::{
 type Ad = Autodiff<NdArray<f32>>;
 
 #[test]
-fn activation_gradients_remain_finite_at_zero_and_small_noise() {
+fn activation_boundary_conventions_keep_gradients_finite() {
     let device = Default::default();
     for full in [false, true] {
         let mean = Tensor::<Ad, 2>::from_data(
@@ -39,6 +39,63 @@ fn activation_gradients_remain_finite_at_zero_and_small_noise() {
                 values.iter().all(|x| x.is_finite()),
                 "full={full}: {values:?}"
             );
+        }
+    }
+}
+
+#[test]
+fn positive_variance_relu_gradients_match_analytical_derivatives() {
+    let device = Default::default();
+    // Phi(-2), Phi(0), Phi(2), independently tabulated standard-normal CDFs.
+    let cdf = [0.022_750_131_948_179_21, 0.5, 0.977_249_868_051_820_8];
+    for variance in [1e-24f32, 0.25, 4.0] {
+        let sigma = variance.sqrt();
+        for mean_loss in [true, false] {
+            let mean = Tensor::<Ad, 2>::from_data([[-2.0 * sigma, 0.0, 2.0 * sigma]], &device)
+                .require_grad();
+            let var = Tensor::<Ad, 2>::from_data([[variance; 3]], &device).require_grad();
+            let out = propagate_relu(&Moments::new(mean.clone(), var.clone()));
+            let gradients = if mean_loss {
+                out.mean.sum()
+            } else {
+                out.var.sum()
+            }
+            .backward();
+            let mean_gradient = mean
+                .grad(&gradients)
+                .unwrap()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap();
+            let var_gradient = var
+                .grad(&gradients)
+                .unwrap()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap();
+            for (i, a) in [-2.0f64, 0.0, 2.0].into_iter().enumerate() {
+                let sigma = (variance as f64).sqrt();
+                let pdf = (-0.5 * a * a).exp() / (2.0 * core::f64::consts::PI).sqrt();
+                let rectified_mean = sigma * (pdf + a * cdf[i]);
+                // dM/dmu = Phi; dM/dv = phi/(2 sigma).
+                // dV/dmu = 2 M (1-Phi); dV/dv = Phi-M phi/sigma.
+                let expected = if mean_loss {
+                    [cdf[i], pdf / (2.0 * sigma)]
+                } else {
+                    [
+                        2.0 * rectified_mean * (1.0 - cdf[i]),
+                        cdf[i] - rectified_mean * pdf / sigma,
+                    ]
+                };
+                for (actual, expected) in [mean_gradient[i], var_gradient[i]]
+                    .into_iter()
+                    .zip(expected)
+                {
+                    let tolerance = 1e-4 * expected.abs() + 1e-30;
+                    assert!((actual as f64 - expected).abs() <= tolerance,
+                        "mean_loss={mean_loss}, variance={variance:e}, a={a}: {actual:e} vs {expected:e}");
+                }
+            }
         }
     }
 }

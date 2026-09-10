@@ -161,7 +161,7 @@ than the synthetic examples.
 `cora_uncertainty` trains a GCN and compares accuracy at retained coverage,
 error-detection AUROC, and uncertainty rankings against Monte Carlo. Its
 scores sum centered-logit variances, so a random offset shared by all classes
-does not count as classification uncertainty. Its
+does not count as classification uncertainty. The
 weight-uncertainty signal is a diagonal empirical-Fisher proxy; it is not a
 calibrated posterior and omits shared-weight and cross-node covariance.
 
@@ -198,6 +198,7 @@ uses the same 256 pool points, 512 held-out points, 16 initial labels, and
 subsequent acquisition does not read labels. Each budget refits from the same
 initial weights for 250 epochs, without a variance penalty.
 
+Entropy uses the model's softmax probabilities at the unperturbed input.
 The disagreement policies use independent Gaussian feature noise with standard
 deviation 0.12. They center logits to remove offsets shared by all classes.
 The analytic score is `2 trace(P Cov(logits | x) P)`, where `P = I - 11^T / K`
