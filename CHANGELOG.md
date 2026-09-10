@@ -23,6 +23,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Accumulate the vector API's covariance product along contiguous rows.
 - Benchmark central and negative-tail Burn ReLU workloads, and check tail
   values and gradients against high-precision references on CPU and Metal.
+- Evaluate the full-covariance ReLU series in Horner form, using two fewer
+  pairwise multiplications.
+- Check feature permutation, batch partitioning, correlated residual identities,
+  and the centered Gaussian ReLU covariance remainder with property tests.
+
+### Added
+
+- A derivation reference for Gaussian moments, cross-covariance, the Hermite
+  series, its PSD property and error bound, and numerical design choices.
 
 ## [0.5.0] - 2026-09-10
 

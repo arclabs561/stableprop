@@ -9,7 +9,7 @@ use burn_ndarray::NdArray;
 use proptest::prelude::*;
 use stableprop::burn_sdp::{
     propagate_linear_cross_covariance, propagate_linear_full, propagate_relu_cross_covariance,
-    propagate_relu_full, Moments, MomentsFull,
+    propagate_relu_full, propagate_residual_add_correlated, Moments, MomentsFull,
 };
 
 type Nd = NdArray<f32>;
@@ -367,6 +367,178 @@ proptest! {
                 );
             }
         }
+    }
+
+    /// Relabeling features commutes with ReLU; applying the same permutation
+    /// to affine weight rows leaves the output distribution unchanged.
+    #[test]
+    fn full_relu_and_affine_are_feature_permutation_equivariant(case in full_affine_case()) {
+        let device = Default::default();
+        let permutation: Vec<usize> = (0..case.d_in)
+            .map(|i| if i < 2 { 1 - i } else { i })
+            .collect();
+        let mut perm_mean = vec![0.0; BATCH * case.d_in];
+        let mut perm_cov = vec![0.0; BATCH * case.d_in * case.d_in];
+        let mut perm_weight = vec![0.0; case.weight.len()];
+        for batch in 0..BATCH {
+            for i in 0..case.d_in {
+                perm_mean[batch * case.d_in + i] = case.mean[batch * case.d_in + permutation[i]];
+                for j in 0..case.d_in {
+                    perm_cov[(batch * case.d_in + i) * case.d_in + j] =
+                        case.cov[(batch * case.d_in + permutation[i]) * case.d_in + permutation[j]];
+                }
+            }
+        }
+        for i in 0..case.d_in {
+            for o in 0..case.d_out {
+                perm_weight[i * case.d_out + o] = case.weight[permutation[i] * case.d_out + o];
+            }
+        }
+        let original: MomentsFull<Nd> = MomentsFull::new(
+            Tensor::from_data(TensorData::new(case.mean.clone(), [BATCH, case.d_in]), &device),
+            Tensor::from_data(TensorData::new(case.cov.clone(), [BATCH, case.d_in, case.d_in]), &device),
+        );
+        let permuted: MomentsFull<Nd> = MomentsFull::new(
+            Tensor::from_data(TensorData::new(perm_mean, [BATCH, case.d_in]), &device),
+            Tensor::from_data(TensorData::new(perm_cov, [BATCH, case.d_in, case.d_in]), &device),
+        );
+        let relu = propagate_relu_full(&original);
+        let relu_perm = propagate_relu_full(&permuted);
+        let relu_mean = relu.mean.clone().into_data().to_vec::<f32>().unwrap();
+        let relu_cov = relu.cov.clone().into_data().to_vec::<f32>().unwrap();
+        let relu_perm_mean = relu_perm.mean.clone().into_data().to_vec::<f32>().unwrap();
+        let relu_perm_cov = relu_perm.cov.clone().into_data().to_vec::<f32>().unwrap();
+        for batch in 0..BATCH {
+            for i in 0..case.d_in {
+                let a = relu_perm_mean[batch * case.d_in + i] as f64;
+                let b = relu_mean[batch * case.d_in + permutation[i]] as f64;
+                prop_assert!((a - b).abs() <= f32_roundoff_bound(a.abs() + b.abs()));
+                for j in 0..case.d_in {
+                    let a = relu_perm_cov[(batch * case.d_in + i) * case.d_in + j] as f64;
+                    let b = relu_cov[(batch * case.d_in + permutation[i]) * case.d_in + permutation[j]] as f64;
+                    prop_assert!((a - b).abs() <= f32_roundoff_bound(a.abs() + b.abs()));
+                }
+            }
+        }
+        let out = propagate_linear_full(
+            &relu,
+            Tensor::from_data(TensorData::new(case.weight.clone(), [case.d_in, case.d_out]), &device),
+            Some(Tensor::from_data(TensorData::new(case.bias.clone(), [case.d_out]), &device)),
+        );
+        let out_perm = propagate_linear_full(
+            &relu_perm,
+            Tensor::from_data(TensorData::new(perm_weight, [case.d_in, case.d_out]), &device),
+            Some(Tensor::from_data(TensorData::new(case.bias.clone(), [case.d_out]), &device)),
+        );
+        let mean = out.mean.into_data().to_vec::<f32>().unwrap();
+        let perm_mean = out_perm.mean.into_data().to_vec::<f32>().unwrap();
+        let cov = out.cov.into_data().to_vec::<f32>().unwrap();
+        let perm_cov = out_perm.cov.into_data().to_vec::<f32>().unwrap();
+        // Permuting summands changes rounding. Bound it by the sum of absolute
+        // terms, not the potentially near-zero result after cancellation.
+        for batch in 0..BATCH {
+            for o in 0..case.d_out {
+                let mean_scale = case.bias[o].abs() as f64 + (0..case.d_in)
+                    .map(|i| (relu_mean[batch * case.d_in + i] as f64
+                        * case.weight[i * case.d_out + o] as f64).abs())
+                    .sum::<f64>();
+                let index = batch * case.d_out + o;
+                prop_assert!(
+                    (mean[index] as f64 - perm_mean[index] as f64).abs()
+                        <= f32_roundoff_bound(mean_scale),
+                    "mean {index}: {} vs {}, term scale {mean_scale}", mean[index], perm_mean[index],
+                );
+                for p in 0..case.d_out {
+                    let mut cov_scale = 0.0;
+                    for i in 0..case.d_in {
+                        for j in 0..case.d_in {
+                            cov_scale += (case.weight[i * case.d_out + o] as f64
+                                * relu_cov[(batch * case.d_in + i) * case.d_in + j] as f64
+                                * case.weight[j * case.d_out + p] as f64).abs();
+                        }
+                    }
+                    let index = (batch * case.d_out + o) * case.d_out + p;
+                    prop_assert!(
+                        (cov[index] as f64 - perm_cov[index] as f64).abs()
+                            <= f32_roundoff_bound(cov_scale),
+                        "covariance {index}: {} vs {}, term scale {cov_scale}", cov[index], perm_cov[index],
+                    );
+                }
+            }
+        }
+    }
+
+    /// Batch rows represent separate distributions; processing rows together
+    /// must equal processing each singleton batch independently.
+    #[test]
+    fn full_relu_affine_is_batch_partition_invariant(case in full_affine_case()) {
+        let device = Default::default();
+        let input: MomentsFull<Nd> = MomentsFull::new(
+            Tensor::from_data(TensorData::new(case.mean.clone(), [BATCH, case.d_in]), &device),
+            Tensor::from_data(TensorData::new(case.cov.clone(), [BATCH, case.d_in, case.d_in]), &device),
+        );
+        let weight = Tensor::from_data(TensorData::new(case.weight.clone(), [case.d_in, case.d_out]), &device);
+        let bias = Tensor::from_data(TensorData::new(case.bias.clone(), [case.d_out]), &device);
+        let combined = propagate_linear_full(&propagate_relu_full(&input), weight.clone(), Some(bias.clone()));
+        let combined_mean = combined.mean.into_data().to_vec::<f32>().unwrap();
+        let combined_cov = combined.cov.into_data().to_vec::<f32>().unwrap();
+        for batch in 0..BATCH {
+            let row: MomentsFull<Nd> = MomentsFull::new(
+                Tensor::from_data(TensorData::new(
+                    case.mean[batch * case.d_in..(batch + 1) * case.d_in].to_vec(),
+                    [1, case.d_in],
+                ), &device),
+                Tensor::from_data(TensorData::new(
+                    case.cov[batch * case.d_in * case.d_in..(batch + 1) * case.d_in * case.d_in].to_vec(),
+                    [1, case.d_in, case.d_in],
+                ), &device),
+            );
+            let separate = propagate_linear_full(&propagate_relu_full(&row), weight.clone(), Some(bias.clone()));
+            let mean = separate.mean.into_data().to_vec::<f32>().unwrap();
+            let cov = separate.cov.into_data().to_vec::<f32>().unwrap();
+            for (i, actual) in mean.iter().enumerate() {
+                let expected = combined_mean[batch * case.d_out + i] as f64;
+                prop_assert!((*actual as f64 - expected).abs()
+                    <= f32_roundoff_bound(actual.abs() as f64 + expected.abs()));
+            }
+            for (i, actual) in cov.iter().enumerate() {
+                let expected = combined_cov[batch * case.d_out * case.d_out + i] as f64;
+                prop_assert!((*actual as f64 - expected).abs()
+                    <= f32_roundoff_bound(actual.abs() as f64 + expected.abs()));
+            }
+        }
+    }
+
+    /// If the branch is a*X+b, the residual is (1+a)*X+b. This checks
+    /// both signs of the cross term, including exact cancellation at a=-1.
+    #[test]
+    fn correlated_residual_matches_affine_dependent_branch(
+        mean in -2.0f32..2.0,
+        variance in 0.1f32..4.0,
+        slope in prop_oneof![Just(-1.0f32), -2.0f32..2.0],
+        bias in -2.0f32..2.0,
+    ) {
+        let device = Default::default();
+        let skip: Moments<Nd> = Moments::new(
+            Tensor::from_data([[mean]], &device),
+            Tensor::from_data([[variance]], &device),
+        );
+        let branch = Moments::new(
+            Tensor::from_data([[slope * mean + bias]], &device),
+            Tensor::from_data([[slope * slope * variance]], &device),
+        );
+        let out = propagate_residual_add_correlated(
+            &skip, &branch, Tensor::from_data([[slope * variance]], &device),
+        );
+        let actual_mean = out.mean.into_data().to_vec::<f32>().unwrap()[0] as f64;
+        let actual_var = out.var.into_data().to_vec::<f32>().unwrap()[0] as f64;
+        let factor = 1.0 + slope as f64;
+        let expected_mean = factor * mean as f64 + bias as f64;
+        let expected_var = factor * factor * variance as f64;
+        let mean_scale = mean.abs() as f64 + (slope as f64 * mean as f64).abs() + bias.abs() as f64;
+        let var_scale = variance as f64 * (1.0 + (slope as f64).powi(2) + 2.0 * slope.abs() as f64);
+        prop_assert!((actual_mean - expected_mean).abs() <= f32_roundoff_bound(mean_scale));
+        prop_assert!((actual_var - expected_var).abs() <= f32_roundoff_bound(var_scale));
     }
 
     /// ReLU(y) - ReLU(-y) = y, so the corresponding Gaussian cross-covariance

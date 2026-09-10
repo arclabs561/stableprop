@@ -543,8 +543,6 @@ pub fn propagate_relu_full<B: Backend>(m: &MomentsFull<B>) -> MomentsFull<B> {
         .exp()
         .mul_scalar(1.0 / (2.0 * PI).sqrt());
     let outer = |t: Tensor<B, 2>| t.clone().unsqueeze_dim::<3>(2) * t.unsqueeze_dim::<3>(1);
-    let rho2 = rho.clone() * rho.clone();
-    let rho3 = rho2.clone() * rho.clone();
     // Apply the same linear tail limits to covariance as to marginal moments.
     // An inactive output cannot covary; an active output is the input itself.
     let tail = terms.active.clone().bool_or(terms.inactive.clone());
@@ -554,10 +552,12 @@ pub fn propagate_relu_full<B: Backend>(m: &MomentsFull<B>) -> MomentsFull<B> {
         .mask_fill(terms.inactive, 0.0);
     let off_phi = phi.mask_fill(tail.bool_or(terms.deterministic), 0.0);
     let off_alpha_phi = terms.alpha * off_phi.clone();
-    let off = sigma_outer
-        * (rho * outer(off_p)
-            + rho2.mul_scalar(0.5) * outer(off_phi)
-            + rho3.mul_scalar(1.0 / 6.0) * outer(off_alpha_phi));
+    // Horner form evaluates the cubic with two fewer pairwise multiplications.
+    let series = outer(off_p)
+        + rho.clone()
+            * (outer(off_phi).mul_scalar(0.5)
+                + rho.clone() * outer(off_alpha_phi).mul_scalar(1.0 / 6.0));
+    let off = sigma_outer * (rho * series);
     let diag = var_out.unsqueeze_dim::<3>(2).expand([n, d, d]) * eye_d.unsqueeze::<3>();
     MomentsFull {
         mean: mu_out,
