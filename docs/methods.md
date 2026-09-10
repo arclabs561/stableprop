@@ -115,13 +115,13 @@ affine transport stays exact, but another Gaussian ReLU step is an approximation
 
 ## Efficiency and accuracy
 
-| Approach | Computational advantage | Main accuracy limit |
+| Approach | Computation | Main accuracy limit |
 | --- | --- | --- |
-| Local linearization | Uses derivatives of the deterministic network; useful when perturbations stay within a nearly affine region | Can miss activation-boundary crossings and nonlinear mean shifts |
+| Local linearization | Uses derivatives of the deterministic network | Can miss activation-boundary crossings and nonlinear mean shifts |
 | Diagonal moment matching | Carries one mean and variance per feature; no feature-pair covariance state | Discards correlations that later layers can amplify or cancel |
-| Full moment matching | Retains within-row feature correlations needed by later affine maps | Quadratic covariance storage; nonlinear moments still assume Gaussian layer inputs |
-| Sigma-point quadrature | Evaluates selected inputs through the whole network without derivatives | A finite quadrature rule can miss activation boundaries; cost grows with input dimension |
-| Monte Carlo | Evaluates the actual model under the chosen noise distribution | Repeated forward passes and sampling error; rare events need many samples |
+| Full moment matching | Carries a dense feature covariance matrix per input row | Gaussian layer-input approximation; this implementation truncates the covariance series |
+| Sigma-point quadrature | Evaluates weighted input points through the network; cost grows with input dimension | A finite quadrature rule can miss activation boundaries |
+| Monte Carlo | Repeats network evaluations under the chosen noise distribution | Sampling error; rare events need many samples |
 
 For a dense square layer of width `d`, diagonal affine propagation costs
 `O(d^2)` work and `O(d)` moment storage; full covariance costs `O(d^3)` work
