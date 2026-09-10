@@ -19,7 +19,7 @@
 #[cfg(feature = "burn")]
 pub mod burn_sdp;
 
-use std::f64::consts::{FRAC_1_SQRT_2, PI};
+use std::f64::consts::PI;
 
 /// First two moments of a multivariate Gaussian (mean + full covariance).
 ///
@@ -49,9 +49,20 @@ pub enum Layer {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Standard normal CDF via the error function.
-fn std_normal_cdf(x: f64) -> f64 {
-    0.5 * (1.0 + erf(x * FRAC_1_SQRT_2))
+/// Normal CDF from its convergent integral series (Marsaglia, 2004).
+/// Called only for -2 <= x < 8; negative tails use direct moment ratios below.
+fn std_normal_cdf(x: f64, pdf: f64) -> f64 {
+    let mut term = x;
+    let mut sum = x;
+    for k in 1..200 {
+        term *= x * x / (2 * k + 1) as f64;
+        let next = sum + term;
+        if next == sum {
+            break;
+        }
+        sum = next;
+    }
+    (0.5 + pdf * sum).clamp(0.0, 1.0)
 }
 
 /// Standard normal PDF.
@@ -59,15 +70,18 @@ fn std_normal_pdf(x: f64) -> f64 {
     (-0.5 * x * x).exp() / (2.0 * PI).sqrt()
 }
 
-/// Error function approximation (Abramowitz & Stegun 7.1.26, max error < 1.5e-7).
-fn erf(x: f64) -> f64 {
-    let sign = x.signum();
-    let x = x.abs();
-    let t = 1.0 / (1.0 + 0.3275911 * x);
-    let poly = t
-        * (0.254829592
-            + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
-    sign * (1.0 - poly * (-x * x).exp())
+/// Normalized ReLU moments for alpha = -t < -2, without tail subtraction.
+/// The Laplace continued fraction has r_n = n / (t + r_(n+1)) and
+/// Phi(-t)/phi(t) = 1/(t+r_1); see DLMF 7.9 and 7.18.
+fn negative_relu_moments(t: f64, pdf: f64) -> (f64, f64) {
+    let mut r = 0.0;
+    for n in (2..=96).rev() {
+        r = n as f64 / (t + r);
+    }
+    let r2 = r;
+    let r1 = 1.0 / (t + r2);
+    let mean = pdf * r1 / (t + r1);
+    (mean, mean * r2 - mean * mean)
 }
 
 // ---------------------------------------------------------------------------
@@ -105,12 +119,15 @@ fn validate_moments(moments: &Moments) {
 /// Matrix multiply: A (m x k) * B (k x n) -> (m x n).
 fn mat_mul(a: &[Vec<f64>], b: &[Vec<f64>]) -> Vec<Vec<f64>> {
     let n = b[0].len();
-    let k = b.len();
     a.iter()
         .map(|row_a| {
-            (0..n)
-                .map(|j| (0..k).map(|l| row_a[l] * b[l][j]).sum())
-                .collect()
+            let mut output = vec![0.0; n];
+            for (&coefficient, row_b) in row_a.iter().zip(b) {
+                for (value, &input) in output.iter_mut().zip(row_b) {
+                    *value += coefficient * input;
+                }
+            }
+            output
         })
         .collect()
 }
@@ -182,9 +199,10 @@ pub fn propagate_linear(moments: &Moments, weight: &[Vec<f64>], bias: &[f64]) ->
 /// sigma' = sqrt( (mu^2 + sigma^2) * Phi + mu * sigma * phi - mu'^2 )
 /// ```
 ///
-/// The implementation evaluates variance without the second-moment subtraction
-/// shown above, approximates the CDF, and uses linear tail limits beyond eight
-/// standard deviations. Off-diagonal covariances are zeroed.
+/// Negative-tail moments use continued fractions to avoid cancellation. The
+/// central CDF uses a convergent series, and the variance formula avoids
+/// cancellation in the nearly linear positive region. Linear tail limits apply
+/// at eight standard deviations. Off-diagonal covariances are zeroed.
 ///
 /// # Panics
 /// Panics on empty inputs, inconsistent dimensions, non-finite values, or
@@ -225,7 +243,13 @@ pub fn propagate_relu(moments: &Moments) -> Moments {
             continue;
         }
         let phi = std_normal_pdf(alpha);
-        let big_phi = std_normal_cdf(alpha);
+        if alpha < -2.0 {
+            let (mean, variance) = negative_relu_moments(-alpha, phi);
+            new_mean[i] = sigma * mean;
+            new_cov[i][i] = var * variance;
+            continue;
+        }
+        let big_phi = std_normal_cdf(alpha, phi);
 
         let mu_out = mu * big_phi + sigma * phi;
         // Algebraically equivalent to E[X_+^2] - E[X_+]^2, but does not

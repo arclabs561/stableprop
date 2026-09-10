@@ -76,6 +76,10 @@ Enable `features = ["burn"]` for batched tensors. Use an autodiff Burn 0.21
 backend for differentiable propagation. Burn weights use `[input, output]`, the
 transpose of the vector API's layout.
 
+Burn selects tensor precision at creation. For `f64`, pass
+`(&device, DType::F64)` to tensor constructors; a backend type alone does not
+select double precision. Propagation preserves the input tensor dtype.
+
 | Representation | What it tracks | Main approximation |
 | --- | --- | --- |
 | `burn_sdp::Moments` | Mean and variance, each `[batch, features]` | Drops feature and row correlations |

@@ -1,6 +1,6 @@
 #![cfg(feature = "burn")]
 
-use burn::tensor::Tensor;
+use burn::tensor::{DType, Tensor};
 use burn_ndarray::NdArray;
 use stableprop::burn_sdp::{
     propagate_conv2d, propagate_leaky_relu, propagate_linear, propagate_linear_bayes,
@@ -48,6 +48,18 @@ fn leaky_relu_rejects_unrepresentable_variance_coefficients() {
         Tensor::<Nd, 2>::ones([1, 1], &device),
     );
     // The slope fits in f32, but its square does not.
+    let _ = propagate_leaky_relu(&input, 1e20);
+}
+
+#[test]
+#[should_panic(expected = "representable")]
+fn leaky_relu_checks_actual_tensor_dtype() {
+    let device = Default::default();
+    // Burn 0.21 selects dtype at creation, independently of the backend alias.
+    let input = Moments::new(
+        Tensor::<NdArray<f64>, 2>::zeros([1, 1], (&device, DType::F32)),
+        Tensor::<NdArray<f64>, 2>::ones([1, 1], (&device, DType::F32)),
+    );
     let _ = propagate_leaky_relu(&input, 1e20);
 }
 

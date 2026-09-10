@@ -9,10 +9,12 @@ just bench-burn
 
 `bench` measures the `f64` vector API on square and rectangular affine maps,
 plus ReLU as a separate workload. `bench-burn` measures diagonal and full
-affine propagation using Burn's `f32` NdArray backend. Their precision and
+affine and ReLU propagation using Burn's `f32` NdArray backend. ReLU cases
+separate central inputs from negative tails (`mean / std = -7`), where
+accurate small moments need different numerical formulas. Their precision and
 input validation differ; these suites are not a direct backend comparison.
 
-Fixtures and scalar reference calculations run outside the timed loop.
+Fixtures and affine scalar reference calculations run outside the timed loop.
 Measurements include the public propagation call, its output allocation and
 destruction, and any tensor clones needed by that call. Full-covariance
 fixtures include signed correlations; the diagonal oracle uses only their

@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Avoid cancellation in negative Gaussian ReLU tails, including Burn means,
+  variances, derivatives, and cross-covariance gates. Replace the vector API's
+  central CDF approximation with a convergent series.
+- Preserve the input dtype in full-covariance helpers, and check leaky-ReLU
+  coefficients against the actual tensor dtype under Burn 0.21.
+
+### Changed
+
+- Accumulate the vector API's covariance product along contiguous rows.
+- Benchmark central and negative-tail Burn ReLU workloads, and check tail
+  values and gradients against high-precision references on CPU and Metal.
+
 ## [0.5.0] - 2026-09-10
 
 ### Added

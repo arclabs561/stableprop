@@ -17,15 +17,16 @@
 //! Callers must supply finite tensor values, nonnegative variances and scales,
 //! and valid positive-semidefinite covariance matrices. Constructors check
 //! shapes, but do not inspect tensor contents or synchronize devices to validate
-//! values. Public fields carry the same requirements. ReLU formulas use linear
-//! tail limits at eight standard deviations for numerical stability.
+//! values. Public fields carry the same requirements. Negative Gaussian ReLU
+//! tails use continued fractions to avoid cancellation; linear tail limits
+//! apply at eight standard deviations.
 //! At zero variance, masks select deterministic outputs and finite gradients.
 //! These boundary conventions are not limits of every positive-variance
 //! derivative: at zero mean, the mean's variance derivative diverges as
 //! variance approaches zero.
 
 use burn::tensor::backend::Backend;
-use burn::tensor::{Element, Tensor, TensorData};
+use burn::tensor::{DType, Tensor, TensorData};
 use core::f64::consts::{FRAC_1_SQRT_2, PI};
 
 /// Mean and per-feature variance of a batch of independent Gaussians.
@@ -158,7 +159,20 @@ struct GaussianReluTerms<B: Backend> {
     inactive: Tensor<B, 2, burn::tensor::Bool>,
 }
 
-/// Central-region Gaussian ReLU terms, with zero variance made safe only for
+/// Ratios in the Laplace continued fraction for Phi(-t)/phi(t), t >= 2.
+/// r_n = n/(t+r_(n+1)); returning r1 and r2 also gives the rectified moments
+/// without subtracting nearly equal tail terms (DLMF 7.9 and 7.18).
+fn normal_tail_ratios<B: Backend>(t: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 2>) {
+    let depth = if t.dtype() == DType::F64 { 96 } else { 32 };
+    let mut r = t.clone().recip().mul_scalar(depth as f64);
+    for n in (2..depth).rev() {
+        r = (t.clone() + r).recip().mul_scalar(n as f64);
+    }
+    let r1 = (t + r.clone()).recip();
+    (r1, r)
+}
+
+/// Gaussian ReLU terms, with zero variance made safe only for
 /// intermediate division. Callers restore deterministic outputs with the masks.
 fn gaussian_relu_terms<B: Backend>(
     mu: Tensor<B, 2>,
@@ -179,16 +193,24 @@ fn gaussian_relu_terms<B: Backend>(
         .mul_scalar(-0.5)
         .exp()
         .mul_scalar(1.0 / (2.0 * PI).sqrt());
-    let mean = mu.clone() * p.clone() + sigma * phi.clone();
+    let mean = mu.clone() * p.clone() + sigma.clone() * phi.clone();
     let normalized_var =
         alpha.clone() * alpha.clone() * p.clone() * p.clone().mul_scalar(-1.0).add_scalar(1.0)
             + p.clone()
             + alpha.clone() * phi.clone() * p.clone().mul_scalar(-2.0).add_scalar(1.0)
-            - phi.clone() * phi;
+            - phi.clone() * phi.clone();
+    // Both tensor branches are evaluated. Bound the unused continued-fraction
+    // argument too, so deterministic and positive-tail gradients stay finite.
+    let t = alpha.clone().neg().clamp_min(2.0);
+    let (r1, r2) = normal_tail_ratios(t.clone());
+    let tail_p = phi / (t + r1.clone());
+    let tail_mean = tail_p.clone() * r1;
+    let tail_var = tail_mean.clone() * r2 - tail_mean.clone() * tail_mean.clone();
+    let tail = alpha.clone().lower_elem(-2.0);
     GaussianReluTerms {
-        mean,
-        var: (var * normalized_var).clamp_min(0.0),
-        p,
+        mean: mean.mask_where(tail.clone(), sigma * tail_mean),
+        var: (var * normalized_var.mask_where(tail.clone(), tail_var)).clamp_min(0.0),
+        p: p.mask_where(tail, tail_p),
         alpha,
         deterministic,
         active: alpha_raw.clone().greater_equal_elem(8.0),
@@ -202,8 +224,9 @@ fn gaussian_relu_terms<B: Backend>(
 /// Per element with mean `mu`, std `sigma`, `alpha = mu / sigma`:
 /// `mu'    = mu * Phi(alpha) + sigma * phi(alpha)`
 /// `var'` is evaluated in an algebraically equivalent form that avoids
-/// cancellation when ReLU is nearly linear. `Phi` / `phi` are the standard
-/// normal CDF / PDF, with numerical tail limits described at module level.
+/// cancellation when ReLU is nearly linear. Negative-tail moments use continued
+/// fractions. `Phi` / `phi` are the standard normal CDF / PDF, with numerical
+/// tail limits described at module level.
 pub fn propagate_relu<B: Backend>(m: &Moments<B>) -> Moments<B> {
     let mu = m.mean.clone();
     let terms = gaussian_relu_terms(mu.clone(), m.var.clone());
@@ -230,7 +253,7 @@ pub fn propagate_relu<B: Backend>(m: &Moments<B>) -> Moments<B> {
 ///
 /// # Panics
 /// Panics if `alpha` is not finite or the moment coefficients are not finite
-/// and representable in the backend's scalar element type. Large input values
+/// and representable in the tensors' element types. Large input values
 /// can still overflow the resulting moments.
 pub fn propagate_leaky_relu<B: Backend>(m: &Moments<B>, alpha: f64) -> Moments<B> {
     assert!(alpha.is_finite(), "leaky-ReLU slope must be finite");
@@ -238,10 +261,19 @@ pub fn propagate_leaky_relu<B: Backend>(m: &Moments<B>, alpha: f64) -> Moments<B
     let alpha_sq = alpha * alpha;
     let complement_sq = one_minus_alpha * one_minus_alpha;
     let cross_coefficient = 2.0 * alpha * one_minus_alpha;
-    let max_scalar = B::FloatElem::dtype()
+    let max_scalar = m
+        .mean
+        .dtype()
         .finfo()
         .expect("floating-point backend scalar required")
-        .max;
+        .max
+        .min(
+            m.var
+                .dtype()
+                .finfo()
+                .expect("floating-point variance required")
+                .max,
+        );
     assert!(
         [
             alpha,
@@ -359,13 +391,13 @@ pub fn propagate_conv2d<B: Backend>(
     (mean_out, var_out)
 }
 
-/// `d x d` identity on the given backend/device.
-fn eye<B: Backend>(d: usize, device: &B::Device) -> Tensor<B, 2> {
+/// `d x d` identity with the source tensor's device and dtype.
+fn eye<B: Backend>(d: usize, device: &B::Device, dtype: DType) -> Tensor<B, 2> {
     let mut v = vec![0.0f32; d * d];
     for i in 0..d {
         v[i * d + i] = 1.0;
     }
-    Tensor::<B, 2>::from_data(TensorData::new(v, [d, d]), device)
+    Tensor::<B, 2>::from_data(TensorData::new(v, [d, d]), (device, dtype))
 }
 
 /// Mean and full covariance of a batch of `n` independent Gaussians.
@@ -401,7 +433,7 @@ impl<B: Backend> MomentsFull<B> {
             "mean and variance shapes must match"
         );
         let [n, d] = var.dims();
-        let eye_d = eye::<B>(d, &var.device());
+        let eye_d = eye::<B>(d, &var.device(), var.dtype());
         let cov = var.unsqueeze_dim::<3>(2).expand([n, d, d]) * eye_d.unsqueeze::<3>();
         Self { mean, cov }
     }
@@ -409,7 +441,7 @@ impl<B: Backend> MomentsFull<B> {
     /// Per-feature variance (the diagonal of the covariance), shape `[n, d]`.
     pub fn variance(&self) -> Tensor<B, 2> {
         let [n, d, _] = self.cov.dims();
-        let eye_d = eye::<B>(d, &self.cov.device());
+        let eye_d = eye::<B>(d, &self.cov.device(), self.cov.dtype());
         (self.cov.clone() * eye_d.unsqueeze::<3>())
             .sum_dim(2)
             .reshape([n, d])
@@ -452,7 +484,7 @@ pub fn propagate_linear_full<B: Backend>(
 pub fn propagate_relu_full<B: Backend>(m: &MomentsFull<B>) -> MomentsFull<B> {
     let [n, d, _] = m.cov.dims();
     let dev = m.cov.device();
-    let eye_d = eye::<B>(d, &dev);
+    let eye_d = eye::<B>(d, &dev, m.cov.dtype());
 
     let input_var = (m.cov.clone() * eye_d.clone().unsqueeze::<3>())
         .sum_dim(2)
@@ -586,13 +618,21 @@ pub fn propagate_relu_cross_covariance<B: Backend>(
         .mask_fill(deterministic.clone(), 1.0)
         .sqrt();
     let alpha = right.mean.clone() / sigma;
-    let gate = alpha
+    let bounded_alpha = alpha.clone().clamp(-8.0, 8.0);
+    let t = bounded_alpha.clone().neg().clamp_min(2.0);
+    let (r1, _) = normal_tail_ratios(t.clone());
+    let tail_p = (bounded_alpha.clone() * bounded_alpha.clone())
+        .mul_scalar(-0.5)
+        .exp()
+        .mul_scalar(1.0 / (2.0 * PI).sqrt())
+        / (t + r1);
+    let gate = bounded_alpha
         .clone()
-        .clamp(-8.0, 8.0)
         .mul_scalar(FRAC_1_SQRT_2)
         .erf()
         .add_scalar(1.0)
         .mul_scalar(0.5)
+        .mask_where(bounded_alpha.lower_elem(-2.0), tail_p)
         .mask_fill(alpha.clone().greater_equal_elem(8.0), 1.0)
         .mask_fill(alpha.lower_equal_elem(-8.0), 0.0)
         .mask_fill(deterministic, 0.0);

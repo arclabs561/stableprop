@@ -129,6 +129,32 @@ and `O(d^2)` storage, per input. ReLU's fixed third-order pairwise series costs
 `O(d^2)`. These are operation counts, not measured speedups: device kernels,
 batch size, covariance structure, and graph aggregation affect runtime.
 
+Closed-form moments still need careful numerical evaluation. For a Gaussian
+mean far below zero, `1 + erf(a / sqrt(2))` loses the small activation
+probability; subtracting terms to obtain ReLU moments compounds that error.
+The negative-tail implementation instead uses the
+[Laplace continued fraction](https://dlmf.nist.gov/7.9) and
+[ratios of repeated Gaussian tail integrals](https://dlmf.nist.gov/7.18#v).
+For $t=-a>0$, write $r_n=n/(t+r_{n+1})$, $R=1/(t+r_1)$,
+and $X_+=\max(0,X)$. Then:
+
+$$
+\Phi(-t)=\phi(t)R,\qquad
+\frac{\mathbb{E}[X_+]}{\sigma}=\phi(t)Rr_1,\qquad
+\frac{\mathbb{E}[X_+^2]}{\sigma^2}=\phi(t)Rr_1r_2.
+$$
+
+These forms avoid subtracting nearly equal tail terms. Both APIs retain
+linear limits at `a >= 8` and zero limits at `a <= -8`. Within those limits,
+both switch to continued fractions at `a < -2`, with 32 levels for Burn
+`f32` and 96 for `f64`. In the remaining region, the vector API uses a
+[convergent CDF series](https://www.jstatsoft.org/v11/i04/) and Burn uses its
+backend's error function. Tensor
+masks evaluate both branches, so this accuracy costs arithmetic even for
+central inputs; the [benchmarks](../benches/README.md) separate both regimes.
+These numerical choices do not remove Gaussian closure or covariance-series
+truncation error.
+
 Differentiability also depends on the coordinates and boundary. At zero mean,
 the Gaussian ReLU mean is `sqrt(v / (2 pi))`, whose derivative with respect to
 variance `v` diverges as `v` approaches zero. The Burn path selects finite

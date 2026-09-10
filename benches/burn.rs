@@ -3,7 +3,10 @@
 use burn::tensor::{Tensor, TensorData};
 use burn_ndarray::NdArray;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use stableprop::burn_sdp::{propagate_linear, propagate_linear_full, Moments, MomentsFull};
+use stableprop::burn_sdp::{
+    propagate_linear, propagate_linear_full, propagate_relu, propagate_relu_full, Moments,
+    MomentsFull,
+};
 use std::hint::black_box;
 
 type Backend = NdArray<f32>;
@@ -20,6 +23,17 @@ fn covariance(width: usize) -> Vec<f32> {
         .flat_map(|i| {
             let factors = &factors;
             (0..width).map(move |j| (0..width).map(|k| factors[i][k] * factors[j][k]).sum())
+        })
+        .collect()
+}
+
+fn relu_covariance(width: usize) -> Vec<f32> {
+    let cov = covariance(width);
+    (0..width)
+        .flat_map(|i| {
+            let cov = &cov;
+            (0..width)
+                .map(move |j| cov[i * width + j] / (cov[i * width + i] * cov[j * width + j]).sqrt())
         })
         .collect()
 }
@@ -184,6 +198,49 @@ fn burn_benches(c: &mut Criterion) {
         );
     }
     affine.finish();
+
+    let mut relu = c.benchmark_group("burn_relu_f32");
+    for (batch, width) in [(8, 16), (64, 64)] {
+        let cov_one = relu_covariance(width);
+        let cov: Vec<f32> = (0..batch).flat_map(|_| cov_one.iter().copied()).collect();
+        let variance = vec![1.0; batch * width];
+        for (case, mean) in [
+            (
+                "central",
+                (0..batch * width)
+                    .map(|i| [-1.0f32, 0.0, 1.0][i % 3])
+                    .collect(),
+            ),
+            ("negative_tail", vec![-7.0; batch * width]),
+        ] {
+            let mean_tensor =
+                Tensor::<Backend, 2>::from_data(TensorData::new(mean, [batch, width]), &device);
+            let diagonal_input = Moments::new(
+                mean_tensor.clone(),
+                Tensor::<Backend, 2>::from_data(
+                    TensorData::new(variance.clone(), [batch, width]),
+                    &device,
+                ),
+            );
+            let full_input = MomentsFull::new(
+                mean_tensor,
+                Tensor::<Backend, 3>::from_data(
+                    TensorData::new(cov.clone(), [batch, width, width]),
+                    &device,
+                ),
+            );
+            let id = format!("{case}_b{batch}w{width}");
+            relu.bench_with_input(
+                BenchmarkId::new("diagonal", &id),
+                &diagonal_input,
+                |b, input| b.iter(|| propagate_relu(black_box(input))),
+            );
+            relu.bench_with_input(BenchmarkId::new("full", id), &full_input, |b, input| {
+                b.iter(|| propagate_relu_full(black_box(input)))
+            });
+        }
+    }
+    relu.finish();
 }
 
 criterion_group!(benches, burn_benches);

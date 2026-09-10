@@ -65,6 +65,156 @@ fn data<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Vec<f32> {
     tensor.into_data().to_vec::<f32>().unwrap()
 }
 
+#[derive(Clone, Copy)]
+struct TailReference {
+    alpha: f32,
+    p: f32,
+    phi: f32,
+    mean: f32,
+    var: f32,
+}
+
+// Subset of tests/relu_tail_accuracy.rs's mpmath-90-digit erfc references.
+const TAILS: [TailReference; 4] = [
+    TailReference {
+        alpha: -3.0,
+        p: 1.349_898e-3,
+        phi: 4.431_848_5e-3,
+        mean: 3.821_543e-4,
+        var: 2.032_890_4e-4,
+    },
+    TailReference {
+        alpha: -5.0,
+        p: 2.866_515_8e-7,
+        phi: 1.486_719_5e-6,
+        mean: 5.346_165_5e-8,
+        var: 1.934_329_2e-8,
+    },
+    TailReference {
+        alpha: -7.0,
+        p: 1.279_812_5e-12,
+        phi: 9.134_72e-12,
+        mean: 1.760_326e-13,
+        var: 4.758_433_6e-14,
+    },
+    TailReference {
+        alpha: -7.5,
+        p: 3.190_891_7e-14,
+        phi: 2.434_320_5e-13,
+        mean: 4.115_178e-15,
+        var: 1.045_083e-15,
+    },
+];
+
+fn relative(actual: f32, expected: f32, label: &str) {
+    assert!(expected != 0.0, "{label} reference must be nonzero");
+    let error = (actual - expected).abs() / expected.abs();
+    assert!(
+        error <= 3e-4,
+        "{label}: {actual:e} vs {expected:e}, rel={error:e}"
+    );
+}
+
+fn tail_values<B: Backend>(device: &B::Device, alpha: f32, variance: f32) -> [f32; 5] {
+    let mean = alpha * variance.sqrt();
+    let moments = Moments::new(
+        Tensor::<B, 2>::from_data([[mean]], device),
+        Tensor::<B, 2>::from_data([[variance]], device),
+    );
+    let diagonal = propagate_relu(&moments);
+    let full = propagate_relu_full(&MomentsFull::from_diagonal(
+        moments.mean.clone(),
+        moments.var.clone(),
+    ));
+    let full_var = data(full.variance())[0];
+    let full_mean = data(full.mean)[0];
+    let cross = propagate_relu_cross_covariance(
+        Tensor::<B, 3>::from_data([[[variance]]], device),
+        &moments,
+    );
+    [
+        data(diagonal.mean)[0],
+        data(diagonal.var)[0],
+        full_mean,
+        full_var,
+        data(cross)[0],
+    ]
+}
+
+fn tail_gradients<B: Backend>(
+    device: &B::Device,
+    alpha: f32,
+    variance: f32,
+    mean_loss: bool,
+) -> (f32, f32) {
+    let mean =
+        Tensor::<Autodiff<B>, 2>::from_data([[alpha * variance.sqrt()]], device).require_grad();
+    let var = Tensor::<Autodiff<B>, 2>::from_data([[variance]], device).require_grad();
+    let out = propagate_relu(&Moments::new(mean.clone(), var.clone()));
+    let loss = if mean_loss {
+        out.mean.sum()
+    } else {
+        out.var.sum()
+    };
+    let gradients = loss.backward();
+    (
+        data(mean.grad(&gradients).unwrap())[0],
+        data(var.grad(&gradients).unwrap())[0],
+    )
+}
+
+fn assert_tail_values<B: Backend>(device: &B::Device, label: &str) {
+    for tail in TAILS {
+        for variance in [2f32.powi(-40), 1.0, 2f32.powi(40)] {
+            let sigma = variance.sqrt();
+            let actual = tail_values::<B>(device, tail.alpha, variance);
+            let expected_mean = sigma * tail.mean;
+            let expected_var = variance * tail.var;
+            relative(actual[0], expected_mean, &format!("{label} diagonal mean"));
+            relative(
+                actual[1],
+                expected_var,
+                &format!("{label} diagonal variance"),
+            );
+            relative(actual[2], expected_mean, &format!("{label} full mean"));
+            relative(actual[3], expected_var, &format!("{label} full variance"));
+            relative(actual[4], variance * tail.p, &format!("{label} cross gate"));
+        }
+    }
+}
+
+fn assert_tail_gradients<B: Backend>(device: &B::Device, label: &str) {
+    for tail in TAILS {
+        for variance in [2f32.powi(-40), 1.0, 2f32.powi(40)] {
+            let sigma = variance.sqrt();
+            let mean = sigma * tail.mean;
+            for (mean_loss, expected) in [
+                (true, [tail.p, tail.phi / (2.0 * sigma)]),
+                (
+                    false,
+                    [2.0 * mean * (1.0 - tail.p), tail.p - tail.mean * tail.phi],
+                ),
+            ] {
+                let actual = tail_gradients::<B>(device, tail.alpha, variance, mean_loss);
+                relative(actual.0, expected[0], &format!("{label} d/dmean"));
+                relative(actual.1, expected[1], &format!("{label} d/dvariance"));
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a Metal GPU"]
+fn metal_tail_relu_values_and_gradients_match_erfc_references() {
+    let device = metal_device();
+    assert_tail_values::<GpuMsl>(&device, "Metal fused");
+    assert_tail_values::<GpuEager>(&device, "Metal eager");
+    assert_tail_gradients::<GpuMsl>(&device, "Metal fused");
+    <Autodiff<GpuMsl> as Backend>::sync(&device).unwrap();
+    assert_tail_gradients::<GpuEager>(&device, "Metal eager");
+    <Autodiff<GpuEager> as Backend>::sync(&device).unwrap();
+}
+
 fn fixture<B: Backend>(device: &B::Device) -> Vec<Vec<f32>> {
     // Includes zero variance, a central input, tiny scale, and linear tails.
     let mean = Tensor::<B, 2>::from_data([[0.0, 1e-12, 9.0, -9.0]], device);
