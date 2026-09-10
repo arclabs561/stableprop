@@ -25,7 +25,7 @@ lint:
 test:
     cargo test
     cargo test --all-features
-    cargo test --all-features --example cora_uncertainty --example active_selection
+    cargo test --all-features --example cora_uncertainty --example active_selection --example gcn_uncertainty
 
 # Build both sets of API docs with warnings treated as errors.
 docs:
@@ -45,3 +45,18 @@ smoke:
 # Run an example on CPU; forward remaining arguments to it.
 example name *args:
     cargo run --release --features burn --example "$1" -- "${@:2}"
+
+# Compile the Metal tests and training example on macOS.
+[macos]
+metal-check:
+    cargo check --test burn_metal --example robust_training --features metal
+
+# Check GPU values and gradients, then print synchronized workload timings.
+[macos]
+metal-test:
+    cargo test --release --features metal --test burn_metal -- --ignored --nocapture --test-threads=1
+
+# Train the variance-penalty example on Metal.
+[macos]
+metal-train:
+    cargo run --release --features metal --example robust_training -- --metal

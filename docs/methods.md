@@ -1,6 +1,6 @@
 # Methods, history, and applications
 
-Literature through September 2026. This guide covers methods
+Selected literature reviewed in September 2026. This guide covers methods
 relevant to stableprop. Recent results are preprints unless a publication venue
 is named; they describe their own implementations and experiments, not this crate.
 

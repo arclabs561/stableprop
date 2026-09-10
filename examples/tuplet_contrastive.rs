@@ -12,7 +12,7 @@ use burn::module::Module;
 use burn::nn::{Linear, LinearConfig};
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::Backend;
-use burn::tensor::{activation, Distribution, Int, Tensor, TensorData};
+use burn::tensor::{activation, Device, Distribution, Int, Tensor, TensorData};
 use burn_ndarray::NdArray;
 
 use stableprop::burn_sdp::{propagate_linear, propagate_relu, Moments};
@@ -62,7 +62,7 @@ impl<B: Backend> Encoder<B> {
 }
 
 fn main() {
-    let dev = <Ad as Backend>::Device::default();
+    let dev = Device::<Ad>::default();
 
     // Class blobs: class c shifted along a per-class direction.
     let make_split = |per_class: usize, seed: u64| -> (Tensor<Ad, 2>, Vec<i64>) {

@@ -18,7 +18,7 @@ use burn::nn::loss::CrossEntropyLoss;
 use burn::nn::{Linear, LinearConfig};
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::Backend;
-use burn::tensor::{activation, Int, Tensor, TensorData};
+use burn::tensor::{activation, Device, Int, Tensor, TensorData};
 use burn_ndarray::NdArray;
 
 use stableprop::burn_sdp::{propagate_linear_full, propagate_relu_full, MomentsFull};
@@ -69,7 +69,7 @@ fn phi_cdf(x: f64) -> f64 {
 
 /// Class-conditional Gaussian blobs: balanced classes, blob `c` shifted on two
 /// features so the classes separate.
-fn make(n: usize, dev: &<Ad as Backend>::Device) -> (Vec<f32>, Vec<i32>) {
+fn make(n: usize, dev: &Device<Ad>) -> (Vec<f32>, Vec<i32>) {
     let mut x =
         Tensor::<Ad, 2>::random([n, D_IN], burn::tensor::Distribution::Normal(0.0, 0.6), dev)
             .to_data()
@@ -85,9 +85,9 @@ fn make(n: usize, dev: &<Ad as Backend>::Device) -> (Vec<f32>, Vec<i32>) {
 }
 
 fn main() {
-    let dev = <Ad as Backend>::Device::default();
+    let dev = Device::<Ad>::default();
     <Ad as Backend>::seed(&dev, 0xA115_C1A5);
-    let idev = <Nd as Backend>::Device::default();
+    let idev = Device::<Nd>::default();
     let (xtr, ytr) = make(N_TRAIN, &dev);
     let (xte, yte) = make(N_TEST, &dev);
 

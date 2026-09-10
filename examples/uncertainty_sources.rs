@@ -8,8 +8,7 @@
 //!
 //! Run: `cargo run --release --example uncertainty_sources --features burn`
 
-use burn::tensor::backend::Backend;
-use burn::tensor::{Tensor, TensorData};
+use burn::tensor::{Device, Tensor, TensorData};
 use burn_ndarray::NdArray;
 
 use stableprop::burn_sdp::{propagate_linear_bayes, Moments};
@@ -58,7 +57,7 @@ fn monte_carlo(
 }
 
 fn propagated_variance(
-    dev: &<Nd as Backend>::Device,
+    dev: &Device<Nd>,
     x_mean: &[f64; D],
     x_var: &[f64; D],
     beta_mean: &[f64; D],
@@ -76,7 +75,7 @@ fn propagated_variance(
 }
 
 fn main() {
-    let dev = <Nd as Backend>::Device::default();
+    let dev = Device::<Nd>::default();
     let x_mean = [1.25, -0.75, 0.50];
     let x_var = [0.16, 0.09, 0.04];
     let beta_mean = [0.80, -1.10, 0.50];

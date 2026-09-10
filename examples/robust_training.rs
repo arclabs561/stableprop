@@ -6,18 +6,21 @@
 //! The example reports clean and noisy test RMSE for that objective and plain MSE.
 //!
 //! Both nets start from the same weights and use the same noisy test draws,
-//! so only the loss differs.
+//! so only the loss differs. Each backend has its own RNG stream, so metrics
+//! from separate backend runs need not match.
 //!
-//! Run: `cargo run --release --example robust_training --features burn`
+//! Run on CPU: `cargo run --release --example robust_training --features burn`
+//! Run on macOS Metal: `cargo run --release --example robust_training --features metal -- --metal`
 
 use burn::backend::Autodiff;
 use burn::module::Module;
 use burn::nn::loss::{MseLoss, Reduction};
 use burn::nn::{Linear, LinearConfig};
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
-use burn::tensor::backend::Backend;
-use burn::tensor::{activation, Distribution, Tensor, TensorData};
+use burn::tensor::backend::{AutodiffBackend, Backend};
+use burn::tensor::{activation, Device, Distribution, Tensor, TensorData};
 use burn_ndarray::NdArray;
+use std::time::Instant;
 
 use stableprop::burn_sdp::{propagate_linear, propagate_relu, Moments};
 
@@ -65,11 +68,10 @@ fn target(x: &[f32]) -> f32 {
     (s * 0.6).sin() + 0.5 * x[0] * x[1] - 0.3 * x[2] * x[2]
 }
 
-fn main() {
-    let dev = <Ad as Backend>::Device::default();
-    <Ad as Backend>::seed(&dev, 0xA0B5_7001);
-    let make = |n: usize| -> (Tensor<Ad, 2>, Tensor<Ad, 2>) {
-        let xt = Tensor::<Ad, 2>::random([n, D_IN], Distribution::Normal(0.0, 1.0), &dev);
+fn run<B: AutodiffBackend>(dev: B::Device, backend: &str) {
+    B::seed(&dev, 0xA0B5_7001);
+    let make = |n: usize| -> (Tensor<B, 2>, Tensor<B, 2>) {
+        let xt = Tensor::<B, 2>::random([n, D_IN], Distribution::Normal(0.0, 1.0), &dev);
         let xv = xt.to_data().to_vec::<f32>().unwrap();
         let yv: Vec<f32> = (0..n)
             .map(|i| target(&xv[i * D_IN..(i + 1) * D_IN]))
@@ -80,8 +82,8 @@ fn main() {
     let (x_te, y_te) = make(N_TEST);
 
     // Same starting weights for both nets: only the loss differs.
-    let init = Mlp::<Ad>::init(&dev);
-    let train = |mut model: Mlp<Ad>, lambda: f64| -> Mlp<Ad> {
+    let init = Mlp::<B>::init(&dev);
+    let train = |mut model: Mlp<B>, lambda: f64| -> Mlp<B> {
         let mut optim = AdamConfig::new().init();
         for _ in 0..800 {
             let (pred, var) = model.forward_with_var(x_tr.clone(), TRAIN_STD);
@@ -94,19 +96,23 @@ fn main() {
         }
         model
     };
+    B::sync(&dev).expect("training backend synchronization failed");
+    let started = Instant::now();
     let plain = train(init.clone(), 0.0);
     let robust = train(init, 3.0);
+    B::sync(&dev).expect("training backend synchronization failed");
+    let elapsed = started.elapsed();
 
     // Same test-noise draws for both nets.
     let clean = vec![x_te.clone()];
-    let noisy: Vec<Tensor<Ad, 2>> = (0..20)
+    let noisy: Vec<Tensor<B, 2>> = (0..20)
         .map(|_| {
             x_te.clone()
-                + Tensor::<Ad, 2>::random([N_TEST, D_IN], Distribution::Normal(0.0, TEST_STD), &dev)
+                + Tensor::<B, 2>::random([N_TEST, D_IN], Distribution::Normal(0.0, TEST_STD), &dev)
         })
         .collect();
     let y = y_te.into_data().to_vec::<f32>().unwrap();
-    let rmse = |model: &Mlp<Ad>, inputs: &[Tensor<Ad, 2>]| -> f64 {
+    let rmse = |model: &Mlp<B>, inputs: &[Tensor<B, 2>]| -> f64 {
         let mut total = 0.0;
         for x in inputs {
             let p = model
@@ -122,6 +128,11 @@ fn main() {
         (total / inputs.len() as f64).sqrt()
     };
 
+    println!("Backend: {backend}");
+    println!(
+        "Training elapsed (includes first-use kernel compilation/autotuning): {:.3}s",
+        elapsed.as_secs_f64()
+    );
     println!("RMSE (lower = better), shared init + shared test noise:");
     println!("  {:<28} {:>8} {:>8}", "net", "clean", "noisy");
     println!(
@@ -137,4 +148,60 @@ fn main() {
         rmse(&robust, &noisy)
     );
     println!("\nCompare clean and noisy RMSE; the variance penalty can change either metric.");
+    println!("Different backend RNG streams can produce different trained metrics.");
+}
+
+fn run_ndarray() {
+    run::<Ad>(Device::<Ad>::default(), "NdArray CPU");
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn run_metal() {
+    use burn::backend::wgpu::{
+        graphics::{GraphicsApi, Metal},
+        init_setup, RuntimeOptions, WgpuDevice,
+    };
+
+    type MetalAd = Autodiff<burn::backend::Metal<f32>>;
+    let device = WgpuDevice::DefaultDevice;
+    let setup = init_setup::<Metal>(&device, RuntimeOptions::default());
+    assert_eq!(setup.backend, Metal::backend());
+    println!("Device: {}", setup.adapter.get_info().name);
+    run::<MetalAd>(device, "Metal");
+}
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+fn run_metal() -> Result<(), String> {
+    #[cfg(not(feature = "metal"))]
+    return Err(
+        "--metal requires the `metal` feature on macOS; run with `--features metal`".into(),
+    );
+
+    #[cfg(all(feature = "metal", not(target_os = "macos")))]
+    Err("--metal is supported only on macOS".into())
+}
+
+fn main() -> Result<(), String> {
+    let mut metal = false;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--metal" => metal = true,
+            _ => {
+                return Err(format!(
+                    "unknown argument `{arg}`; usage: robust_training [--metal]"
+                ))
+            }
+        }
+    }
+
+    if metal {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        run_metal();
+        #[cfg(not(all(feature = "metal", target_os = "macos")))]
+        run_metal()?;
+    } else {
+        run_ndarray();
+    }
+
+    Ok(())
 }

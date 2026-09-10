@@ -6,8 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-10
+
+### Added
+
+- A `metal` feature for Burn's fused WGPU Metal backend, a GPU training example,
+  and CPU/Metal value and gradient comparisons.
+- A justfile shared with CI, including explicit local Metal checks and timings.
+
 ### Changed
 
+- Update the optional tensor API to Burn 0.21, requiring Rust 1.92. Burn 0.20
+  tensors are incompatible; the default vector API still supports Rust 1.80.
+- Update the GCN and contrastive examples to ricci 0.10 and tuplet 0.3.
+  The GCN moment pass adds bias after adjacency aggregation, matching ricci.
 - Replace unseeded tensor Monte Carlo checks for exact operations with
   deterministic analytical references. Retain seeded distributional checks.
 - Add full-covariance and ReLU moment properties, and distinguish analytical
@@ -99,7 +111,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Examples: `regression_intervals`, `conformal_intervals`, `cora_uncertainty`,
   `gcn_uncertainty`.
 
-[Unreleased]: https://github.com/arclabs561/stableprop/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/arclabs561/stableprop/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/arclabs561/stableprop/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/arclabs561/stableprop/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/arclabs561/stableprop/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/arclabs561/stableprop/compare/v0.2.0...v0.3.0

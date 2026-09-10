@@ -21,7 +21,7 @@ use burn::nn::loss::{MseLoss, Reduction};
 use burn::nn::{Linear, LinearConfig};
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::Backend;
-use burn::tensor::{activation, Distribution, Tensor, TensorData};
+use burn::tensor::{activation, Device, Distribution, Tensor, TensorData};
 use burn_ndarray::NdArray;
 
 use stableprop::burn_sdp::{propagate_linear, propagate_relu, Moments};
@@ -63,7 +63,7 @@ fn target(x: &[f32]) -> f32 {
 }
 
 fn main() {
-    let dev = <Ad as Backend>::Device::default();
+    let dev = Device::<Ad>::default();
 
     let make = |n: usize, noisy: bool, seed: u64| -> (Vec<f32>, Vec<f32>) {
         <Ad as Backend>::seed(&dev, seed);
@@ -102,7 +102,7 @@ fn main() {
 
     // stableprop std under the chosen Gaussian feature-noise sensitivity model,
     // on the inner backend. It is separate from the simulated label noise above.
-    let idev = <Nd as Backend>::Device::default();
+    let idev = Device::<Nd>::default();
     let w1 = model.lin1.weight.val().inner();
     let b1 = model.lin1.bias.as_ref().map(|p| p.val().inner());
     let w2 = model.lin2.weight.val().inner();

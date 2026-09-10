@@ -1,9 +1,10 @@
 # Examples
 
-Run these commands from the repository root with current stable Rust. The Burn
-examples require Rust 1.89 or newer; `basic` also works with Rust 1.80. `basic`
-uses the dependency-free vector API; the other examples use Burn's CPU NdArray
-backend. Training and sampling use fixed seeds. Floating-point results may
+Run these commands from the repository root with Rust 1.92 or newer; Cargo
+also builds the Burn development dependencies for `basic`. That example
+uses the dependency-free vector API; the other examples default to Burn's CPU
+NdArray backend. `robust_training` also accepts `--metal` on macOS with the
+`metal` feature. Training and sampling use fixed seeds. Floating-point results may
 still differ across backend or dependency versions.
 
 | I want to… | Start with |
@@ -95,6 +96,13 @@ The adaptive scale need not produce narrower intervals than the constant one.
 `robust_training` compares plain MSE with MSE plus a propagated-variance penalty,
 using shared initial weights and test noise. It prints RMSE with and without
 input perturbations. Compare both metrics; the penalty can trade accuracy for lower sensitivity.
+
+On macOS, `just metal-train` runs the same training code on Burn's Metal
+backend. Its synchronized training time includes first-use kernel compilation
+and autotuning. Backend RNG streams differ, so compare the two objectives
+within each run. For warmed CPU/GPU timings on fixed inputs, use
+`just metal-test`; those timings include tensor allocation and report the
+batch size, width, and number of iterations.
 
 ## Covariance and heavy tails
 

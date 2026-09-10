@@ -21,7 +21,7 @@ use burn::nn::loss::{MseLoss, Reduction};
 use burn::nn::{Linear, LinearConfig};
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::Backend;
-use burn::tensor::{activation, Distribution, Tensor, TensorData};
+use burn::tensor::{activation, Device, Distribution, Tensor, TensorData};
 use burn_ndarray::NdArray;
 
 use stableprop::burn_sdp::{propagate_linear, propagate_relu, Moments};
@@ -76,7 +76,7 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
 }
 
 fn main() {
-    let dev = <Ad as Backend>::Device::default();
+    let dev = Device::<Ad>::default();
     <Ad as Backend>::seed(&dev, 0xAE61_0001);
 
     let make = |n: usize| -> (Vec<f32>, Vec<f32>) {
@@ -114,7 +114,7 @@ fn main() {
     println!("train RMSE: {train_rmse:.4}\n");
 
     // Inner-backend weights for analytic propagation.
-    let idev = <Nd as Backend>::Device::default();
+    let idev = Device::<Nd>::default();
     let x_test = Tensor::<Nd, 2>::from_data(TensorData::new(xte, [N_TEST, D_IN]), &idev);
     let w1 = model.lin1.weight.val().inner();
     let b1 = model.lin1.bias.as_ref().map(|p| p.val().inner());

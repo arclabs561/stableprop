@@ -376,7 +376,7 @@ mod tests {
         center_logits, centered_linear_variance, load_planetoid, remap_known_labels, spearman,
         Moments,
     };
-    use burn::tensor::{backend::Backend, Tensor, TensorData};
+    use burn::tensor::{Device, Tensor, TensorData};
     use burn_ndarray::NdArray;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -472,7 +472,7 @@ mod tests {
         let trace_p_deterministic_cov_p = deterministic_trace;
 
         type B = NdArray<f32>;
-        let device = <B as Backend>::Device::default();
+        let device = Device::<B>::default();
         let m = Moments::new(
             Tensor::<B, 2>::from_data(
                 TensorData::new(hidden_mean.map(|x| x as f32).to_vec(), [1, 2]),

@@ -25,7 +25,7 @@ use burn::nn::loss::CrossEntropyLoss;
 use burn::nn::{Linear, LinearConfig};
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::Backend;
-use burn::tensor::{activation, Int, Tensor, TensorData};
+use burn::tensor::{activation, Device, Int, Tensor, TensorData};
 use burn_ndarray::NdArray;
 
 use stableprop::burn_sdp::{propagate_linear_full, propagate_relu_full, MomentsFull};
@@ -152,12 +152,7 @@ fn make_data(n: usize, rng: &mut Rng) -> Data {
     Data { x, y }
 }
 
-fn train(
-    init: &Net<Ad>,
-    data: &Data,
-    chosen: &[usize],
-    device: &<Ad as Backend>::Device,
-) -> Net<Ad> {
+fn train(init: &Net<Ad>, data: &Data, chosen: &[usize], device: &Device<Ad>) -> Net<Ad> {
     let mut xv = Vec::with_capacity(chosen.len() * D_IN);
     let mut yv = Vec::with_capacity(chosen.len());
     for &i in chosen {
@@ -252,12 +247,7 @@ fn entropy(w: &Weights, x: &[f32]) -> f64 {
     -p0 * p0.ln() - (1.0 - p0) * (1.0 - p0).ln()
 }
 
-fn analytic_scores(
-    model: &Net<Ad>,
-    x: &[f32],
-    n: usize,
-    device: &<Nd as Backend>::Device,
-) -> Vec<f64> {
+fn analytic_scores(model: &Net<Ad>, x: &[f32], n: usize, device: &Device<Nd>) -> Vec<f64> {
     let w1 = model.lin1.weight.val().inner();
     let b1 = model.lin1.bias.as_ref().map(|p| p.val().inner());
     let w2 = model.lin2.weight.val().inner();
@@ -301,13 +291,7 @@ fn centered_disagreement(cov: &[f64]) -> f64 {
 
 /// `2 * sum_c Var[(P f(x + eps))_c]`, estimated from 64 iid views.  This
 /// equals expected squared disagreement of two independent centered views.
-fn mc_scores(
-    model: &Net<Ad>,
-    x: &[f32],
-    n: usize,
-    rng: &mut Rng,
-    device: &<Nd as Backend>::Device,
-) -> Vec<f64> {
+fn mc_scores(model: &Net<Ad>, x: &[f32], n: usize, rng: &mut Rng, device: &Device<Nd>) -> Vec<f64> {
     let mut views = Vec::with_capacity(n * MC_DRAWS * D_IN);
     for i in 0..n {
         let p = &x[i * D_IN..(i + 1) * D_IN];
@@ -404,7 +388,7 @@ fn acquire(
     chosen: &[usize],
     count: usize,
     seed: u64,
-    nd_device: &<Nd as Backend>::Device,
+    nd_device: &Device<Nd>,
 ) -> (Vec<usize>, Duration, Option<Agreement>) {
     let started = Instant::now();
     let mut candidates: Vec<usize> = (0..N_POOL).filter(|i| !chosen.contains(i)).collect();
@@ -483,7 +467,7 @@ fn noisy_accuracy(w: &Weights, data: &Data, rng: &mut Rng) -> f64 {
     correct as f64 / (data.y.len() * EVAL_DRAWS) as f64
 }
 
-fn prediction_bytes(model: &Net<Ad>, data: &Data, device: &<Ad as Backend>::Device) -> Vec<f32> {
+fn prediction_bytes(model: &Net<Ad>, data: &Data, device: &Device<Ad>) -> Vec<f32> {
     let input = Tensor::<Ad, 2>::from_data(
         TensorData::new(data.x.clone(), [data.y.len(), D_IN]),
         device,
@@ -492,8 +476,8 @@ fn prediction_bytes(model: &Net<Ad>, data: &Data, device: &<Ad as Backend>::Devi
 }
 
 fn main() {
-    let ad_device = <Ad as Backend>::Device::default();
-    let nd_device = <Nd as Backend>::Device::default();
+    let ad_device = Device::<Ad>::default();
+    let nd_device = Device::<Nd>::default();
     let mut rows = Vec::new();
     for &seed in &SEEDS {
         let mut pool_rng = Rng::new(seed ^ 0xDADA_0001);

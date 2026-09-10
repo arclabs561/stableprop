@@ -25,7 +25,7 @@
 //! variance approaches zero.
 
 use burn::tensor::backend::Backend;
-use burn::tensor::{ElementConversion, ElementLimits, Tensor, TensorData};
+use burn::tensor::{Element, Tensor, TensorData};
 use core::f64::consts::{FRAC_1_SQRT_2, PI};
 
 /// Mean and per-feature variance of a batch of independent Gaussians.
@@ -236,7 +236,10 @@ pub fn propagate_leaky_relu<B: Backend>(m: &Moments<B>, alpha: f64) -> Moments<B
     let alpha_sq = alpha * alpha;
     let complement_sq = one_minus_alpha * one_minus_alpha;
     let cross_coefficient = 2.0 * alpha * one_minus_alpha;
-    let max_scalar = B::FloatElem::MAX.elem::<f64>();
+    let max_scalar = B::FloatElem::dtype()
+        .finfo()
+        .expect("floating-point backend scalar required")
+        .max;
     assert!(
         [
             alpha,
@@ -660,6 +663,7 @@ pub fn propagate_relu_cauchy<B: Backend>(c: &Cauchy<B>) -> Cauchy<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use burn::tensor::Device;
     use burn_ndarray::NdArray;
 
     type B = NdArray<f32>;
@@ -692,7 +696,7 @@ mod tests {
     /// hand-calculated, rather than sampled from the implementation's backend.
     #[test]
     fn linear_affine_moments_match_fixed_oracle() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let mean = Tensor::<B, 2>::from_data([[1.0, -2.0], [0.5, 3.0]], &dev);
         let var = Tensor::<B, 2>::from_data([[0.25, 4.0], [1.0, 0.5]], &dev);
         let weight = Tensor::<B, 2>::from_data([[2.0, -1.0, 0.5], [-0.25, 3.0, 2.0]], &dev);
@@ -711,7 +715,7 @@ mod tests {
     /// tail, and deterministic expected values without sampling noise.
     #[test]
     fn relu_gaussian_moments_match_fixed_oracle() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let mean = Tensor::<B, 2>::from_data([[1.0, -1.0, 0.0, 9.0], [-9.0, 2.0, -2.0, 0.0]], &dev);
         let var = Tensor::<B, 2>::from_data([[1.0, 1.0, 1.0, 1.0], [1.0, 0.0, 0.0, 0.0]], &dev);
 
@@ -738,7 +742,7 @@ mod tests {
     /// fixed covariance fixture keeps this ordering check deterministic.
     #[test]
     fn full_cov_beats_diagonal_on_correlated_relu_fixture() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let mean = Tensor::<B, 2>::zeros([1, 2], &dev);
         let cov = Tensor::<B, 3>::from_data(
             TensorData::new(vec![1.0f32, 0.5, 0.5, 1.0], [1, 2, 2]),
@@ -781,7 +785,7 @@ mod tests {
     /// moments can't be used because a Cauchy has none.
     #[test]
     fn cauchy_linear_exact_vs_monte_carlo() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let (n, d_in, d_out, k) = (2usize, 3usize, 2usize, 40_000usize);
         let loc = Tensor::<B, 2>::from_data([[1.0, -2.0, 0.5], [-0.5, 1.5, 2.0]], &dev);
         let scale = Tensor::<B, 2>::from_data([[0.5, 0.25, 1.0], [0.75, 0.4, 0.6]], &dev);
@@ -850,7 +854,7 @@ mod tests {
     /// Frey-Hinton Gaussian ReLU moments and `leaky(x) = 0.3x + 0.7 relu(x)`.
     #[test]
     fn leaky_relu_moments_match_fixed_oracle() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let mean = Tensor::<B, 2>::from_data([[1.0, -1.0, 0.0, 9.0], [-9.0, 2.0, -2.0, 0.0]], &dev);
         let var = Tensor::<B, 2>::from_data([[1.0, 1.0, 1.0, 1.0], [1.0, 0.25, 0.25, 0.0]], &dev);
         let actual = propagate_leaky_relu(&Moments::new(mean, var), 0.3);
@@ -877,7 +881,7 @@ mod tests {
     /// independently sampled forward pass when the branch is small.
     #[test]
     fn residual_add_matches_monte_carlo_small_branch() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let (n, d, k) = (2usize, 2usize, 80_000usize);
         let std = 0.5f64;
 
@@ -966,7 +970,7 @@ mod tests {
     /// over a fixed two-channel, two-output fixture with bias.
     #[test]
     fn conv2d_moments_match_fixed_oracle() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let (n, cin, h, w, cout, kh, kw) = (2usize, 2usize, 3usize, 4usize, 2usize, 2usize, 2usize);
         let opts = burn::tensor::ops::ConvOptions::new([1, 1], [0, 0], [1, 1], 1);
         let mean_data: Vec<f32> = (0..n * cin * h * w).map(|i| i as f32 * 0.1 - 1.0).collect();
@@ -1059,7 +1063,7 @@ mod tests {
     }
 
     fn fixture() -> (Tensor<B, 2>, Moments<B>) {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let mean = Tensor::<B, 2>::from_data(
             [
                 [-1.0, 0.5, 2.0, -0.25, 1.0],
@@ -1086,7 +1090,7 @@ mod tests {
     /// Weight-uncertainty propagation with zero weight variance is plain linear.
     #[test]
     fn bayes_reduces_to_linear_at_zero_weight_var() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let (_, m) = fixture();
         let w = Tensor::<B, 2>::from_data(
             [
@@ -1109,7 +1113,7 @@ mod tests {
     /// after a single linear layer.
     #[test]
     fn full_cov_diagonal_matches_diagonal_linear() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let (mean, m) = fixture();
         let w = Tensor::<B, 2>::from_data(
             [
@@ -1138,7 +1142,7 @@ mod tests {
     /// and output variance stays ~0.
     #[test]
     fn relu_deterministic_input() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let mean =
             Tensor::<B, 2>::from_data(TensorData::new(vec![1.0f32, -1.0, 2.0, -0.5], [1, 4]), &dev);
         let var = Tensor::<B, 2>::full([1, 4], 0.0, &dev);
@@ -1154,7 +1158,7 @@ mod tests {
 
     #[test]
     fn activation_variance_is_stable_at_large_means_and_tiny_noise() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let mean = Tensor::<B, 2>::from_data(
             TensorData::new(vec![10_000.0f32, -1.0, 0.0, 0.0], [1, 4]),
             &dev,
@@ -1194,7 +1198,7 @@ mod tests {
 
     #[test]
     fn full_relu_variance_is_stable_at_large_means() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let mean = Tensor::<B, 2>::from_data(TensorData::new(vec![10_000.0f32], [1, 1]), &dev);
         let cov = Tensor::<B, 3>::from_data(TensorData::new(vec![1.0f32], [1, 1, 1]), &dev);
         let out = propagate_relu_full(&MomentsFull::new(mean, cov));
@@ -1208,7 +1212,7 @@ mod tests {
 
     #[test]
     fn full_relu_handles_zero_and_tiny_covariances() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let zero_mean =
             Tensor::<B, 2>::from_data(TensorData::new(vec![0.0f32, -2.0], [1, 2]), &dev);
         let zero_cov = Tensor::<B, 3>::zeros([1, 2, 2], &dev);
@@ -1237,7 +1241,7 @@ mod tests {
     /// All propagated variances stay non-negative.
     #[test]
     fn variance_stays_nonnegative() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let (mean, m) = fixture();
         let w = Tensor::<B, 2>::from_data(
             [
@@ -1262,7 +1266,7 @@ mod tests {
     /// Cauchy ReLU gates the scale to zero where the location is negative.
     #[test]
     fn cauchy_relu_gates_scale() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let loc = Tensor::<B, 2>::from_data(TensorData::new(vec![2.0f32, -3.0, 0.5], [1, 3]), &dev);
         let scale = Tensor::<B, 2>::full([1, 3], 1.0, &dev);
         let out = propagate_relu_cauchy(&Cauchy::new(loc, scale));
@@ -1275,7 +1279,7 @@ mod tests {
     /// variance). Catches mutations that drop or misplace the bias.
     #[test]
     fn linear_bias_added_to_mean_only() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let mean = Tensor::<B, 2>::zeros([2, 3], &dev);
         let var = Tensor::<B, 2>::full([2, 3], 0.5, &dev);
         let w = Tensor::<B, 2>::from_data(
@@ -1299,7 +1303,7 @@ mod tests {
     /// signed fixed adjacency matrix.
     #[test]
     fn matmul_left_moments_match_fixed_oracle() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let a = Tensor::<B, 2>::from_data([[1.0, -2.0, 0.5], [0.25, 3.0, -1.0]], &dev);
         let mean = Tensor::<B, 2>::from_data([[1.0, -2.0], [0.5, 4.0], [-3.0, 2.0]], &dev);
         let var = Tensor::<B, 2>::from_data([[0.25, 1.0], [4.0, 0.5], [1.5, 2.0]], &dev);
@@ -1313,7 +1317,7 @@ mod tests {
     /// Cauchy interval half-width is `scale * tan(pi p / 2)`.
     #[test]
     fn cauchy_interval_halfwidth_value() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let scale = Tensor::<B, 2>::full([1, 2], 2.0, &dev);
         let c = Cauchy::new(Tensor::zeros([1, 2], &dev), scale);
         let hw = c.interval_halfwidth(0.9).to_data().to_vec::<f32>().unwrap();
@@ -1329,7 +1333,7 @@ mod tests {
     /// variances has a hand-calculated mean-field oracle.
     #[test]
     fn bayes_weight_uncertainty_matches_fixed_oracle() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let mean = Tensor::<B, 2>::from_data([[1.0, -2.0], [0.5, 3.0]], &dev);
         let var = Tensor::<B, 2>::from_data([[0.25, 4.0], [1.0, 0.5]], &dev);
         let w_mean = Tensor::<B, 2>::from_data([[2.0, -1.0, 0.5], [-0.25, 3.0, 2.0]], &dev);
@@ -1365,7 +1369,7 @@ mod tests {
     /// Residual-add is exactly the element-wise sum of the two moments.
     #[test]
     fn residual_add_is_exact_sum() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let m1 = Tensor::<B, 2>::from_data([[1.0, -2.0, 0.5], [-0.25, 3.0, 1.5]], &dev);
         let v1 = Tensor::<B, 2>::full([2, 3], 0.5, &dev);
         let m2 = Tensor::<B, 2>::from_data([[-0.5, 1.0, 2.0], [0.75, -1.5, 0.25]], &dev);
@@ -1380,7 +1384,7 @@ mod tests {
 
     #[test]
     fn correlated_residual_add_includes_cross_covariance() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let mean = Tensor::<B, 2>::from_data(TensorData::new(vec![1.0f32, -2.0], [1, 2]), &dev);
         let var = Tensor::<B, 2>::from_data(TensorData::new(vec![0.5f32, 2.0], [1, 2]), &dev);
         let skip = Moments::new(mean.clone(), var.clone());
@@ -1399,7 +1403,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "probability mass must be finite and in [0, 1)")]
     fn cauchy_interval_rejects_invalid_probability_mass() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let c = Cauchy::<B>::new(Tensor::zeros([1, 1], &dev), Tensor::ones([1, 1], &dev));
         let _ = c.interval_halfwidth(1.0);
     }
@@ -1409,7 +1413,7 @@ mod tests {
     /// pre-activations are produced by a linear layer from a diagonal input.
     #[test]
     fn relu_full_covariance_matches_monte_carlo() {
-        let dev = <B as Backend>::Device::default();
+        let dev = Device::<B>::default();
         let (n, din, dh, k) = (2usize, 4usize, 5usize, 150_000usize);
         let std = 0.6f64;
         let weights = vec![

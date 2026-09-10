@@ -15,7 +15,7 @@
 //! Run: `cargo run --release --example pairwise_ranking_risk --features burn`
 
 use burn::tensor::backend::Backend;
-use burn::tensor::{activation, Distribution, Tensor, TensorData};
+use burn::tensor::{activation, Device, Distribution, Tensor, TensorData};
 use burn_ndarray::NdArray;
 
 use stableprop::burn_sdp::{propagate_linear_full, propagate_relu_full, MomentsFull};
@@ -29,11 +29,11 @@ const N_CANDIDATE: usize = 2;
 const INPUT_STD: f64 = 0.30;
 const MC_SAMPLES: usize = 2048;
 
-fn tensor2(data: Vec<f32>, shape: [usize; 2], dev: &<Nd as Backend>::Device) -> Tensor<Nd, 2> {
+fn tensor2(data: Vec<f32>, shape: [usize; 2], dev: &Device<Nd>) -> Tensor<Nd, 2> {
     Tensor::from_data(TensorData::new(data, shape), dev)
 }
 
-fn cdf(z: Vec<f32>, dev: &<Nd as Backend>::Device) -> Vec<f64> {
+fn cdf(z: Vec<f32>, dev: &Device<Nd>) -> Vec<f64> {
     let n = z.len();
     Tensor::<Nd, 1>::from_data(TensorData::new(z, [n]), dev)
         .mul_scalar(std::f64::consts::FRAC_1_SQRT_2)
@@ -53,7 +53,7 @@ fn flip_probability(
     cov: &[f32],
     point_scores: &[f32],
     discard_covariance: bool,
-    dev: &<Nd as Backend>::Device,
+    dev: &Device<Nd>,
 ) -> Vec<f64> {
     let mut probability = vec![0.0; N_QUERY];
     let mut indices = Vec::with_capacity(N_QUERY);
@@ -108,7 +108,7 @@ fn mean(values: &[f64]) -> f64 {
 }
 
 fn main() {
-    let dev = <Nd as Backend>::Device::default();
+    let dev = Device::<Nd>::default();
     <Nd as Backend>::seed(&dev, 0xFA1F_0001);
 
     // A two-dimensional query grid and fixed two-tower-style scoring weights.

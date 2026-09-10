@@ -33,6 +33,15 @@ check the relevant mathematical invariant or independent reference, including
 autodiff when changing Burn operations. Use local seeded sampling for Monte
 Carlo regression tests; a shared backend RNG can couple parallel tests.
 
+On macOS, run `just metal-check` to compile the GPU tests and training example, and
+`just metal-test` to compare values and gradients on a Metal device. CI only
+compiles the GPU tests; its numerical tests use NdArray. `just metal-train`
+runs the training example on Metal.
+
+GPU timings require warmup and synchronization. Keep host transfers outside
+the timed region and report workload dimensions, precision, and whether
+allocation or compilation is included.
+
 ## Documentation and delivery
 
 - Keep the README focused on use. Method history belongs in `docs/methods.md`;

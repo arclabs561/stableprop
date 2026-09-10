@@ -11,7 +11,7 @@
 use burn::module::Module;
 use burn::nn::{Linear, LinearConfig};
 use burn::tensor::backend::Backend;
-use burn::tensor::{activation, Distribution, Tensor};
+use burn::tensor::{activation, Device, Distribution, Tensor};
 use burn_ndarray::NdArray;
 
 use stableprop::burn_sdp::{
@@ -64,7 +64,7 @@ fn mean_abs_relative_error(est: &[f64], mc: &[f64]) -> f64 {
 }
 
 fn main() {
-    let dev = <Nd as Backend>::Device::default();
+    let dev = Device::<Nd>::default();
     <Nd as Backend>::seed(&dev, 0xF011_C0A1);
     let model = Mlp::<Nd>::init(&dev);
     let w1 = model.lin1.weight.val();

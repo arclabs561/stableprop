@@ -36,11 +36,11 @@ to exploration value and augmentation disagreement to training-data selection.
 ## Start with a small network
 
 The default API uses `f64` vectors, has no runtime dependencies, and supports
-Rust 1.80. The optional Burn backend requires Rust 1.89 or newer.
+Rust 1.80. The optional Burn backend requires Rust 1.92 or newer.
 
 ```toml
 [dependencies]
-stableprop = "0.4.0"
+stableprop = "0.5.0"
 ```
 
 ```rust
@@ -72,7 +72,7 @@ retain covariance; this API drops off-diagonal covariance at each ReLU.
 
 ## Burn models
 
-Enable `features = ["burn"]` for batched tensors. Use an autodiff Burn 0.20
+Enable `features = ["burn"]` for batched tensors. Use an autodiff Burn 0.21
 backend for differentiable propagation. Burn weights use `[input, output]`, the
 transpose of the vector API's layout.
 
@@ -87,6 +87,11 @@ matrix multiplication, residual addition, and affine propagation with supplied
 weight variances. Affine and Gaussian ReLU cross-covariance helpers carry
 dependence between a skip input and its branch. See the
 [API documentation](https://docs.rs/stableprop/latest/stableprop/burn_sdp/).
+
+On macOS, `features = ["metal"]` enables Burn's WGPU Metal backend with
+operation fusion. Run `just metal-train` for the training example or
+`just metal-test` for CPU/GPU value and gradient comparisons and synchronized
+timings. These checks use `f32`; small workloads can be faster on CPU.
 
 ## Try an application
 

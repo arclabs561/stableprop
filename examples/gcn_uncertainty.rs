@@ -7,7 +7,9 @@
 //!
 //! Run: `cargo run --release --example gcn_uncertainty --features burn`
 
-use burn::tensor::{backend::Backend, Distribution, Tensor, TensorData};
+use burn::tensor::{backend::Backend, Device, Distribution, Tensor, TensorData};
+#[cfg(test)]
+use burn::{module::Param, nn::Linear};
 use burn_ndarray::NdArray;
 use ricci::GCNConv;
 use stableprop::burn_sdp::{propagate_linear, propagate_matmul_left, propagate_relu, Moments};
@@ -21,12 +23,16 @@ fn lin_params(layer: &GCNConv<B>) -> (Tensor<B, 2>, Option<Tensor<B, 1>>) {
     (w, b)
 }
 
-/// SDP through one GCN layer: linear then adjacency aggregation (matches
-/// `GCNConv::forward`, which is `adj @ (x @ W + b)`).
+/// SDP through one GCN layer: transform and aggregate, then add the bias.
+/// This matches `GCNConv::forward`: `adj @ (x @ W) + b`.
 fn sdp_gcn(m: &Moments<B>, layer: &GCNConv<B>, adj: Tensor<B, 2>) -> Moments<B> {
     let (w, b) = lin_params(layer);
-    let after_linear = propagate_linear(m, w, b);
-    propagate_matmul_left(adj, &after_linear)
+    let mut output = propagate_matmul_left(adj, &propagate_linear(m, w, None));
+    if let Some(bias) = b {
+        let [features] = bias.dims();
+        output.mean = output.mean + bias.reshape([1, features]);
+    }
+    output
 }
 
 fn pearson(a: &[f64], b: &[f64]) -> f64 {
@@ -45,7 +51,7 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
 }
 
 fn main() {
-    let dev = <B as Backend>::Device::default();
+    let dev = Device::<B>::default();
     <B as Backend>::seed(&dev, 0x6C6E_0001);
     let (n, d_in, d_hid, d_out) = (32usize, 8usize, 8usize, 4usize);
     let input_std = 0.3f64;
@@ -152,5 +158,56 @@ fn main() {
             "at or below mean"
         };
         println!("  node {node}: std={s:.4}  -> {band}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(actual: Vec<f32>, expected: Vec<f32>) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 1e-6,
+                "actual={actual}, expected={expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn sdp_gcn_adds_bias_after_non_normalized_aggregation() {
+        let device = Device::<B>::default();
+        let weight = Tensor::<B, 2>::from_data([[2.0, -1.0], [0.5, 3.0]], &device);
+        let bias = Tensor::<B, 1>::from_data([0.75, -1.25], &device);
+        let layer = GCNConv::new(Linear {
+            weight: Param::from_tensor(weight.clone()),
+            bias: Some(Param::from_tensor(bias.clone())),
+        });
+        let mean = Tensor::<B, 2>::from_data([[1.0, -2.0], [0.5, 3.0]], &device);
+        let var = Tensor::<B, 2>::from_data([[0.25, 4.0], [1.0, 0.5]], &device);
+        let adj = Tensor::<B, 2>::from_data([[2.0, 1.0], [-1.0, 3.0]], &device);
+
+        let actual = sdp_gcn(
+            &Moments::new(mean.clone(), var.clone()),
+            &layer,
+            adj.clone(),
+        );
+        close(
+            actual.mean.into_data().to_vec::<f32>().unwrap(),
+            vec![5.25, -6.75, 7.25, 31.25],
+        );
+        close(
+            layer
+                .forward(mean, adj)
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap(),
+            vec![5.25, -6.75, 7.25, 31.25],
+        );
+        close(
+            actual.var.into_data().to_vec::<f32>().unwrap(),
+            vec![12.125, 150.5, 39.125, 85.75],
+        );
     }
 }

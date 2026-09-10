@@ -7,9 +7,8 @@
 //!
 //! Run: `cargo run --release --example correlated_residual --features burn`
 
-use burn::tensor::backend::Backend;
 use burn::tensor::linalg;
-use burn::tensor::{Tensor, TensorData};
+use burn::tensor::{Device, Tensor, TensorData};
 use burn_ndarray::NdArray;
 
 use stableprop::burn_sdp::{
@@ -68,7 +67,7 @@ fn monte_carlo(
 }
 
 fn main() {
-    let dev = <Nd as Backend>::Device::default();
+    let dev = Device::<Nd>::default();
     let x_mean = [0.2, -0.1];
     let x_std = [0.5, 0.4];
     let weight = [[1.0], [-0.75]];

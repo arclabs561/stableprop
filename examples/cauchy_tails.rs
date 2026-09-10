@@ -13,7 +13,7 @@
 use burn::module::Module;
 use burn::nn::{Linear, LinearConfig};
 use burn::tensor::backend::Backend;
-use burn::tensor::{Distribution, Tensor};
+use burn::tensor::{Device, Distribution, Tensor};
 use burn_ndarray::NdArray;
 use std::f64::consts::PI;
 
@@ -47,7 +47,7 @@ impl<B: Backend> Mlp<B> {
 }
 
 fn main() {
-    let dev = <Nd as Backend>::Device::default();
+    let dev = Device::<Nd>::default();
     <Nd as Backend>::seed(&dev, 0xCA0C_0001);
     let model = Mlp::<Nd>::init(&dev);
     let w1 = model.lin1.weight.val();
