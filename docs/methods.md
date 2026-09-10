@@ -1,0 +1,249 @@
+# Methods, history, and applications
+
+Primary papers checked through September 10, 2026. This guide covers methods
+relevant to stableprop. Recent results are preprints unless a publication venue
+is named; they describe their own implementations and experiments, not this crate.
+
+## What is being approximated?
+
+Given uncertain input `X`, the target is the distribution of `f(X)`. Three
+choices determine what a propagation method returns:
+
+- Representation: independent marginals, full covariance, a structured
+  covariance, or a distribution with no finite moments such as Cauchy.
+- Nonlinear approximation: match moments, linearize around an input, or
+  sample the transformed distribution.
+- Uncertainty source: noisy inputs, uncertain weights, observation noise,
+  or a combination. The propagation rule does not determine how these were fit.
+
+These choices are separate. Keeping covariance does not make a network's
+output Gaussian, and attaching a variance to a deterministic model does not
+learn a Bayesian posterior.
+
+For an affine layer, using column-vector notation:
+
+$$
+\mu_y = W\mu_x + b, \qquad \Sigma_y = W\Sigma_x W^\top.
+$$
+
+For a scalar Gaussian input to ReLU, with $a=\mu/\sigma$ and standard normal
+CDF $\Phi$ and density $\phi$:
+
+$$
+\mathbb{E}[\max(0,X)] = \mu\Phi(a) + \sigma\phi(a).
+$$
+
+The nonlinear mean shift distinguishes moment matching from evaluating
+`ReLU(mean)`. The implementations use equivalent variance formulas chosen to
+avoid floating-point cancellation, with numerical approximations in the tails.
+
+## How the methods developed
+
+| Work | Change in method | Relationship to stableprop |
+| --- | --- | --- |
+| [Frey & Hinton, 1999, *Variational Learning in Nonlinear Gaussian Belief Networks*](https://www.cs.toronto.edu/~hinton/absps/nlgbn.pdf), especially the rectified-unit moments | Analytic expectations of nonlinear Gaussian units support variational inference in belief networks. | Source for Gaussian ReLU marginal moments; stableprop is not the original belief-network learner. |
+| [Minka, UAI 2001, *Expectation Propagation*](https://tminka.github.io/papers/ep/minka-ep-uai.pdf), §§2–3 | Assumed-density filtering repeatedly projects a distribution into a tractable family. EP generalizes it by revisiting approximate factors. | Explains Gaussian closure and why discarded information matters later. Forward propagation here does not implement EP's iterative posterior updates. |
+| [Hernández-Lobato & Adams, ICML 2015, *Probabilistic Backpropagation*](https://proceedings.mlr.press/v37/hernandez-lobatoc15.html), §3 | Gaussian moment propagation is combined with approximate Bayesian updates to learn weight distributions. | `propagate_linear_bayes` implements an independent-weight moment rule, not the PBP learning algorithm. |
+| [Gast & Roth, CVPR 2018, *Lightweight Probabilistic Deep Networks*](https://openaccess.thecvf.com/content_cvpr_2018/papers/Gast_Lightweight_Probabilistic_Deep_CVPR_2018_paper.pdf), §§3–4 | Carries activation means and variances through CNNs and introduces probabilistic output layers. | Practical precedent for the diagonal tensor path. Output likelihoods and training objectives are separate parts of that system. |
+| [Wu et al., ICLR 2019, *Deterministic Variational Inference*](https://arxiv.org/abs/1810.03958), §3 and Appendix A | Propagates activation covariance with uncertain weights, approximates nonlinear cross-moments, and optimizes a variational objective. | A broader Bayesian framework. The crate's supplied-weight-variance API covers only one propagation operation. |
+| [Petersen et al., ICLR 2024, *Stable Distribution Propagation*](https://arxiv.org/abs/2402.08324), §§3.1–3.3 | Uses local linearization and stable distributions; computes Gaussian output covariance from the network Jacobian. Extends the framing to Cauchy and discusses other symmetric stable laws. | The project's inspiration. Gaussian moment matching here is a different approximation; Cauchy ReLU uses a local gate. |
+| [Wright, Nakahira & Moura, AISTATS 2024, *An Analytic Solution to Covariance Propagation in Neural Networks*](https://proceedings.mlr.press/v238/wright24a.html), Theorem 1 and §3 | Gives an infinite covariance series in derivatives of activation expectations under Gaussian inputs. | `propagate_relu_full` retains its first three off-diagonal terms and uses univariate variances on the diagonal. |
+
+The broad trajectory is from tractable marginal expectations to richer
+dependence models and application-specific inference. Local linearization is a
+parallel approach, not a later version of moment matching.
+
+## Generalizations and distinctions
+
+Full Gaussian covariance generalizes diagonal covariance as a representation.
+A diagonal matrix is a special full covariance matrix. The first affine layer
+has the same marginal variances in both paths when given independent inputs.
+Subsequent affine layers can mix correlated features, so the paths then differ.
+`MomentsFull` costs quadratic memory in feature width; the diagonal path is
+cheaper for repeated sensitivity evaluations. Even a scalar final output can
+depend on correlations between hidden features.
+
+The third-order series extends the earlier smooth gate. Its first term is
+`Cov(X_i, X_j) * Phi(a_i) * Phi(a_j)`, where `a = mean / std`. The second and
+third terms add nonlinear covariance contributions. Higher order includes more
+of the series, but need not improve every individual covariance entry at each
+order; it does not eliminate the Gaussian approximation
+between layers. The infinite series is exact under its assumptions, while
+stableprop uses a finite truncation.
+
+$$
+\mathrm{Cov}(g(X_i),g(X_j)) \approx
+\sum_{k=1}^{3}\frac{\Sigma_{ij}^{k}}{k!}
+\frac{\partial^{k}\mathbb{E}[g(X_i)]}{\partial\mu_i^{k}}
+\frac{\partial^{k}\mathbb{E}[g(X_j)]}{\partial\mu_j^{k}}.
+$$
+
+SDP and moment matching optimize different approximations. The
+[distprop implementation](https://github.com/Felix-Petersen/distprop/blob/e727da2057ef45f18df31cc8b58597505a0b8b03/distprop/sdp.py)
+returns `f(mean)` and `J * J^T * std^2` for isotropic input noise. Petersen's
+ReLU argument minimizes a univariate total-variation distance. Moment matching
+instead preserves Gaussian-input expectations. At a zero-mean ReLU input,
+the true rectified mean is positive, while local linearization returns zero.
+Neither method contains the other or wins under every error metric.
+
+Cauchy and Gaussian are members of a broader stable-distribution family.
+Cauchy is not a Gaussian with a larger variance: its mean and variance are
+undefined. An affine sum of independent Cauchy variables has scale
+`sum(abs(weight) * scale)`. The crate retains only these marginal scales;
+mixing layers creates dependence that this representation discards. Petersen's
+network-Jacobian formulation can retain the original noise dependence through
+composition. The crate does not implement that full Jacobian calculation.
+
+Uncertain-weight propagation generalizes deterministic weights. Setting
+weight and bias variances to zero recovers the diagonal deterministic affine
+rule. PBP and DVI additionally learn distributions over weights. Likewise,
+`propagate_residual_add_correlated` generalizes the independent-add helper when
+the caller supplies the cross-covariance; it does not derive that covariance
+for an arbitrary residual block.
+
+## Efficiency and accuracy
+
+| Approach | Computational advantage | Main accuracy limit |
+| --- | --- | --- |
+| Local linearization | Uses derivatives of the deterministic network; useful when perturbations stay within a nearly affine region | Can miss activation-boundary crossings and nonlinear mean shifts |
+| Diagonal moment matching | Carries one mean and variance per feature; no feature-pair covariance state | Discards correlations that later layers can amplify or cancel |
+| Full moment matching | Retains correlations needed by later affine maps | Quadratic covariance storage; nonlinear moments still assume Gaussian layer inputs |
+| Monte Carlo | Evaluates the actual model under the chosen noise distribution | Repeated forward passes and sampling error; rare events need many samples |
+
+For a dense square layer of width `d`, diagonal affine propagation costs
+`O(d^2)` work and `O(d)` moment storage; full covariance costs `O(d^3)` work
+and `O(d^2)` storage, per input. ReLU's fixed third-order pairwise series costs
+`O(d^2)`. These are operation counts, not measured speedups: device kernels,
+batch size, covariance structure, and graph aggregation affect runtime.
+
+Dropping covariance can either raise or lower the final variance, depending on
+weights and correlation signs. More covariance terms do not ensure better
+network-level accuracy: Gaussian closure and series truncation are separate
+errors. Exact bivariate Gaussian ReLU formulas can remove the latter while
+retaining the former, at the cost of additional numerical primitives.
+
+Independent Monte Carlo mean estimates have standard error proportional to
+`1 / sqrt(samples)` when variance is finite. Cauchy means do not satisfy that
+condition; compare quantiles or coverage instead. For Gaussian paths, compare
+means and per-output errors as well as average ratios: positive and negative
+errors can cancel. Test calibration against the quantity the application
+actually observes, not only agreement with the model's own noisy outputs.
+
+## Developments after 2024
+
+- [Akgül et al., *Deterministic Uncertainty Propagation for Improved Model-Based
+  Offline Reinforcement Learning*](https://arxiv.org/abs/2406.04088), revised
+  January 2025, §4: MOMBO uses marginal Gaussian moments for uncertainty in
+  value targets. Their application favors diagonal propagation's cost over
+  full covariance. It also needs a learned transition model, an ensemble, and
+  a pessimistic policy-learning objective; stableprop supplies none of that
+  surrounding RL system.
+- [Diamzon & Venturi, *Uncertainty propagation in feed-forward neural network
+  models*](https://doi.org/10.1016/j.neunet.2025.108178), *Neural Networks* 194
+  (February 2026; online October 2025), §§4–8 and Appendix B of the
+  [author preprint](https://arxiv.org/abs/2503.21059): develops local Leaky-ReLU linearization, output-density
+  approximations, and Gaussian-copula surrogates, with activation-pattern error
+  analysis. It is an alternative when densities or dependence beyond marginal
+  error bars matter; errors still depend on the network and perturbations.
+- [Kuang & Lin, *Exact Gaussian Moment Matching for Residual Networks: a
+  Second-Order Method*](https://arxiv.org/abs/2601.22307), revised May 2026,
+  §§2, 4–6: derives Gaussian layer moments for several activations and joint
+  residual terms without truncating Wright's series. This is a direct
+  accuracy reference for the full-covariance path. Exactness is per Gaussian
+  layer; the higher-order error theorem requires smoothness assumptions and
+  is not a blanket ReLU-network guarantee. Softmax and attention are excluded.
+- [Wieczorek et al., *Calibrated Sampling-Free Uncertainty Estimation in
+  Bayesian Deep Learning*](https://arxiv.org/abs/2606.16214), June 2026,
+  §§4–6: CVP combines diagonal Bayesian variance propagation, an
+  expectation-based normalization approximation, and per-layer variance
+  scales fit on held-out data. The CNN and transformer results rely on trained
+  IVON weight posteriors. This is a broader calibrated inference system,
+  not evidence that adding an activation function gives stableprop transformer
+  support. Evaluation covers encoder-style classification and VQA heads.
+- [Nie et al., *Two-Step MV-DeepONet*](https://arxiv.org/abs/2608.09071),
+  August 2026, §2.4 and Appendix B: learns a basis in which coefficient
+  uncertainty is diagonal, then reconstructs correlated output fields.
+  It illustrates a middle ground between independent output coordinates and
+  dense output covariance. The method changes the surrogate's representation
+  and training; it is not a layerwise replacement for this crate.
+
+These are related developments; the latest full-text application discussed
+here is from August.
+
+## What is useful in practice?
+
+### Uncertainty sources and downstream methods
+
+Propagation starts after a distribution has been specified. A learned Gaussian
+embedding supplies representation moments; a Bayesian model supplies a
+parameter posterior; a sensor model supplies measurement noise. Similar
+Gaussian arithmetic does not make these uncertainty sources interchangeable.
+
+A neural-linear bandit models reward with learned features `phi` and uncertain
+linear weights `beta`. For a supplied posterior `beta ~ N(m, S)`, its latent
+score has mean `phi^T m` and variance `phi^T S phi`. Affine moment propagation
+can evaluate those quantities, but fitting and updating `m, S` requires reward
+observations and a statistical model. Independent weight variances in
+`propagate_linear_bayes` do not represent a dense posterior `S`.
+The full-covariance affine API can instead map the supplied coefficient
+posterior to joint candidate scores. The [selection note](sensitivity-and-selection.md#from-ranking-uncertainty-to-exploration)
+shows how their covariance enters Bayesian updates and exploration value.
+[Riquelme et al. (2018)](https://arxiv.org/abs/1802.09127) study neural-linear
+posterior methods; [Su et al. (WSDM 2024)](https://arxiv.org/abs/2305.07764)
+apply one to exploration after candidate generation. Their batch updates refer
+to posterior statistics during training, not contrastive minibatch weighting.
+
+Contrastive learning defines relationships between embeddings. The
+`tuplet_contrastive` example adds a penalty on variance propagated from chosen
+input noise. This changes the loss; it does not learn a reward posterior,
+select exploratory recommendations, or reweight training pairs. Using
+uncertainty for pair selection would need its own rationale and evaluation:
+high sensitivity can indicate useful signal or unreliable measurements.
+The [sensitivity and selection note](sensitivity-and-selection.md) develops
+that distinction, its active-learning evidence, and possible extensions.
+
+Calibration asks another question: do the reported intervals cover the target
+at the intended rate? Propagation alone does not answer it. The conformal
+example uses held-out labels to calibrate a propagated scale.
+
+### Application choices
+
+| Application | What stableprop provides now | What to measure or add |
+| --- | --- | --- |
+| Sensor-noise propagation through a regressor | Gaussian moment estimates with diagonal or full covariance | Compare output means, variance error, coverage, and runtime against Monte Carlo. Coverage of noisy model outputs is different from coverage of observed labels. |
+| Calibrated regression intervals | A per-input scale for the `conformal_intervals` example | Held-out calibration and test splits; interval width and coverage. [Split conformal](https://arxiv.org/abs/2107.07511) assumes exchangeability and targets marginal coverage. |
+| Embedding stability | Differentiable variance penalty alongside [tuplet](https://github.com/arclabs561/tuplet)'s contrastive loss | Shared initialization, held-out examples, shared perturbations, and downstream accuracy with and without noise. A penalty can also erase useful signal. |
+| Learned dynamics and state estimation | Affine/activation covariance primitives | A filtering or control system also needs process noise and input-output cross-covariance. [Kuang & Lin's filtering and smoothing study](https://arxiv.org/abs/2511.09016), revised May 2026, constructs those joint distributions and evaluates Lorenz/Wiener systems and feedback control. It argues for scoring the uncertainty as well as RMSE. |
+| GCN or classifier uncertainty | Input-noise propagation and experimental risk/ranking examples | Node correlations, calibration, and suitable softmax/MC baselines. A synthetic graph or one Cora split does not establish general OOD performance. |
+
+For a first use, compare the existing regression and conformal examples. For a
+new application, learned-surrogate state estimation is a closer fit than
+general-purpose classification confidence: there is an explicit uncertain
+input and a downstream consumer of covariance. That is an application
+recommendation, not a capability claim for an implemented Kalman filter.
+
+Choose richer covariance only when the downstream decision benefits from it.
+The exact Gaussian formulas are worth testing against the current series for
+modest feature widths. Diagonal propagation remains useful for inexpensive
+sensitivity estimates; learned low-rank structure may be preferable for large
+output fields. Reverse that choice if measured decision quality or covariance
+error justifies the added computation.
+
+## Why this repository took its current form
+
+The commit history records the following changes. Commit titles sometimes
+overstate empirical results; the linked diffs establish what changed, not a
+general performance guarantee.
+
+| Change | Recorded evidence | What it explains |
+| --- | --- | --- |
+| `distprop` → `momentprop` | [fde24b7](https://github.com/arclabs561/stableprop/commit/fde24b7) | Rename followed an initial implementation already using Gaussian moment matching. The diff records no fuller naming rationale. |
+| Diagonal → full covariance | [0bb28d8](https://github.com/arclabs561/stableprop/commit/0bb28d8) | Added affine covariance and a first-order smooth ReLU gate, plus comparison with Monte Carlo. |
+| `momentprop` → `stableprop` | [f4067d2](https://github.com/arclabs561/stableprop/commit/f4067d2) | The commit explicitly names coverage of both Gaussian moments and Cauchy stable distributions as the reason. |
+| First-order gate → third-order covariance series | [4a5f650](https://github.com/arclabs561/stableprop/commit/4a5f650) | Added Wright-series terms and an off-diagonal Monte Carlo check. The history does not record an order sweep proving that three is optimal. |
+| Contrastive training composition | [77751c9](https://github.com/arclabs561/stableprop/commit/77751c9) | Added the tuplet example to combine a contrastive loss with differentiable embedding variance. |
+| Independent → caller-supplied residual covariance | [b5a1864](https://github.com/arclabs561/stableprop/commit/b5a1864) | Corrected the assumption that skip and branch can always be treated independently. |
+
+The vector API keeps the formulas inspectable; the Burn functions make them
+composable and differentiable. This history was reconstructed from commits
+and source.

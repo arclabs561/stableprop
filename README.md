@@ -2,89 +2,134 @@
 
 Propagate uncertainty through neural networks analytically.
 
-Given a Gaussian (or Cauchy) over a network's inputs, `stableprop` pushes its
-moments through linear, ReLU, leaky-ReLU, and GCN-adjacency layers and returns
-the output mean and (co)variance. It targets regression and surrogate models
-with known input uncertainty, where sampling is otherwise a common baseline.
+Start with known input noise and estimate how it changes a network's outputs.
+Gaussian paths carry means and variances or full covariance; the Cauchy path
+carries locations and scales. Compose the layer functions with your model.
 
-## What it's good for (and not)
+Inspired by [distprop](https://github.com/Felix-Petersen/distprop) and
+[Petersen et al. (ICLR 2024)](https://arxiv.org/abs/2402.08324). The Gaussian
+implementation here uses moment matching; distprop uses local linearization.
+The [method guide](docs/methods.md) explains that distinction, the research
+history, and which applications each approach supports.
 
-The synthetic MLP example compares analytic error bars with a 200-sample Monte
-Carlo estimate using one propagated forward pass instead of 200 sampled passes.
-Training initialization and Monte Carlo draws vary between runs; this is a
-demonstration, not an accuracy or calibration result.
+## What uncertainty means here
 
-It is **not** a classification uncertainty / OOD detector: for that, the model's
-own softmax confidence is a strong free baseline that this does not beat. The
-honest niche is propagating *known input uncertainty* through regressors.
+You supply an input or embedding distribution, or independent weight variances
+from another model. stableprop estimates the resulting output moments or scales.
+It does not infer those distributions from data.
 
-## Usage
+| Related method | Its job | Where stableprop fits |
+| --- | --- | --- |
+| Gaussian embeddings | Learn a distribution for each representation | Propagate supplied embedding moments through supported layers |
+| Bayesian models and neural-linear bandits | Learn parameter uncertainty from observations | Map a supplied coefficient posterior to joint scores as output features of a full-covariance affine layer; fit and update the posterior externally |
+| Contrastive learning | Train representations using pair relationships | Add a differentiable sensitivity penalty, as in the tuplet example |
+| Conformal prediction | Calibrate prediction sets using held-out observations | Supply an input-dependent scale for calibration |
+
+Sensitivity to input noise is different from uncertainty due to missing reward
+observations. A stable score can still be poorly learned; a well-learned model
+can still be sensitive to noisy measurements. See the
+[method guide](docs/methods.md#uncertainty-sources-and-downstream-methods) for the distinction.
+The [selection note](docs/sensitivity-and-selection.md) connects score covariance
+to exploration value and augmentation disagreement to training-data selection.
+
+## Start with a small network
+
+The default API uses `f64` vectors, has no runtime dependencies, and supports
+Rust 1.80. The optional Burn backend requires Rust 1.89 or newer.
 
 ```toml
 [dependencies]
-stableprop = { version = "0.3", features = ["burn"] }
+stableprop = "0.3.1"
 ```
 
 ```rust
-use stableprop::burn_sdp::{propagate_linear, propagate_relu, Moments};
+use stableprop::{propagate_sequential, Layer};
 
-// mean [n, d_in], input variance [n, d_in]
-let m0 = Moments::new(mean, var);
-let m1 = propagate_relu(&propagate_linear(&m0, w1, b1));
-let m2 = propagate_linear(&m1, w2, b2);
-// m2.mean, m2.var are the analytic output moments
+let layers = [
+    Layer::Linear {
+        weight: vec![vec![1.0, -1.0]], // [output, input]
+        bias: vec![0.0],
+    },
+    Layer::ReLU,
+];
+let output = propagate_sequential(&layers, &[0.0, 0.0], &[0.3, 0.4]);
+println!("mean = {:.4}, variance = {:.4}", output.mean[0], output.cov[0][0]);
 ```
 
-See `examples/`:
+```text
+mean = 0.1995, variance = 0.0852
+```
 
-Full gallery with commands and captured output: [`examples/README.md`](examples/README.md).
+Run this example from the checkout:
 
-- `regression_intervals`: sampling-free error bars vs Monte Carlo.
-- `conformal_intervals`: use the analytic standard deviation as a split-conformal
-  scale. Under exchangeability, this targets finite-sample marginal coverage;
-  realized coverage on a particular test split can differ.
-- `robust_training`: train *with* the differentiable propagated variance to
-  reduce error under input noise (shared-init A/B vs plain MSE).
-- `misclassification_risk`: full-covariance propagation of input noise into an
-  analytic estimate of a classifier's error rate, compared with Monte Carlo in
-  the example (not a guaranteed certificate).
-- `cora_uncertainty`: honest evidence on classification, where the method is
-  weaker than the softmax baseline in the recorded run.
+```sh
+cargo run --release --example basic
+```
 
-## What it propagates
+The input standard deviations describe independent features. Affine layers
+retain covariance; this API drops off-diagonal covariance at each ReLU.
 
-- Diagonal Gaussian moments (`Moments`): exact linear, Frey-Hinton ReLU,
-  leaky-ReLU, 2-D convolution, GCN-adjacency, residual-add.
-- Full covariance (`MomentsFull`): keeps cross-feature correlations through
-  affine and ReLU layers. The ReLU uses exact univariate moments on the diagonal
-  and a third-order truncated Wright-series calculation for off-diagonal
-  covariance; tests compare both parts with Monte Carlo on correlated Gaussian
-  inputs.
-- Weight uncertainty (`propagate_linear_bayes`): epistemic propagation in the
-  style of Probabilistic Backpropagation / Deterministic Variational Inference.
-- Cauchy (`Cauchy`): propagates location and scale for a heavy-tailed stable
-  distribution, which has no finite moments.
+## Burn models
 
-Tests use closed-form identities, invariants, property checks, and Monte Carlo
-oracles for the main Gaussian affine and activation paths. The examples provide
-additional empirical comparisons for full networks.
+Enable `features = ["burn"]` for batched tensors and differentiable propagation.
+Choose a compatible Burn 0.20 backend in your application. Burn weights use
+`[input, output]`, the transpose of the vector API's layout.
 
-## Background
+| Representation | What it tracks | Main approximation |
+| --- | --- | --- |
+| `burn_sdp::Moments` | Mean and variance, `[batch, features]` | Drops feature and row correlations |
+| `burn_sdp::MomentsFull` | Mean and covariance, `[batch, features, features]` | Gaussian layer inputs; third-order ReLU covariance series |
+| `burn_sdp::Cauchy` | Location and scale, `[batch, features]` | Independent marginals; local ReLU gate |
 
-The method is moment / stable-distribution propagation; see Frey & Hinton (1999)
-for the rectified-Gaussian ReLU moments, Hernandez-Lobato & Adams (2015) and
-Wu et al. (2019) for weight-uncertainty propagation, and Petersen et al.
-(ICLR 2024, "Uncertainty Quantification via Stable Distribution Propagation")
-for the Gaussian/Cauchy stable-distribution framing.
+The tensor API also includes leaky ReLU, diagonal convolution, fixed left
+matrix multiplication, residual addition, and affine propagation with supplied
+weight variances. See the [API documentation](https://docs.rs/stableprop/latest/stableprop/burn_sdp/).
 
-## Roadmap
+## Try an application
 
-Attention layers are not yet implemented (moments through softmax and uncertain
-query-key products are a research problem, not a clean addition). The default
-residual-add assumes independent branches; `propagate_residual_add_correlated`
-accepts diagonal skip-branch covariance when it is available. The
-misclassification-risk estimate is an estimate, not a sound certificate; rigorous
-certified bounds would need interval / Lipschitz methods.
+| I want to… | Start here |
+| --- | --- |
+| Separate input noise from supplied weight uncertainty | [uncertainty_sources](examples/uncertainty_sources.rs) |
+| Estimate whether noisy query features change a ranking | [pairwise_ranking_risk](examples/pairwise_ranking_risk.rs) |
+| Compare output uncertainty with sampled noisy inputs | [regression_intervals](examples/regression_intervals.rs) |
+| Calibrate prediction intervals against held-out labels | [conformal_intervals](examples/conformal_intervals.rs) |
+| Train with an output-variance penalty | [robust_training](examples/robust_training.rs) |
+| Measure the effect of retaining covariance | [full_covariance](examples/full_covariance.rs) |
+| Regularize contrastive embeddings | [tuplet_contrastive](examples/tuplet_contrastive.rs), using [tuplet](https://github.com/arclabs561/tuplet)'s Burn loss |
+| Propagate node-feature noise through a GCN | [gcn_uncertainty](examples/gcn_uncertainty.rs), using [ricci](https://github.com/arclabs561/ricci) |
+
+The [example guide](examples/README.md) has commands, output interpretation,
+and the remaining classification and heavy-tail comparisons.
+
+## Limits
+
+Affine moments are exact for the represented covariance. ReLU uses closed-form
+Gaussian marginal moments with numerical tail handling, but the output
+distribution is not Gaussian. Repeating moment matching through a network is an approximation.
+Full covariance reduces information loss at quadratic memory cost; its ReLU
+off-diagonal terms are truncated to third order.
+
+Propagated input noise does not account for label noise, model bias, or an
+unknown weight posterior. Supplying weight variances does not fit that
+posterior. Neither a variance penalty nor a misclassification-risk estimate is
+an adversarial robustness certificate. Validate interval coverage separately;
+split conformal gives marginal coverage under exchangeability, not a guarantee
+for every input or a shifted deployment distribution.
+
+Cauchy distributions have no finite mean or variance. Layerwise Cauchy scales
+discard dependence, and ReLU gating can collapse a marginal to zero. A Cauchy
+output interval is an approximation after nonlinear propagation.
+
+## Checks
+
+Use current stable Rust for repository development. The Rust 1.80 floor applies
+to the default library; tests and examples also resolve the Burn dependencies.
+
+```sh
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+```
 
 ## License
 

@@ -7,8 +7,10 @@
 //! shows why independent score variances are insufficient for this question.
 //!
 //! The ReLU Gaussian closure is approximate, so the nonlinear estimate is
-//! evaluated against shared-noise Monte Carlo. This is feature sensitivity,
-//! not an epistemic posterior, reward model, or bandit exploration policy.
+//! evaluated against shared-noise Monte Carlo. Here the score distribution
+//! comes from feature noise. A fitted reward posterior can supply joint scores
+//! too; valuing exploration additionally requires an observation model and
+//! posterior updates. See docs/sensitivity-and-selection.md for that connection.
 //!
 //! Run: `cargo run --release --example pairwise_ranking_risk --features burn`
 

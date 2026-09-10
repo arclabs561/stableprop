@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Preserve tiny positive Gaussian variances and avoid cancellation in ReLU
+  variance at large positive means, including the Burn and full-covariance paths.
+- Keep full-covariance gradients finite at tiny noise scales and apply ReLU
+  tail limits consistently to marginal and cross-covariance terms.
+- Reject malformed vector inputs and mismatched tensor moment shapes.
+- Seed example training and sampling; evaluate contrastive embeddings on held-out
+  points with shared noise. Accept a Cora data path without a sibling checkout.
+
+### Changed
+
+- Explain moment matching versus distprop's local linearization, covariance
+  approximations, research history, and application limits in the documentation.
+- Refresh example interpretation and add `basic`, `uncertainty_sources`, and
+  `pairwise_ranking_risk` examples.
+- Check library compiler floors, tensor documentation, and example builds in CI.
+
 ## [0.3.1] - 2026-06-27
 
 ### Changed
@@ -35,10 +55,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `propagate_residual_add`: residual skip + branch combination (independence
   approximation; skip-branch covariance is not represented by this API).
 - `robust_training` example: training with the differentiable propagated variance
-  as a loss term, reducing error under input noise.
+  as a loss term, with a shared-initialization comparison under input noise.
 - `misclassification_risk` example: full-covariance propagation of input noise
-  into an analytic estimate of a classifier's error rate (an estimate that tracks
-  Monte Carlo, not a guaranteed certificate).
+  into an analytic estimate of a classifier's error rate, compared with
+  Monte Carlo (not a guaranteed certificate).
 
 ## [0.1.0] - 2026-06-27
 
