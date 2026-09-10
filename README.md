@@ -80,7 +80,7 @@ transpose of the vector API's layout.
 | --- | --- | --- |
 | `burn_sdp::Moments` | Mean and variance, `[batch, features]` | Drops feature and row correlations |
 | `burn_sdp::MomentsFull` | Mean and covariance, `[batch, features, features]` | Gaussian layer inputs; third-order ReLU covariance series |
-| `burn_sdp::Cauchy` | Location and scale, `[batch, features]` | Independent marginals; local ReLU gate |
+| `burn_sdp::Cauchy` | Location and scale, `[batch, features]` | Drops dependence; local ReLU gate |
 
 The tensor API also includes leaky ReLU, diagonal convolution, fixed left
 matrix multiplication, residual addition, and affine propagation with supplied

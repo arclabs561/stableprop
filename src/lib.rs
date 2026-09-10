@@ -133,6 +133,9 @@ fn transpose(a: &[Vec<f64>]) -> Vec<Vec<f64>> {
 /// cov'  = W * cov * W^T
 /// ```
 ///
+/// Finite inputs can still produce an infinite or `NaN` output when the exact
+/// affine arithmetic exceeds the representable `f64` range.
+///
 /// # Panics
 /// Panics on empty inputs, inconsistent dimensions, or non-finite values.
 /// The covariance requirements on [`Moments`] also apply.
@@ -259,7 +262,8 @@ pub fn propagate_relu(moments: &Moments) -> Moments {
 ///
 /// # Panics
 /// Panics on empty or mismatched input vectors, non-finite inputs, negative
-/// standard deviations, or invalid layer dimensions or values.
+/// standard deviations, standard deviations whose nonzero squared variance is
+/// not representable as `f64`, or invalid layer dimensions or values.
 pub fn propagate_sequential(layers: &[Layer], input_mean: &[f64], input_std: &[f64]) -> Moments {
     assert!(!input_mean.is_empty(), "input mean must be non-empty");
     assert_eq!(
@@ -272,10 +276,11 @@ pub fn propagate_sequential(layers: &[Layer], input_mean: &[f64], input_std: &[f
         "input mean must be finite"
     );
     assert!(
-        input_std
-            .iter()
-            .all(|x| x.is_finite() && *x >= 0.0 && (x * x).is_finite()),
-        "input std must be finite and non-negative, with a finite squared variance"
+        input_std.iter().all(|x| {
+            let variance = x * x;
+            x.is_finite() && *x >= 0.0 && variance.is_finite() && (*x == 0.0 || variance != 0.0)
+        }),
+        "input std must be finite and non-negative, with a representable squared variance"
     );
     let n = input_mean.len();
     let mut moments = Moments {
@@ -304,9 +309,15 @@ mod tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "finite squared variance")]
+    #[should_panic(expected = "representable squared variance")]
     fn sequential_rejects_variance_overflow_even_without_layers() {
         let _ = propagate_sequential(&[], &[0.0], &[f64::MAX]);
+    }
+
+    #[test]
+    #[should_panic(expected = "representable squared variance")]
+    fn sequential_rejects_variance_underflow_even_when_relu_mean_is_representable() {
+        let _ = propagate_sequential(&[Layer::ReLU], &[0.0], &[1.0e-200]);
     }
 
     fn approx_eq(a: f64, b: f64, tol: f64) {

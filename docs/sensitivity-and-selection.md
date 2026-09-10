@@ -69,16 +69,18 @@ centered score for both analytic propagation and sampled perturbations.
 
 ## When posterior variance ranks Gaussian information gain
 
-For a scalar Gaussian observation with independent noise variance `v_noise`
-and posterior variance `v_model` in its latent mean, expected information about
-the parameters from one observation is:
+For a Gaussian latent mean with posterior variance `v_model`, observed with
+independent Gaussian noise of variance `v_noise > 0`, the expected information
+about that latent mean from one observation is:
 
 $$
 I = \tfrac{1}{2}\log\left(1+\frac{v_{\mathrm{model}}}{v_{\mathrm{noise}}}\right).
 $$
 
 This is the Gaussian information-gain calculation used in Bayesian experimental
-design.[^mackay] With the same observation noise across candidates, ranking
+design.[^mackay] It also equals information about the model parameters when
+they affect the observation only through that latent mean.
+With the same observation noise across candidates, ranking
 `v_model` also ranks this information gain. Ranking total predictive variance
 can fail when noise differs:
 
@@ -137,7 +139,7 @@ $$
 C^+ = C-\frac{C_{:a}C_{a:}}{C_{aa}+\lambda_a}.
 $$
 
-Here `C_:a` is a column and `C_a:` its corresponding row. Observing one
+Here $C_{:a}$ is column $a$ and $C_{a:}$ is row $a$. Observing one
 candidate updates every candidate correlated with it. These are the same
 conditioning equations used in Gaussian-process regression and Kalman
 measurement updates; the decision objective determines how they are used.
@@ -191,8 +193,6 @@ weighting. UACL uses uncertainty about pairwise clustering relationships,
 while hard-negative methods weight similarity and account for false
 negatives.[^uacl][^hardneg] This supports testing uncertainty-aware weighting;
 it does not establish that input sensitivity estimates pair reliability.
-The UACL publisher preview supports this broad mechanism; its full algorithm
-and ablations were not available for verification.
 
 The [tuplet example](../examples/tuplet_contrastive.rs) uses a different,
 explicit objective: contrastive loss plus a propagated embedding-variance

@@ -120,10 +120,14 @@ fn load_planetoid(dir: &Path, name: &str) -> std::io::Result<Graph> {
             (Some(a), Some(b), None) => (a, b),
             _ => return Err(invalid(format!("malformed Cora citation row: {line}"))),
         };
-        if let (Some(&i), Some(&j)) = (id_to_idx.get(a), id_to_idx.get(b)) {
-            adj[i * n + j] = 1.0;
-            adj[j * n + i] = 1.0;
-        }
+        let i = id_to_idx
+            .get(a)
+            .ok_or_else(|| invalid(format!("unknown Cora citation node id: {a}")))?;
+        let j = id_to_idx
+            .get(b)
+            .ok_or_else(|| invalid(format!("unknown Cora citation node id: {b}")))?;
+        adj[i * n + j] = 1.0;
+        adj[j * n + i] = 1.0;
     }
     let mut deg = vec![0.0f32; n];
     for i in 0..n {
@@ -152,9 +156,8 @@ fn load_planetoid(dir: &Path, name: &str) -> std::io::Result<Graph> {
     })
 }
 
-/// A GCN layer is `adj @ (x W + b)`; built from `burn::nn::Linear` so the model
-/// is trainable without depending on a specific ricci version (the spike in
-/// `gcn_uncertainty.rs` exercises ricci's `GCNConv` directly).
+/// A GCN layer is `adj @ (x W + b)`. This example trains Burn linear layers;
+/// `gcn_uncertainty.rs` exercises ricci's `GCNConv`.
 #[derive(Module, Debug)]
 struct Gcn<B: Backend> {
     lin1: Linear<B>,
@@ -181,18 +184,52 @@ impl<B: Backend> Gcn<B> {
         propagate_matmul_left(adj, &propagate_linear(m, w, b))
     }
 
-    /// Per-node total predictive variance from input-feature noise (one pass).
-    fn sdp_node_variance(&self, x: Tensor<B, 2>, adj: Tensor<B, 2>, input_std: f64) -> Vec<f64> {
+    /// Per-node centered-logit disagreement from input-feature noise (one pass).
+    ///
+    /// The final weight is right-multiplied by `P = I - 11^T / C`, so summing
+    /// the propagated output variances is exactly `trace(P Cov(logits) P)` for
+    /// the represented diagonal hidden moments. This ignores the same feature
+    /// and cross-node covariance as the ordinary diagonal path, but does not
+    /// count a random offset shared by every class as classification uncertainty.
+    fn sdp_centered_logit_variance(
+        &self,
+        x: Tensor<B, 2>,
+        adj: Tensor<B, 2>,
+        input_std: f64,
+    ) -> Vec<f64> {
         let [n, d] = x.dims();
         let var0 = Tensor::<B, 2>::full([n, d], input_std * input_std, &x.device());
         let m0 = Moments::new(x, var0);
         let m1 = propagate_relu(&Self::sdp_gcn(&m0, &self.lin1, adj.clone()));
-        let m2 = Self::sdp_gcn(&m1, &self.lin2, adj);
-        let [_, c] = m2.var.dims();
-        let v = m2.var.to_data().to_vec::<f32>().unwrap();
-        (0..n)
-            .map(|i| (0..c).map(|j| v[i * c + j] as f64).sum())
-            .collect()
+        let row_trace = centered_linear_variance(&m1, self.lin2.weight.val(), None);
+        let node_trace = (adj.clone() * adj).matmul(row_trace);
+        let v = node_trace.to_data().to_vec::<f32>().unwrap();
+        (0..n).map(|i| v[i] as f64).collect()
+    }
+}
+
+/// Centered-logit variance after an affine head, one scalar trace per row.
+///
+/// With `P = I - 11^T / C`, this returns `trace(P Cov(Y) P)` for diagonal
+/// input moments. `weight_var` represents independent weight elements: its
+/// contribution remains diagonal before projection, so it contributes
+/// `(1 - 1/C) * sum(q)` rather than treating the centered weights as independent.
+fn centered_linear_variance<B: Backend>(
+    m: &Moments<B>,
+    weight_mean: Tensor<B, 2>,
+    weight_var: Option<Tensor<B, 2>>,
+) -> Tensor<B, 2> {
+    let c = weight_mean.dims()[1];
+    let centered_weight_mean = weight_mean.clone() - weight_mean.mean_dim(1);
+    let deterministic_trace = propagate_linear(m, centered_weight_mean, None)
+        .var
+        .sum_dim(1);
+    match weight_var {
+        None => deterministic_trace,
+        Some(weight_var) => {
+            let weight_noise = (m.mean.clone() * m.mean.clone() + m.var.clone()).matmul(weight_var);
+            deterministic_trace + weight_noise.sum_dim(1).mul_scalar(1.0 - 1.0 / c as f64)
+        }
     }
 }
 
@@ -321,9 +358,27 @@ fn spearman(a: &[f64], b: &[f64]) -> f64 {
     cov / (va.sqrt() * vb.sqrt())
 }
 
+/// Apply the class-centering projection `P = I - 11^T / C` to each logit row.
+fn center_logits(logits: &mut [f64], c: usize) {
+    assert!(c > 0, "a logit row needs at least one class");
+    assert_eq!(logits.len() % c, 0, "logits must contain whole class rows");
+    for row in logits.chunks_exact_mut(c) {
+        let mean = row.iter().sum::<f64>() / c as f64;
+        for value in row {
+            *value -= mean;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{remap_known_labels, spearman};
+    use super::{
+        center_logits, centered_linear_variance, load_planetoid, remap_known_labels, spearman,
+        Moments,
+    };
+    use burn::tensor::{backend::Backend, Tensor, TensorData};
+    use burn_ndarray::NdArray;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn spearman_uses_average_ranks_for_ties() {
@@ -335,6 +390,120 @@ mod tests {
     #[test]
     fn known_class_labels_close_the_held_out_gap() {
         assert_eq!(remap_known_labels(&[0, 1, 2, 3], 1, 4), vec![0, 0, 1, 2]);
+    }
+
+    #[test]
+    fn rejects_citation_endpoint_missing_from_content() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("stableprop-cora-{nonce}"));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("cora.content"), "a\t1\tA\nb\t0\tB\n").unwrap();
+        std::fs::write(dir.join("cora.cites"), "a\tmissing\n").unwrap();
+
+        let result = load_planetoid(&dir, "cora");
+        std::fs::remove_dir_all(&dir).unwrap();
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("citation with an unknown endpoint was accepted"),
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error
+            .to_string()
+            .contains("unknown Cora citation node id: missing"));
+    }
+
+    #[test]
+    fn centering_removes_a_per_row_common_logit_shift() {
+        let mut logits = vec![1.0, -2.0, 4.0, 0.5, 3.0, -1.0];
+        let mut shifted = vec![8.0, 5.0, 11.0, -4.5, -2.0, -6.0];
+        center_logits(&mut logits, 3);
+        center_logits(&mut shifted, 3);
+        assert!(logits
+            .iter()
+            .zip(shifted)
+            .all(|(a, b)| (a - b).abs() < 1e-12));
+    }
+
+    #[test]
+    fn centered_final_head_matches_projected_covariance_with_weight_noise() {
+        // For diagonal hidden covariance D and independent output weights,
+        // Cov(Y) = W^T D W + diag(q). Centering W gives the first projected
+        // trace term, while the diagonal q term contributes (1 - 1/C) sum(q).
+        let hidden_var = [2.0, 3.0];
+        let hidden_mean = [1.5, -2.0];
+        let w = [[1.0, 2.0, 5.0], [-1.0, 4.0, 0.0]];
+        let w_var = [[0.5, 0.25, 1.0], [0.75, 0.125, 0.5]];
+        let c = 3.0;
+        let deterministic_trace: f64 = w
+            .iter()
+            .zip(hidden_var)
+            .map(|(row, variance)| {
+                let mean = row.iter().sum::<f64>() / c;
+                variance
+                    * row
+                        .iter()
+                        .map(|weight| (weight - mean).powi(2))
+                        .sum::<f64>()
+            })
+            .sum();
+        let q: [f64; 3] = std::array::from_fn(|class| {
+            hidden_mean
+                .iter()
+                .zip(hidden_var)
+                .zip(w_var.iter())
+                .map(|((&mean, variance), row)| (mean * mean + variance) * row[class])
+                .sum()
+        });
+        let covariance: [[f64; 3]; 3] = std::array::from_fn(|i| {
+            std::array::from_fn(|j| {
+                let deterministic = w
+                    .iter()
+                    .zip(hidden_var)
+                    .map(|(row, variance)| variance * row[i] * row[j])
+                    .sum::<f64>();
+                deterministic + if i == j { q[i] } else { 0.0 }
+            })
+        });
+        let trace_p_cov_p = (0..3).map(|i| covariance[i][i]).sum::<f64>()
+            - covariance.iter().flatten().sum::<f64>() / c;
+        let trace_p_deterministic_cov_p = deterministic_trace;
+
+        type B = NdArray<f32>;
+        let device = <B as Backend>::Device::default();
+        let m = Moments::new(
+            Tensor::<B, 2>::from_data(
+                TensorData::new(hidden_mean.map(|x| x as f32).to_vec(), [1, 2]),
+                &device,
+            ),
+            Tensor::<B, 2>::from_data(
+                TensorData::new(hidden_var.map(|x| x as f32).to_vec(), [1, 2]),
+                &device,
+            ),
+        );
+        let weight_mean = Tensor::<B, 2>::from_data(
+            TensorData::new(w.into_iter().flatten().map(|x| x as f32).collect(), [2, 3]),
+            &device,
+        );
+        let weight_var = Tensor::<B, 2>::from_data(
+            TensorData::new(
+                w_var.into_iter().flatten().map(|x| x as f32).collect(),
+                [2, 3],
+            ),
+            &device,
+        );
+        let no_weight_noise = centered_linear_variance(&m, weight_mean.clone(), None)
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap()[0] as f64;
+        let with_weight_noise = centered_linear_variance(&m, weight_mean, Some(weight_var))
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap()[0] as f64;
+        assert!((no_weight_noise - trace_p_deterministic_cov_p).abs() < 1e-5);
+        assert!((with_weight_noise - trace_p_cov_p).abs() < 1e-5);
     }
 }
 
@@ -368,12 +537,12 @@ fn auroc(score: &[f64], positive: &[bool]) -> f64 {
     (sum_pos - (n_pos * (n_pos + 1)) as f64 / 2.0) / (n_pos as f64 * n_neg as f64)
 }
 
-/// Diagonal empirical-Fisher weight-uncertainty proxy: invert the per-weight
-/// Fisher diagonal plus a chosen prior precision, then propagate it with zero
-/// input noise. This is neither a calibrated posterior nor a full Laplace
-/// approximation; it omits bias uncertainty and parameter correlations. It is
-/// distinct from the input-noise signal `sdp_node_variance` computes.
-fn epistemic_node_variance<B: AutodiffBackend>(
+/// Centered-logit diagonal empirical-Fisher weight-uncertainty proxy: invert
+/// the per-weight Fisher diagonal plus a chosen prior precision, then propagate
+/// it with zero input noise. This is neither a calibrated posterior nor a full
+/// Laplace approximation; it omits bias uncertainty, parameter correlations,
+/// shared-weight cross-node covariance. Its scale is not calibrated.
+fn epistemic_centered_logit_variance<B: AutodiffBackend>(
     model: &Gcn<B>,
     x: &Tensor<B, 2>,
     adj: &Tensor<B, 2>,
@@ -414,12 +583,6 @@ fn epistemic_node_variance<B: AutodiffBackend>(
         .bias
         .as_ref()
         .map(|b| (b.val().inner(), zeros_like(&b.val().inner())));
-    let bias2 = model
-        .lin2
-        .bias
-        .as_ref()
-        .map(|b| (b.val().inner(), zeros_like(&b.val().inner())));
-
     // Propagate the weight-uncertainty proxy with zero input noise.
     let xi = x.clone().inner();
     let adji = adj.clone().inner();
@@ -430,12 +593,10 @@ fn epistemic_node_variance<B: AutodiffBackend>(
         adji.clone(),
         &propagate_linear_bayes(&m0, wmean1, wvar1, bias1),
     ));
-    let m2 = propagate_matmul_left(adji, &propagate_linear_bayes(&m1, wmean2, wvar2, bias2));
-    let [_, c] = m2.var.dims();
-    let v = m2.var.to_data().to_vec::<f32>().unwrap();
-    (0..n)
-        .map(|i| (0..c).map(|j| v[i * c + j] as f64).sum())
-        .collect()
+    let row_trace = centered_linear_variance(&m1, wmean2, Some(wvar2));
+    let node_trace = (adji.clone() * adji).matmul(row_trace);
+    let v = node_trace.to_data().to_vec::<f32>().unwrap();
+    (0..n).map(|i| v[i] as f64).collect()
 }
 
 fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) -> std::io::Result<()> {
@@ -490,8 +651,8 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) -> std::io
     };
     println!("test accuracy (full coverage): {base_acc:.4}\n");
 
-    // --- SDP per-node uncertainty (one analytic pass) ---
-    let node_var = model.sdp_node_variance(x.clone(), adj.clone(), INPUT_STD);
+    // --- SDP per-node centered-logit disagreement (one analytic pass) ---
+    let node_var = model.sdp_centered_logit_variance(x.clone(), adj.clone(), INPUT_STD);
     let u_sdp: Vec<f64> = test_idx.iter().map(|&i| node_var[i]).collect();
 
     // --- Monte Carlo reference under the same input-noise model ---
@@ -504,14 +665,18 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) -> std::io
             burn::tensor::Distribution::Normal(0.0, INPUT_STD),
             &device,
         );
-        let yk = model
+        let mut yk: Vec<f64> = model
             .forward(x.clone() + noise, adj.clone())
             .into_data()
             .to_vec::<f32>()
-            .unwrap();
+            .unwrap()
+            .into_iter()
+            .map(f64::from)
+            .collect();
+        center_logits(&mut yk, g.n_classes);
         for i in 0..len {
-            acc_mean[i] += yk[i] as f64;
-            acc_sq[i] += (yk[i] as f64).powi(2);
+            acc_mean[i] += yk[i];
+            acc_sq[i] += yk[i].powi(2);
         }
     }
     let kf = MC_SAMPLES as f64;
@@ -529,7 +694,7 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) -> std::io
 
     // A uniform random retained set has expected accuracy equal to the full-set
     // accuracy at every retained count, avoiding a noisy single permutation.
-    println!("accuracy vs coverage (abstain on most-uncertain):");
+    println!("accuracy vs coverage (abstain on largest centered-logit variance):");
     println!("  {:>9}  {:>10}  {:>10}", "coverage", "sdp", "random E");
     for &cov in &[1.0, 0.9, 0.8, 0.7, 0.6, 0.5] {
         let a_sdp = accuracy_at_coverage(&logits_v, &g.labels, &test_idx, &u_sdp, g.n_classes, cov);
@@ -541,8 +706,8 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) -> std::io
         .iter()
         .map(|&i| !argmax_correct(&logits_v, &g.labels, i, g.n_classes))
         .collect();
-    // Weight-uncertainty signal via the diagonal empirical-Fisher proxy.
-    let node_epi = epistemic_node_variance(
+    // Centered-logit weight-uncertainty signal via the diagonal empirical-Fisher proxy.
+    let node_epi = epistemic_centered_logit_variance(
         &model,
         &x,
         &adj,
@@ -553,27 +718,32 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) -> std::io
     );
     let u_epi: Vec<f64> = test_idx.iter().map(|&i| node_epi[i]).collect();
 
-    println!("\nmisclassification detection (AUROC of uncertainty vs error):");
-    println!("  input-noise AUROC = {:.4}", auroc(&u_sdp, &errors));
+    println!("\nmisclassification detection (AUROC of score vs error):");
     println!(
-        "  empirical-Fisher proxy AUROC = {:.4}",
+        "  centered-logit input-noise AUROC = {:.4}",
+        auroc(&u_sdp, &errors)
+    );
+    println!(
+        "  centered-logit empirical-Fisher proxy AUROC = {:.4}",
         auroc(&u_epi, &errors)
     );
     println!(
-        "  MC input-noise AUROC = {:.4}  ({MC_SAMPLES} samples)",
+        "  MC centered-logit input-noise AUROC = {:.4}  ({MC_SAMPLES} samples)",
         auroc(&u_mc, &errors)
     );
     println!("  (0.5 = uninformative, 1.0 = flags every wrong prediction)");
 
-    // Accuracy-coverage for the empirical-Fisher proxy too.
-    println!("\nempirical-Fisher proxy accuracy vs coverage (abstain on most-uncertain):");
+    // Accuracy-coverage for the centered-logit empirical-Fisher proxy too.
+    println!(
+        "\ncentered-logit empirical-Fisher proxy accuracy vs coverage (abstain on most-uncertain):"
+    );
     for &cov in &[1.0, 0.9, 0.8, 0.7, 0.6, 0.5] {
         let a = accuracy_at_coverage(&logits_v, &g.labels, &test_idx, &u_epi, g.n_classes, cov);
         println!("  {cov:>9.2}  {a:>10.4}");
     }
 
     let rho = spearman(&u_sdp, &u_mc);
-    println!("\nSDP vs MC per-node uncertainty (test nodes): Spearman rho = {rho:.4}");
+    println!("\nSDP vs MC centered-logit disagreement (test nodes): Spearman rho = {rho:.4}");
     Ok(())
 }
 
@@ -657,8 +827,8 @@ fn ood_eval<B: AutodiffBackend>(
         .into_data()
         .to_vec::<f32>()
         .unwrap();
-    let node_var = model.sdp_node_variance(x.clone(), adj.clone(), INPUT_STD);
-    let node_epi = epistemic_node_variance(
+    let node_var = model.sdp_centered_logit_variance(x.clone(), adj.clone(), INPUT_STD);
+    let node_epi = epistemic_centered_logit_variance(
         &model,
         &x,
         &adj,
@@ -684,11 +854,11 @@ fn ood_eval<B: AutodiffBackend>(
     let pick = |src: &[f64]| -> Vec<f64> { eval.iter().map(|&i| src[i]).collect() };
     println!("transductive novel-class AUROC (1.0 = score perfectly separates classes):");
     println!(
-        "  input-noise                = {:.4}",
+        "  centered-logit input-noise = {:.4}",
         auroc(&pick(&node_var), &labels)
     );
     println!(
-        "  empirical-Fisher proxy      = {:.4}",
+        "  centered-logit empirical-Fisher proxy = {:.4}",
         auroc(&pick(&node_epi), &labels)
     );
     println!(

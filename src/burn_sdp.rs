@@ -55,6 +55,9 @@ impl<B: Backend> Moments<B> {
 /// `weight` is `[d_in, d_out]` (Burn's `Linear` layout); `bias` is `[d_out]`.
 /// Mean is exact; variance is `var @ weight^2`, which is the exact marginal
 /// variance of each output when the input covariance is diagonal.
+///
+/// # Panics
+/// Panics if the supplied bias width differs from the output width.
 pub fn propagate_linear<B: Backend>(
     m: &Moments<B>,
     weight: Tensor<B, 2>,
@@ -63,6 +66,7 @@ pub fn propagate_linear<B: Backend>(
     let mut mean = m.mean.clone().matmul(weight.clone());
     if let Some(b) = bias {
         let d = b.dims()[0];
+        assert_eq!(d, weight.dims()[1], "bias shape must match output width");
         mean = mean + b.reshape([1, d]);
     }
     let w2 = weight.clone() * weight;
@@ -88,19 +92,35 @@ pub fn propagate_linear<B: Backend>(
 /// Input moments are `[n, d_in]`; `w_mean` and `w_var` are `[d_in, d_out]`.
 /// Both bias tensors, when supplied, are `[d_out]`. Variances must be finite
 /// and nonnegative, as required by the module's input contract.
+///
+/// # Panics
+/// Panics if the weight mean and variance shapes differ, or supplied bias mean
+/// and variance shapes differ or do not match the output width.
 pub fn propagate_linear_bayes<B: Backend>(
     m: &Moments<B>,
     w_mean: Tensor<B, 2>,
     w_var: Tensor<B, 2>,
     bias: Option<(Tensor<B, 1>, Tensor<B, 1>)>,
 ) -> Moments<B> {
+    assert_eq!(
+        w_mean.dims(),
+        w_var.dims(),
+        "weight mean and variance shapes must match"
+    );
+    let d_out = w_mean.dims()[1];
     let mut mean = m.mean.clone().matmul(w_mean.clone());
     let wm2 = w_mean.clone() * w_mean;
     let mx2 = m.mean.clone() * m.mean.clone();
     let mut var =
         mx2.matmul(w_var.clone()) + m.var.clone().matmul(wm2) + m.var.clone().matmul(w_var);
     if let Some((bm, bv)) = bias {
+        assert_eq!(
+            bm.dims(),
+            bv.dims(),
+            "bias mean and variance shapes must match"
+        );
         let d = bm.dims()[0];
+        assert_eq!(d, d_out, "bias shapes must match output width");
         mean = mean + bm.reshape([1, d]);
         var = var + bv.reshape([1, d]);
     }
@@ -309,6 +329,10 @@ pub fn propagate_residual_add_correlated<B: Backend>(
 /// `mean` and `var` must have matching shape `[N, C_in, H, W]`;
 /// `weight` is `[C_out, C_in / groups, kh, kw]` and optional `bias` is `[C_out]`.
 /// The module's finite-value and nonnegative-variance requirements apply.
+///
+/// # Panics
+/// Panics if the mean and variance shapes differ. The underlying convolution
+/// also panics for invalid weight, bias, or option shapes.
 pub fn propagate_conv2d<B: Backend>(
     mean: Tensor<B, 4>,
     var: Tensor<B, 4>,
@@ -316,6 +340,11 @@ pub fn propagate_conv2d<B: Backend>(
     bias: Option<Tensor<B, 1>>,
     options: burn::tensor::ops::ConvOptions<2>,
 ) -> (Tensor<B, 4>, Tensor<B, 4>) {
+    assert_eq!(
+        mean.dims(),
+        var.dims(),
+        "convolution mean and variance shapes must match"
+    );
     let mean_out = burn::tensor::module::conv2d(mean, weight.clone(), bias, options.clone());
     let var_out = burn::tensor::module::conv2d(var, weight.clone() * weight, None, options);
     (mean_out, var_out)

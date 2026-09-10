@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject standard deviations whose squared variance underflows to zero.
+- Reject broadcastable affine bias, Bayesian weight/bias, and convolution
+  moment shapes that violate the documented tensor layout.
+- Remove common-logit offsets from Cora input-noise and weight-uncertainty
+  scores; reject citation edges whose endpoints are absent from the dataset.
+- Correct the regression example guide's interval level and clarify Gaussian
+  information-gain assumptions.
+
 ## [0.4.0] - 2026-09-10
 
 ### Added

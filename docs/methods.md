@@ -1,6 +1,6 @@
 # Methods, history, and applications
 
-Primary papers checked through September 10, 2026. This guide covers methods
+Literature through September 2026. This guide covers methods
 relevant to stableprop. Recent results are preprints unless a publication venue
 is named; they describe their own implementations and experiments, not this crate.
 
@@ -119,6 +119,7 @@ affine transport stays exact, but another Gaussian ReLU step is an approximation
 | Local linearization | Uses derivatives of the deterministic network; useful when perturbations stay within a nearly affine region | Can miss activation-boundary crossings and nonlinear mean shifts |
 | Diagonal moment matching | Carries one mean and variance per feature; no feature-pair covariance state | Discards correlations that later layers can amplify or cancel |
 | Full moment matching | Retains correlations needed by later affine maps | Quadratic covariance storage; nonlinear moments still assume Gaussian layer inputs |
+| Sigma-point quadrature | Evaluates selected inputs through the whole network without derivatives | A finite quadrature rule can miss activation boundaries; cost grows with input dimension |
 | Monte Carlo | Evaluates the actual model under the chosen noise distribution | Repeated forward passes and sampling error; rare events need many samples |
 
 For a dense square layer of width `d`, diagonal affine propagation costs
@@ -126,6 +127,14 @@ For a dense square layer of width `d`, diagonal affine propagation costs
 and `O(d^2)` storage, per input. ReLU's fixed third-order pairwise series costs
 `O(d^2)`. These are operation counts, not measured speedups: device kernels,
 batch size, covariance structure, and graph aggregation affect runtime.
+
+The [unscented transform (Julier & Uhlmann, 1997)](https://www.robots.ox.ac.uk/~cvrg/hilary2003/Julier1997_SPIE_KF.pdf)
+and [cubature Kalman methods (Arasaratnam & Haykin, 2009)](https://doi.org/10.1109/TAC.2009.2019800)
+approximate transformed moments using weighted input points. Applied to a whole
+network, these avoid intermediate Gaussian approximations, but retain quadrature
+error. They are useful comparison methods when input dimension is small and
+hidden layers are wide. Their polynomial integration guarantees do not make a
+ReLU network's output moments exact. stableprop does not implement these rules.
 
 Dropping covariance can either raise or lower the final variance, depending on
 weights and correlation signs. More covariance terms do not ensure better
@@ -173,6 +182,13 @@ actually observes, not only agreement with the model's own noisy outputs.
   accuracy reference for the full-covariance path. Exactness is per Gaussian
   layer; the higher-order error theorem requires smoothness assumptions and
   is not a blanket ReLU-network guarantee. Softmax and attention are excluded.
+- [Thompson & McCrory, *Uncertainty propagation through trained multi-layer
+  perceptrons: Exact analytical results*](https://arxiv.org/abs/2601.16830),
+  January 2026, §§3–5: gives exact Gaussian-input output moments for a
+  single-hidden-layer ReLU regressor using univariate and bivariate Gaussian
+  integrals. With just one nonlinear layer, no intermediate Gaussian
+  approximation is needed. This isolates covariance-series error from the
+  additional approximation required by deeper networks.
 - [Wieczorek et al., *Calibrated Sampling-Free Uncertainty Estimation in
   Bayesian Deep Learning*](https://arxiv.org/abs/2606.16214), June 2026,
   §§4–6: CVP combines diagonal Bayesian variance propagation, an
@@ -187,9 +203,6 @@ actually observes, not only agreement with the model's own noisy outputs.
   It illustrates a middle ground between independent output coordinates and
   dense output covariance. The method changes the surrogate's representation
   and training; it is not a layerwise replacement for this crate.
-
-These are related developments; the latest full-text application discussed
-here is from August.
 
 ## What is useful in practice?
 

@@ -82,7 +82,7 @@ cargo run --release --features burn --example robust_training
 
 `regression_intervals` trains an MLP and compares output standard deviations
 with 200 Monte Carlo samples. It prints correlation, a scale ratio, and coverage
-of sampled model outputs by 90% Gaussian intervals (`mean +/- 1.645 * std`).
+of sampled model outputs by 95% Gaussian intervals (`mean +/- 1.96 * std`).
 High correlation can coexist with incorrect scale. This coverage calculation
 does not test intervals against observed targets or account for label noise.
 
@@ -160,6 +160,8 @@ than the synthetic examples.
 
 `cora_uncertainty` trains a GCN and compares accuracy at retained coverage,
 error-detection AUROC, and uncertainty rankings against Monte Carlo. Its
+scores sum centered-logit variances, so a random offset shared by all classes
+does not count as classification uncertainty. Its
 weight-uncertainty signal is a diagonal empirical-Fisher proxy; it is not a
 calibrated posterior and omits shared-weight and cross-node covariance.
 
