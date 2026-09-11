@@ -198,16 +198,13 @@ fn main() {
 
     let mean_bound = bound.iter().sum::<f64>() / N_TEST as f64;
     let mean_mc = mc.iter().sum::<f64>() / N_TEST as f64;
-    let above = (0..N_TEST).filter(|&i| bound[i] >= mc[i]).count() as f64 / N_TEST as f64;
     let mean_abs_error = (0..N_TEST).map(|i| (bound[i] - mc[i]).abs()).sum::<f64>() / N_TEST as f64;
 
     println!("\nanalytic misclassification-risk estimate under input noise std {INPUT_STD}:");
     println!("  mean analytic estimate = {mean_bound:.4}");
-    println!("  mean MC rate           = {mean_mc:.4}  ({MC_SAMPLES} samples)");
-    println!(
-        "  mean absolute per-input error = {mean_abs_error:.4}; estimate >= MC on {:.1}% of inputs.",
-        100.0 * above
-    );
+    println!("  mean MC estimate       = {mean_mc:.4}  ({MC_SAMPLES} samples per input)");
+    println!("  mean absolute difference from MC = {mean_abs_error:.4}");
+    println!("  The comparison includes Monte Carlo sampling error.");
 }
 
 #[cfg(test)]

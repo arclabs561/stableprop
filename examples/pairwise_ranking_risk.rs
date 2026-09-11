@@ -248,11 +248,11 @@ fn main() {
 
     println!("pairwise ranking flips under feature noise std {INPUT_STD}:");
     println!(
-        "  nonlinear full covariance MAE  = {:.4}",
+        "  nonlinear full covariance MAE versus MC = {:.4}",
         mean_abs_error(&analytic_full, &observed)
     );
     println!(
-        "  nonlinear diagonal-score MAE   = {:.4}",
+        "  nonlinear diagonal-score MAE versus MC  = {:.4}",
         mean_abs_error(&analytic_diagonal, &observed)
     );
     println!(
@@ -261,8 +261,9 @@ fn main() {
         mean(&analytic_diagonal)
     );
     println!(
-        "  affine control MAE (exact Gaussian margin) = {:.4}",
+        "  affine control MAE versus MC (exact Gaussian margin) = {:.4}",
         mean_abs_error(&affine_analytic, &affine_observed)
     );
     println!("  {MC_SAMPLES} shared-noise draws; max covariance asymmetry = {max_asymmetry:.2e}");
+    println!("  MAEs include Monte Carlo sampling error.");
 }

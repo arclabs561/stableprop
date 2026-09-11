@@ -60,13 +60,14 @@ The parameter distributions are supplied, not learned by this example.
 
 `pairwise_ranking_risk` scores two fixed candidates for 128 query points.
 It estimates how often Gaussian query-feature noise changes the winner,
-then compares with 2,048 Monte Carlo draws. The score difference depends on
-both score variances and their covariance. Its baseline drops only the final
-score covariance; the hidden-layer calculation is shared.
+then compares with a 2,048-draw Monte Carlo estimate. The score difference
+depends on both score variances and their covariance. Its baseline drops only
+the final score covariance; the hidden-layer calculation is shared.
 
-An affine control isolates the exact Gaussian-margin calculation. The ReLU
-network additionally approximates hidden moments and the final margin
-distribution. Here the joint score distribution comes from input noise. A
+An affine control isolates the exact Gaussian-margin calculation; the Monte
+Carlo comparison still has sampling error. The ReLU network additionally
+approximates hidden moments and the final margin distribution. Here the joint
+score distribution comes from input noise. A
 fitted reward posterior can supply a joint score distribution too, using the
 same covariance arithmetic to describe uncertain margins. Exploration adds an
 observation model: how would feedback change competing scores, and would that
@@ -152,7 +153,8 @@ cargo run --release --features burn --example gcn_uncertainty
 ```
 
 `misclassification_risk` estimates logit-margin error probabilities from
-propagated covariance and compares them with 400 Monte Carlo samples. It uses
+propagated covariance and compares them with a 400-draw Monte Carlo estimate
+per input. These comparisons include sampling error. It uses
 true labels for evaluation. Gaussian margin tails and their summed risk are
 approximations after nonlinear propagation, not robustness certificates.
 
