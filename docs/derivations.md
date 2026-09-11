@@ -341,7 +341,11 @@ $$
 $$
 
 **Proof.** Gaussian integration by parts gives
-$\mathbb{E}[h_{i}'(Z)\mathrm{He}_{k-1}(Z)]=c_{ik}$.
+
+$$
+\mathbb{E}[h_i'(Z)\mathrm{He}_{k-1}(Z)]=c_{ik}.
+$$
+
 Parseval applied to this square-integrable derivative gives
 $\sum_{k\geq1}k\,c_{ik}^2/k!=\mathbb{E}[h_{i}'(Z)^2]$.
 The derivative energies make the differentiated covariance series uniformly
