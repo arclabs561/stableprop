@@ -31,6 +31,12 @@ test:
 property-test cases="4096":
     PROPTEST_CASES="$1" cargo test --features burn --test properties --test burn_properties --test relu_covariance_reference
 
+# Regenerate independent values and compare them with frozen Rust fixtures.
+# Requires uv; kept separate from the Python-free Rust checks.
+reference-check:
+    uv run --script scripts/reference_relu.py --check-fixtures
+    uv run --script scripts/reference_relu.py --check-marginal-fixtures
+
 # Build both sets of API docs with warnings treated as errors.
 docs:
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps

@@ -175,6 +175,17 @@ intermediate derivative can contaminate a masked branch. Burn bounds the mean
 before dividing by the standard deviation and normalizes covariance by the
 larger standard deviation first to avoid these intermediate overflows.
 
+Subnormal variances can also underflow in the backward pass. A representable
+final derivative may depend on an intermediate gradient below the tensor
+dtype's range. The [f32 reference tests](../tests/relu_tail_accuracy.rs) cover
+this boundary with loss scaling: multiply the scalar loss before backward,
+then divide the extracted gradients by the same factor before clipping or
+updating parameters. The factor must keep all scaled gradients finite.
+This is the same chain-rule technique used in
+[mixed-precision training](https://arxiv.org/html/1710.03740v3#S3.SS2), applied
+here at an extreme `f32` scale. It cannot recover information lost in the
+forward pass.
+
 The [unscented transform (Julier & Uhlmann, 1997)](https://www.robots.ox.ac.uk/~cvrg/hilary2003/Julier1997_SPIE_KF.pdf)
 and [cubature Kalman methods (Arasaratnam & Haykin, 2009)](https://doi.org/10.1109/TAC.2009.2019800)
 approximate transformed moments using weighted input points. Applied to a whole

@@ -316,7 +316,10 @@ proptest! {
     /// diagonal with exact rectified variances preserves that property.  These
     /// rank-two factors make every generated 3- or 4-feature input singular.
     #[test]
-    fn full_relu_covariance_is_symmetric_and_psd_on_signed_directions(case in full_affine_case()) {
+    fn full_relu_covariance_is_symmetric_and_psd_on_signed_directions(
+        case in full_affine_case(),
+        direction_coefficients in prop::collection::vec(-2.0f32..2.0, 12),
+    ) {
         let device = Default::default();
         let out = propagate_relu_full(&MomentsFull::new(
             Tensor::<Nd, 2>::from_data(TensorData::new(case.mean.clone(), [BATCH, case.d_in]), &device),
@@ -326,13 +329,23 @@ proptest! {
         let mut contrast = vec![0.0; case.d_in];
         contrast[0] = 1.0;
         contrast[1] = -1.0;
-        let directions = vec![
+        let mut directions = vec![
             vec![1.0; case.d_in],
             (0..case.d_in)
                 .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
                 .collect(),
             contrast,
         ];
+        // Fixed directions find familiar cancellation modes.  Independent
+        // nonzero directions exercise the PSD quadratic form more generally.
+        for coefficients in direction_coefficients.chunks_exact(4) {
+            prop_assume!(coefficients[..case.d_in].iter().any(|value| *value != 0.0));
+            let direction = coefficients[..case.d_in]
+                .iter()
+                .map(|&value| f64::from(value))
+                .collect();
+            directions.push(direction);
+        }
         for batch in 0..BATCH {
             for i in 0..case.d_in {
                 for j in 0..case.d_in {

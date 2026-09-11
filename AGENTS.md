@@ -39,6 +39,8 @@ changing the RNG seed. Cloning uninitialized parameters leaves each clone to
 draw its own weights on first use.
 `just property-test` runs the algebraic and Gaussian-reference properties with
 4,096 cases each; supply a count to override it.
+When changing the reference generator or its frozen fixtures, run
+`just reference-check` to regenerate the independent values and check agreement.
 
 On macOS, run `just metal-check` to compile the GPU tests and training example, and
 `just metal-test` to compare values and gradients on a Metal device. CI only

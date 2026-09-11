@@ -156,8 +156,8 @@ for the Cargo commands used by CI.
 
 The API docs include executable recipes for propagation, tensor precision,
 autodiff, and correlated residuals. The [reference generator](scripts/README.md)
-can regenerate values for the Gaussian pair fixtures using independent
-numerical integration.
+uses independent numerical integration; `just reference-check` regenerates its
+Gaussian pair values and marginal derivatives, then checks the frozen fixtures.
 
 Use `just bench` or `just bench-burn` for repeatable CPU measurements; the
 [benchmark guide](benches/README.md) explains fixtures and timing boundaries.

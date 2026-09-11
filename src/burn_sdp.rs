@@ -24,6 +24,9 @@
 //! These boundary conventions are not limits of every positive-variance
 //! derivative: at zero mean, the mean's variance derivative diverges as
 //! variance approaches zero.
+//! At subnormal variances, intermediate backward gradients can underflow even
+//! when the final derivative is representable. Loss scaling can help, provided
+//! scaled gradients stay finite and are unscaled before an optimizer update.
 
 use burn::tensor::backend::Backend;
 use burn::tensor::{DType, Tensor, TensorData};
