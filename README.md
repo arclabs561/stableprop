@@ -42,7 +42,7 @@ Rust 1.80. The optional Burn backend requires Rust 1.92 or newer.
 
 ```toml
 [dependencies]
-stableprop = "0.5.0"
+stableprop = "0.5.1"
 ```
 
 ```rust
