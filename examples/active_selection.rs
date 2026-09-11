@@ -111,6 +111,7 @@ struct Row {
     budget: usize,
     clean: f64,
     noisy: f64,
+    selected_classes: [usize; N_CLASS],
     acquisition: Duration,
     pearson: Option<f64>,
     spearman: Option<f64>,
@@ -392,7 +393,7 @@ fn select_top(indices: &[usize], scores: &[f64], count: usize, tie_rng: &mut Rng
 fn acquire(
     policy: Policy,
     model: &Net<Ad>,
-    data: &Data,
+    pool_features: &[f32],
     chosen: &[usize],
     count: usize,
     seed: u64,
@@ -414,7 +415,7 @@ fn acquire(
     }
     let mut x = Vec::with_capacity(candidates.len() * D_IN);
     for &i in &candidates {
-        x.extend_from_slice(&data.x[i * D_IN..(i + 1) * D_IN]);
+        x.extend_from_slice(&pool_features[i * D_IN..(i + 1) * D_IN]);
     }
     let scores = match policy {
         Policy::Entropy => {
@@ -443,6 +444,18 @@ fn acquire(
         )
     });
     (selected, acquisition, agreement)
+}
+
+/// Count labels only after acquisition has returned fixed indices. Keeping the
+/// labels out of `acquire` makes this diagnostic unable to affect a policy.
+fn selected_class_counts(selected: &[usize], labels: &[i32]) -> [usize; N_CLASS] {
+    let mut counts = [0; N_CLASS];
+    for &index in selected {
+        let class = labels[index] as usize;
+        assert!(class < N_CLASS, "selected label is outside the class range");
+        counts[class] += 1;
+    }
+    counts
 }
 
 fn accuracy(w: &Weights, data: &Data) -> f64 {
@@ -516,7 +529,7 @@ fn main() {
                     let (new_indices, acquisition, agreement) = acquire(
                         policy,
                         &scorer,
-                        &pool,
+                        &pool.x,
                         &chosen,
                         budget - chosen.len(),
                         seed ^ budget as u64,
@@ -536,6 +549,7 @@ fn main() {
                     budget,
                     clean: accuracy(&w, &test),
                     noisy: noisy_accuracy(&w, &test, &mut noise_rng),
+                    selected_classes: selected_class_counts(&chosen, &pool.y),
                     acquisition,
                     pearson: agreement.and_then(|x| x.0),
                     spearman: agreement.and_then(|x| x.1),
@@ -571,6 +585,33 @@ fn main() {
                 budget,
                 mean(|r| r.clean),
                 mean(|r| r.noisy)
+            );
+        }
+    }
+    println!("\nselected-label composition (mean per seed; labels read after acquisition):");
+    println!(
+        "  {:<18} {:>6} {:>10} {:>10}",
+        "policy", "labels", "class 0", "class 1"
+    );
+    for policy in Policy::ALL {
+        for &budget in &BUDGETS {
+            let group: Vec<&Row> = rows
+                .iter()
+                .filter(|r| r.policy as u8 == policy as u8 && r.budget == budget)
+                .collect();
+            let mean_count = |class: usize| {
+                group
+                    .iter()
+                    .map(|r| r.selected_classes[class] as f64)
+                    .sum::<f64>()
+                    / group.len() as f64
+            };
+            println!(
+                "  {:<18} {:>6} {:>10.1} {:>10.1}",
+                policy.name(),
+                budget,
+                mean_count(0),
+                mean_count(1),
             );
         }
     }

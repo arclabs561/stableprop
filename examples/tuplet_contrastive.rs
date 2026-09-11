@@ -185,10 +185,45 @@ fn main() {
     let r_clean = accuracy(&robust, &centroids(&robust), &clean_draw);
     let p_noisy = accuracy(&plain, &centroids(&plain), &noisy_test_draws);
     let r_noisy = accuracy(&robust, &centroids(&robust), &noisy_test_draws);
+    // This is the actual regularizer quantity, measured on the training
+    // inputs at the perturbation scale used while optimizing.
+    let propagated_variance = |model: &Encoder<Ad>| -> f64 {
+        model
+            .embedding_var(x_train.clone(), TRAIN_STD)
+            .mean()
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()[0] as f64
+    };
+    // A low variance can come from shrinking all embeddings. Report their RMS
+    // scale on held-out clean inputs beside task quality to expose that collapse.
+    let embedding_rms = |model: &Encoder<Ad>| -> f64 {
+        let embedding = model
+            .forward(x_test.clone())
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        (embedding
+            .iter()
+            .map(|&value| (value as f64).powi(2))
+            .sum::<f64>()
+            / embedding.len() as f64)
+            .sqrt()
+    };
     println!("nearest-centroid accuracy on held-out inputs:");
-    println!("  model                         clean    noisy (std {TEST_STD})");
-    println!("  plain contrastive              {p_clean:.3}    {p_noisy:.3}");
-    println!("  contrastive + variance penalty {r_clean:.3}    {r_noisy:.3}");
+    println!(
+        "  model                         clean    noisy (std {TEST_STD})  prop var (std {TRAIN_STD})  embed RMS"
+    );
+    println!(
+        "  plain contrastive              {p_clean:.3}    {p_noisy:.3}             {:.5}      {:.4}",
+        propagated_variance(&plain),
+        embedding_rms(&plain),
+    );
+    println!(
+        "  contrastive + variance penalty {r_clean:.3}    {r_noisy:.3}             {:.5}      {:.4}",
+        propagated_variance(&robust),
+        embedding_rms(&robust),
+    );
     println!("\nstableprop and tuplet compose in Burn end to end: the encoder trains under");
     println!(
         "tuplet's pairwise contrastive loss while stableprop supplies the analytic embedding variance."

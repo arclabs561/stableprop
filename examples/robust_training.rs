@@ -6,8 +6,10 @@
 //! The example reports clean and noisy test RMSE for that objective and plain MSE.
 //!
 //! Both nets start from the same weights and use the same noisy test draws,
-//! so only the loss differs. Each backend has its own RNG stream, so metrics
-//! from separate backend runs need not match.
+//! so only the loss differs. Input perturbations retain the clean target: this
+//! measures label-preserving measurement noise, not target or label noise.
+//! Each backend has its own RNG stream, so metrics from separate backend runs
+//! need not match.
 //!
 //! Run on CPU: `cargo run --release --example robust_training --features burn`
 //! Run on macOS Metal: `cargo run --release --example robust_training --features metal -- --metal`
@@ -155,7 +157,8 @@ fn run<B: AutodiffBackend>(dev: B::Device, backend: &str) {
         rmse(&robust, &clean),
         rmse(&robust, &noisy)
     );
-    println!("\nCompare clean and noisy RMSE; the variance penalty can change either metric.");
+    println!("\nNoisy inputs retain clean targets: this is label-preserving measurement noise.");
+    println!("Compare clean and noisy RMSE; the variance penalty can change either metric.");
     println!("Different backend RNG streams can produce different trained metrics.");
 }
 

@@ -45,11 +45,26 @@ This vector API retains covariance through affine layers and drops its
 off-diagonal entries at ReLU. Try `full_covariance` for a tensor representation
 that retains approximate nonlinear covariance.
 
+## Use your own Burn model
+
+Supply input means and **variances** to `Moments::new`, or a covariance matrix
+to `MomentsFull::new`. These tensor constructors take variances, unlike the
+standard deviations passed to the vector example above. Each batch row is a
+separate input; dependence between rows is not represented.
+
+Mirror your model's supported operations in their forward order, using the
+same weights and biases. See `forward_with_var` in [robust_training](robust_training.rs)
+or `embedding_var` in [tuplet_contrastive](tuplet_contrastive.rs).
+Compare propagated moments with samples under the same noise model before
+using them in a loss or decision. Coverage of noisy model outputs and coverage
+of observed targets are different checks.
+
 ## Uncertainty sources and ranking decisions
 
 ```sh
 cargo run --release --features burn --example uncertainty_sources
 cargo run --release --features burn --example pairwise_ranking_risk
+cargo run --release --features burn --example pairwise_ranking_risk -- --study
 ```
 
 `uncertainty_sources` compares a scalar prediction with uncertain inputs,
@@ -69,9 +84,25 @@ resolve it.
 Probability estimates are compared with a separately sampled reference.
 Brier scores use held-out binary flip outcomes; the point margin is a rank-only
 baseline. The default runs eight sets of 96 query points on one fixed model,
-with 2,048 reference draws per query. Append `-- --study` for 30 sets and
+with 2,048 reference draws per query. The `--study` mode uses 30 sets and
 16,384 reference draws. Reported standard errors summarize variation across
 query sets, conditional on this model and perturbation distribution.
+
+To vary the model and candidates too:
+
+```sh
+cargo run --release --features burn --example pairwise_ranking_risk -- --generalize --quick
+cargo run --release --features burn --example pairwise_ranking_risk -- --generalize
+```
+
+The full mode uses 30 independently generated, untrained networks and candidate
+pairs, three query sets per model, and feature-noise standard deviations
+0.15, 0.30, and 0.45. Each model contributes one equally weighted average over
+the regimes and query sets. Paired policy contrasts use models as the independent
+units, with separate results for each regime. The three-model quick mode is
+descriptive. Neither mode establishes performance for trained ranking models.
+The printed elapsed time covers the whole evaluation, including references;
+it is not a comparison of method runtimes.
 
 An affine control isolates the exact Gaussian-margin calculation; the Monte
 Carlo comparison still has sampling error. The ReLU network additionally
@@ -88,26 +119,26 @@ connects these calculations through Bayesian conditioning and decision value.
 ```sh
 cargo run --release --features burn --example regression_intervals
 cargo run --release --features burn --example conformal_intervals
+cargo run --release --features burn --example conformal_intervals -- --study
 cargo run --release --features burn --example robust_training
 ```
 
-`regression_intervals` trains an MLP and compares output standard deviations
-with 200 Monte Carlo samples. It prints correlation, a scale ratio, and coverage
+`regression_intervals` trains an MLP and compares output moments
+with 200 Monte Carlo samples. It reports mean error alongside the Monte Carlo
+mean's sampling error and output scale, then standard-deviation correlation,
+a scale ratio, and coverage
 of sampled model outputs by 95% Gaussian intervals (`mean +/- 1.96 * std`).
 High correlation can coexist with incorrect scale. This coverage calculation
 does not test intervals against observed targets or account for label noise.
 
 `conformal_intervals` compares raw moment-based intervals with adaptive and
 constant-width split-conformal intervals on separate calibration and test data.
+The default is a single-split walkthrough; `--study` runs the repeated
+heteroscedastic experiment below. The 90% calibration target applies to the
+conformal rows; the raw sensitivity intervals are uncalibrated.
 Read coverage and average width together. Split conformal targets marginal
 coverage under exchangeability; a finite test split need not hit 90% exactly.
 The adaptive scale need not produce narrower intervals than the constant one.
-
-For a repeated heteroscedastic experiment, run:
-
-```sh
-cargo run --release --features burn --example conformal_intervals -- --study
-```
 
 This slower mode fits 30 models on separate clean-feature training sets.
 Calibration and test targets use one draw of independent Gaussian noise in
@@ -125,9 +156,37 @@ descriptive. The score construction follows
 [locally weighted split conformal prediction](https://arxiv.org/html/1604.04173#S5.SS2),
 using a propagated sensitivity scale in place of a fitted residual scale.
 
+To diagnose the scale rather than change the calibration protocol:
+
+```sh
+cargo run --release --features burn --example conformal_intervals -- --diagnose
+cargo run --release --features burn --example conformal_intervals -- --diagnose-study
+```
+
+These modes compare diagonal and full third-order covariance propagation (K3)
+with paired Monte Carlo outputs from the same fitted model. The model has one
+hidden ReLU, so there is
+no repeated nonlinear Gaussian closure. A remaining full-versus-sampled
+discrepancy combines truncation, numerical, and sampling error.
+Separate diagnostics show target-signal variance under input noise, independent
+label-noise variance, and squared bias of the interval center. Their sum is the
+target residual mean square, not propagated model variance.
+The squared-bias estimate subtracts Monte Carlo mean-estimation variance;
+it can be negative at finite sample size even though population squared bias
+is nonnegative.
+
+The quick diagnosis uses four fitted models and 12 fresh centers per model;
+the full diagnosis uses 30 and 48. Both use four independent batches of 512
+draws per center. Batch spreads describe Monte Carlo variability; the full
+mode's approximate intervals use fitted-model/data repeats as independent units.
+The known target/noise quantities are diagnostic oracles from this synthetic
+problem, not uncertainty estimates learned by stableprop.
+
 `robust_training` compares plain MSE with MSE plus a propagated-variance penalty,
 using shared initial weights and test noise. It prints RMSE with and without
-input perturbations. Compare both metrics; the penalty can trade accuracy for lower sensitivity.
+input perturbations while holding clean targets fixed. This models
+label-preserving measurement noise; another perturbation may change the target.
+Compare both metrics; the penalty can trade accuracy for lower sensitivity.
 
 On macOS, `just metal-train` runs the same training code on Burn's Metal
 backend. Its synchronized training time includes first-use kernel compilation
@@ -149,6 +208,9 @@ hidden ReLU layers across three seeds. Each seed shares network prefixes,
 the output affine map, 128 input centers, and Gaussian perturbations across
 depths. Each Monte Carlo estimate uses 2,048 draws per center; an independent
 repeat shows sampling variability, not an error bound.
+The final depth summaries give the mean and range across those three fixed
+seeds. Compare each analytic method with the MC-repeat discrepancy at the same
+depth; these are descriptive summaries, not confidence intervals.
 
 The table reports normalized errors in output means, covariance matrices, and
 the standard deviation of the score difference `output[0] - output[1]`.
@@ -185,8 +247,11 @@ cargo run --release --features burn --example gcn_uncertainty
 
 `misclassification_risk` estimates logit-margin error probabilities from
 propagated covariance and compares them with a 400-draw Monte Carlo estimate
-per input. These comparisons include sampling error. It uses
-true labels for evaluation. Gaussian margin tails and their summed risk are
+per input. Fixed risk bins show counts, predicted risk, sampled error, and
+estimated Monte Carlo standard error at fixed inputs alongside the overall mean
+absolute error. This sampling error excludes variation across datasets and
+models. True labels are used for evaluation. Summing competing margin events can overcount
+their overlap; Gaussian margin tails and their summed risk are also
 approximations after nonlinear propagation, not robustness certificates.
 
 `gcn_uncertainty` composes stableprop with
@@ -205,13 +270,22 @@ LINQS tab-separated format, not Planetoid pickle files). Put that directory at
 
 ```sh
 cargo run --release --features burn --example cora_uncertainty
+cargo run --release --features burn --example cora_uncertainty -- --quick
 ```
 
-For a different location, append `-- /path/to/cora` to the command or set
-`STABLEPROP_CORA_DIR`. An absent default dataset prints a diagnostic and skips
+For a different location, set `STABLEPROP_CORA_DIR` or pass the directory:
+
+```sh
+cargo run --release --features burn --example cora_uncertainty -- --quick /path/to/cora
+```
+
+An absent default dataset prints a diagnostic and skips
 the run; an explicitly supplied missing path is an error. The dataset is not
 bundled, and this example performs dense graph operations, so it takes longer
 than the synthetic examples.
+The quick preset prints its reduced epoch and sampling budgets. Use it to
+check the workflow; it does not reproduce the study and retains dense graph
+memory use.
 
 `cora_uncertainty` trains a GCN and compares accuracy at retained coverage,
 error-detection AUROC, and uncertainty rankings against Monte Carlo. Its
@@ -237,6 +311,9 @@ contrastive loss with a stableprop embedding-variance penalty. Both encoders
 start from the same weights. Evaluation uses held-out points, class centroids
 from training embeddings, and ten shared noise draws per test point. The
 printed table compares nearest-centroid accuracy with and without noise.
+It also reports propagated embedding variance at the training noise scale and
+the held-out embedding RMS. Read these together: reduced variance can accompany
+a change in embedding scale rather than better task performance.
 It demonstrates differentiable composition; the fixed synthetic pairs and
 single seed do not establish a general improvement in representation learning.
 
@@ -252,6 +329,8 @@ uses the same 256 pool points, 512 held-out points, 16 initial labels, and
 2–16–2 ReLU network for all policies. The designed initial set is class-balanced;
 subsequent acquisition does not read labels. Each budget refits from the same
 initial weights for 250 epochs, without a variance penalty.
+Class counts are printed after acquisition, so the composition can help explain
+the learning curves without supplying labels to the selection policy.
 
 Entropy uses the model's softmax probabilities at the unperturbed input.
 The disagreement policies use independent Gaussian feature noise with standard

@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Conformal diagnostics separating covariance approximation, sampled model
+  variation, and synthetic target noise and bias.
+- Ranking evaluations across generated model/candidate fixtures, with paired
+  deferral comparisons and explicit noise-regime weighting.
+- Mean-agreement, risk-bin, covariance-depth, embedding-scale, and selected-class
+  diagnostics in the examples, plus a quick Cora workflow.
+- Opt-in reference-generator checks against frozen Gaussian-pair and marginal
+  fixtures.
+- Exact-input f32 marginal references and autodiff checks near formula switches
+  and at extreme scales; generated directions in covariance PSD properties.
+
 ## [0.5.2] - 2026-09-11
 
 ### Fixed

@@ -75,6 +75,13 @@ struct Estimate {
     cov: Vec<f64>,
 }
 
+#[derive(Clone, Copy)]
+struct ErrorMetrics {
+    mean: f64,
+    covariance: f64,
+    margin: f64,
+}
+
 /// Per-row, within-output covariance accumulated in f64 without storing every
 /// Monte Carlo output. Each `push` contains one independent draw per input row.
 struct OnlineMoments {
@@ -291,6 +298,26 @@ fn normalized_margin_std_error(estimate: &Estimate, reference: &Estimate) -> f64
     squared_error.sqrt() / reference_scale.sqrt()
 }
 
+fn error_metrics(estimate: &Estimate, reference: &Estimate) -> ErrorMetrics {
+    ErrorMetrics {
+        mean: normalized_mean_error(estimate, reference),
+        covariance: normalized_covariance_error(&estimate.cov, &reference.cov),
+        margin: normalized_margin_std_error(estimate, reference),
+    }
+}
+
+fn descriptive_summary(values: &[f64]) -> (f64, f64, f64) {
+    assert!(
+        !values.is_empty(),
+        "a depth summary needs at least one seed"
+    );
+    assert!(values.iter().all(|value| value.is_finite()));
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    (mean, min, max)
+}
+
 fn scalar_closure_control(dev: &Device<Nd>) {
     let expected_mean = 1.0 / (2.0 * std::f64::consts::PI).sqrt();
     let expected_var = 0.5 - 1.0 / (2.0 * std::f64::consts::PI);
@@ -322,6 +349,10 @@ fn main() {
         "  {:<10} {:>5} {:<9} {:>10} {:>10} {:>10}",
         "seed", "depth", "method", "mean nRMS", "cov nFrob", "margin nRMS"
     );
+    // Each inner vector holds [full, diagonal, MC repeat] errors for one depth.
+    let mut depth_rows = (0..DEPTHS.len())
+        .map(|_| Vec::<[ErrorMetrics; 3]>::with_capacity(SEEDS.len()))
+        .collect::<Vec<_>>();
     for &seed in &SEEDS {
         // All depths receive the same initialized prefix and the same output map.
         <Nd as Backend>::seed(&dev, seed ^ MODEL_SEED);
@@ -329,7 +360,7 @@ fn main() {
         // Input centers are independent of model initialization and shared across depths.
         <Nd as Backend>::seed(&dev, seed ^ INPUT_SEED);
         let x = Tensor::<Nd, 2>::random([N, D_IN], Distribution::Normal(0.0, 1.0), &dev);
-        for &depth in &DEPTHS {
+        for (depth_index, &depth) in DEPTHS.iter().enumerate() {
             let variance = Tensor::<Nd, 2>::full([N, D_IN], INPUT_STD * INPUT_STD, &dev);
             let full = full_estimate(&model, x.clone(), variance.clone(), depth);
             let diagonal = diagonal_estimate(&model, x.clone(), variance, depth);
@@ -340,24 +371,72 @@ fn main() {
             // This stream is also shared across depths, not across input rows.
             <Nd as Backend>::seed(&dev, seed ^ REPEAT_SEED);
             let repeat = monte_carlo(&model, &x, depth, &dev);
-            for (name, estimate) in [
-                ("full", &full),
-                ("diagonal", &diagonal),
-                ("MC repeat", &repeat),
-            ] {
+            let rows = [
+                ("full", error_metrics(&full, &reference)),
+                ("diagonal", error_metrics(&diagonal, &reference)),
+                ("MC repeat", error_metrics(&repeat, &reference)),
+            ];
+            for (name, metrics) in rows {
                 println!(
                     "  {seed:08x} {depth:>5} {name:<9} {:>10.4} {:>10.4} {:>10.4}",
-                    normalized_mean_error(estimate, &reference),
-                    normalized_covariance_error(&estimate.cov, &reference.cov),
-                    normalized_margin_std_error(estimate, &reference),
+                    metrics.mean, metrics.covariance, metrics.margin,
                 );
             }
+            depth_rows[depth_index].push([rows[0].1, rows[1].1, rows[2].1]);
+        }
+    }
+    println!("\ndescriptive depth summaries across the three fixed seeds (mean [min, max]):");
+    println!(
+        "  {:>5} {:<9} {:>22} {:>22} {:>22}",
+        "depth", "method", "mean nRMS", "cov nFrob", "margin nRMS"
+    );
+    for (depth_index, rows) in depth_rows.iter().enumerate() {
+        for (method_index, method) in ["full", "diagonal", "MC repeat"].iter().enumerate() {
+            let mean = descriptive_summary(
+                &rows
+                    .iter()
+                    .map(|metrics| metrics[method_index].mean)
+                    .collect::<Vec<_>>(),
+            );
+            let covariance = descriptive_summary(
+                &rows
+                    .iter()
+                    .map(|metrics| metrics[method_index].covariance)
+                    .collect::<Vec<_>>(),
+            );
+            let margin = descriptive_summary(
+                &rows
+                    .iter()
+                    .map(|metrics| metrics[method_index].margin)
+                    .collect::<Vec<_>>(),
+            );
+            println!(
+                "  {:>5} {method:<9} {:>7.4} [{:>6.4}, {:>6.4}] {:>7.4} [{:>6.4}, {:>6.4}] {:>7.4} [{:>6.4}, {:>6.4}]",
+                DEPTHS[depth_index],
+                mean.0,
+                mean.1,
+                mean.2,
+                covariance.0,
+                covariance.1,
+                covariance.2,
+                margin.0,
+                margin.1,
+                margin.2,
+            );
         }
     }
     println!("\nmean nRMS scales output-mean error by aggregate MC output standard deviation.");
     println!("margin nRMS uses the fixed output-0 minus output-1 standard deviation.");
-    println!("MC repeat compares two independent estimates; it is a sampling diagnostic, not an error bound.");
-    println!("Depth 1 has no repeated Gaussian closure; deeper rows include closure and further series approximations.");
+    println!("Compare full and diagonal with the MC-repeat row at the same depth.");
+    println!(
+        "The three fixed-seed summaries are descriptive, not population confidence intervals."
+    );
+    println!(
+        "MC repeat compares two independent estimates; it is a sampling diagnostic, not an error bound."
+    );
+    println!(
+        "Depth 1 has no repeated Gaussian closure; deeper rows include closure and further series approximations."
+    );
 }
 
 #[cfg(test)]

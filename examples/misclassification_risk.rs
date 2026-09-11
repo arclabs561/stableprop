@@ -6,6 +6,8 @@
 //! probabilities gives the risk estimate.
 //! A deterministic tie contributes zero to this strict-margin estimate;
 //! classifier tie-breaking can differ.
+//! Competing margin events can overlap, so their summed estimate is not an
+//! exact calibration quantity even with exact Gaussian margin probabilities.
 //!
 //! Nonlinear propagation and the Gaussian-logit assumption are approximate,
 //! so this estimate can fall above or below the true per-input error rate.
@@ -35,6 +37,7 @@ const N_TRAIN: usize = 3000;
 const N_TEST: usize = 400;
 const INPUT_STD: f64 = 0.25;
 const MC_SAMPLES: usize = 400;
+const RISK_BIN_UPPER: [f64; 5] = [0.02, 0.05, 0.10, 0.20, 1.0];
 
 #[derive(Module, Debug)]
 struct Net<B: Backend> {
@@ -92,6 +95,52 @@ fn gaussian_margin_loss_probability(mean: f64, covariance_terms: [f64; 4]) -> f6
     phi_cdf(-mean / variance.sqrt())
 }
 
+fn risk_bin_index(risk: f64) -> usize {
+    assert!((0.0..=1.0).contains(&risk), "risk must lie in [0, 1]");
+    RISK_BIN_UPPER
+        .iter()
+        .position(|upper| risk < *upper)
+        .unwrap_or(RISK_BIN_UPPER.len() - 1)
+}
+
+/// Estimated Monte Carlo standard error of a mean across fixed inputs.
+///
+/// Each input has its own Bernoulli error probability, so pooling all outcomes
+/// would include between-input variation that is irrelevant to repeated draws
+/// at these fixed centers. The per-input sample variance divided by the number
+/// of draws estimates each sampled-rate variance.
+fn fixed_input_mc_standard_error(error_counts: &[usize], draws_per_input: usize) -> f64 {
+    assert!(
+        !error_counts.is_empty(),
+        "a fixed-input Monte Carlo bin needs at least one input"
+    );
+    assert!(
+        draws_per_input > 1,
+        "fixed-input Monte Carlo needs at least two draws"
+    );
+    let variance = error_counts
+        .iter()
+        .map(|errors| {
+            assert!(
+                *errors <= draws_per_input,
+                "errors cannot exceed draws per input"
+            );
+            let probability = *errors as f64 / draws_per_input as f64;
+            probability * (1.0 - probability) / (draws_per_input - 1) as f64
+        })
+        .sum::<f64>()
+        / (error_counts.len() as f64).powi(2);
+    variance.sqrt()
+}
+
+#[derive(Default)]
+struct RiskBinSummary {
+    count: usize,
+    predicted_sum: f64,
+    mc_errors: usize,
+    input_error_counts: Vec<usize>,
+}
+
 /// Class-conditional Gaussian blobs: balanced classes, blob `c` shifted on two
 /// features so the classes separate.
 fn make(n: usize, dev: &Device<Ad>) -> (Vec<f32>, Vec<i32>) {
@@ -142,8 +191,10 @@ fn main() {
     let mean = m2.mean.to_data().to_vec::<f32>().unwrap(); // [N_TEST * C]
     let cov = m2.cov.to_data().to_vec::<f32>().unwrap(); // [N_TEST * C * C]
 
-    // Test-only per-input risk estimate: a union of approximate Gaussian margin
-    // probabilities for the known true class, not a certified bound.
+    // Test-only per-input risk estimate: a sum of approximate Gaussian margin
+    // probabilities for the known true class, capped at one. Competing margin
+    // events can overlap, so this construction is not exact calibration even
+    // when every Gaussian margin probability were exact.
     let c = N_CLASS;
     let mut bound = vec![0.0f64; N_TEST];
     for i in 0..N_TEST {
@@ -164,7 +215,7 @@ fn main() {
     }
 
     // Monte-Carlo misclassification rate per input.
-    let mut mc = vec![0.0f64; N_TEST];
+    let mut mc_errors = vec![0usize; N_TEST];
     for _ in 0..MC_SAMPLES {
         let noise = Tensor::<Nd, 2>::random(
             [N_TEST, D_IN],
@@ -188,13 +239,14 @@ fn main() {
                 .unwrap()
                 .0;
             if pred != yte[i] as usize {
-                mc[i] += 1.0;
+                mc_errors[i] += 1;
             }
         }
     }
-    for v in mc.iter_mut() {
-        *v /= MC_SAMPLES as f64;
-    }
+    let mc: Vec<f64> = mc_errors
+        .iter()
+        .map(|errors| *errors as f64 / MC_SAMPLES as f64)
+        .collect();
 
     let mean_bound = bound.iter().sum::<f64>() / N_TEST as f64;
     let mean_mc = mc.iter().sum::<f64>() / N_TEST as f64;
@@ -205,6 +257,57 @@ fn main() {
     println!("  mean MC estimate       = {mean_mc:.4}  ({MC_SAMPLES} samples per input)");
     println!("  mean absolute difference from MC = {mean_abs_error:.4}");
     println!("  The comparison includes Monte Carlo sampling error.");
+
+    let mut bins = (0..RISK_BIN_UPPER.len())
+        .map(|_| RiskBinSummary::default())
+        .collect::<Vec<_>>();
+    for (&risk, &errors) in bound.iter().zip(&mc_errors) {
+        let summary = &mut bins[risk_bin_index(risk)];
+        summary.count += 1;
+        summary.predicted_sum += risk;
+        summary.mc_errors += errors;
+        summary.input_error_counts.push(errors);
+    }
+    println!("\nfixed risk bins (known labels are evaluation-only):");
+    println!(
+        "  {:>11} {:>6} {:>12} {:>12} {:>10}",
+        "predicted", "count", "mean risk", "MC error", "fixed MC SE"
+    );
+    let mut lower = 0.0;
+    for (index, summary) in bins.iter().enumerate() {
+        let upper = RISK_BIN_UPPER[index];
+        let closing = if index + 1 == RISK_BIN_UPPER.len() {
+            "]"
+        } else {
+            ")"
+        };
+        if summary.count == 0 {
+            println!(
+                "  [{lower:.2}, {upper:.2}{closing} {:>6} {:>12} {:>12} {:>10}",
+                0, "n/a", "n/a", "n/a"
+            );
+        } else {
+            let trials = summary.count * MC_SAMPLES;
+            let predicted = summary.predicted_sum / summary.count as f64;
+            let sampled = summary.mc_errors as f64 / trials as f64;
+            assert_eq!(summary.input_error_counts.len(), summary.count);
+            let mc_se = fixed_input_mc_standard_error(&summary.input_error_counts, MC_SAMPLES);
+            println!(
+                "  [{lower:.2}, {upper:.2}{closing} {:>6} {predicted:>12.4} {sampled:>12.4} {mc_se:>10.4}",
+                summary.count
+            );
+        }
+        lower = upper;
+    }
+    println!(
+        "  Fixed MC SE estimates repeated-draw uncertainty at these input centers; it excludes dataset and model uncertainty."
+    );
+    println!(
+        "  It is not a confidence bound and can be zero when observed per-input errors are all zero or one."
+    );
+    println!(
+        "  Summed margin events can overlap, so these rows are not an exact calibration check."
+    );
 }
 
 #[cfg(test)]
@@ -249,5 +352,32 @@ mod tests {
     #[should_panic(expected = "materially negative")]
     fn rejects_materially_negative_margin_variance() {
         gaussian_margin_loss_probability(0.0, [0.0, 0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn fixed_risk_bins_cover_the_unit_interval() {
+        assert_eq!(risk_bin_index(0.0), 0);
+        assert_eq!(risk_bin_index(0.02), 1);
+        assert_eq!(risk_bin_index(0.20), RISK_BIN_UPPER.len() - 1);
+        assert_eq!(risk_bin_index(1.0), RISK_BIN_UPPER.len() - 1);
+    }
+
+    #[test]
+    fn fixed_input_mc_uncertainty_drops_between_input_variation() {
+        // Fixed inputs with deterministic but different error probabilities
+        // have no repeated-draw uncertainty. A pooled Bernoulli calculation
+        // would incorrectly report a nonzero value here.
+        assert_eq!(fixed_input_mc_standard_error(&[0, 4], 4), 0.0);
+    }
+
+    #[test]
+    fn fixed_input_mc_uncertainty_matches_indicator_sample_variances() {
+        let indicators = [[true, false, false, false], [true, true, false, false]];
+        let counts = indicators.map(|draws| draws.into_iter().filter(|error| *error).count());
+        // The two per-input sample variances are 1/4 and 1/3. Dividing each
+        // by four draws and averaging two independent input rates gives 7/192.
+        assert!(
+            (fixed_input_mc_standard_error(&counts, 4) - (7.0f64 / 192.0).sqrt()).abs() < 1e-12
+        );
     }
 }

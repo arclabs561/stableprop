@@ -8,10 +8,11 @@
 //!
 //! This demo trains an MLP regressor, then on a test set with known input noise
 //! compares stableprop's analytic (mean, std) against K-sample Monte Carlo:
-//! agreement of the error bars, and the fraction of Monte-Carlo output draws
-//! inside a symmetric 95% Gaussian-reference interval. That fraction checks the
-//! propagated distribution; it is not calibrated predictive coverage for noisy
-//! observed targets.
+//! mean and error-bar agreement, with Monte-Carlo mean uncertainty shown for
+//! scale, and the fraction of Monte-Carlo output draws inside a symmetric 95%
+//! Gaussian-reference interval. That fraction checks the propagated
+//! distribution; it is not calibrated predictive coverage for noisy observed
+//! targets.
 //!
 //! Run: `cargo run --release --example regression_intervals --features burn`
 
@@ -110,6 +111,11 @@ impl RunningMoments {
     fn sample_variance(self) -> Option<f64> {
         (self.count >= 2).then(|| self.m2 / (self.count - 1) as f64)
     }
+
+    fn standard_error_of_mean(self) -> Option<f64> {
+        self.sample_variance()
+            .map(|variance| (variance / self.count as f64).sqrt())
+    }
 }
 
 fn main() {
@@ -200,10 +206,14 @@ fn main() {
             total += 1;
         }
     }
-    let mc_std: Vec<f64> = mc_moments
-        .into_iter()
-        .map(|moments| moments.sample_variance().unwrap().sqrt())
-        .collect();
+    let mut mc_mean = Vec::with_capacity(N_TEST);
+    let mut mc_std = Vec::with_capacity(N_TEST);
+    let mut mc_mean_se = Vec::with_capacity(N_TEST);
+    for moments in mc_moments {
+        mc_mean.push(moments.mean);
+        mc_std.push(moments.sample_variance().unwrap().sqrt());
+        mc_mean_se.push(moments.standard_error_of_mean().unwrap());
+    }
 
     let r = pearson(&mp_std, &mc_std);
     let ratios: Vec<f64> = mp_std
@@ -214,6 +224,25 @@ fn main() {
         .collect();
     let mean_ratio = (!ratios.is_empty()).then(|| ratios.iter().sum::<f64>() / ratios.len() as f64);
     let coverage = within as f64 / total as f64;
+    let mean_abs_error = mp_mean
+        .iter()
+        .map(|mean| f64::from(*mean))
+        .zip(&mc_mean)
+        .map(|(propagated, sampled)| (propagated - sampled).abs())
+        .sum::<f64>()
+        / N_TEST as f64;
+    let mean_rms_error = (mp_mean
+        .iter()
+        .map(|mean| f64::from(*mean))
+        .zip(&mc_mean)
+        .map(|(propagated, sampled)| (propagated - sampled).powi(2))
+        .sum::<f64>()
+        / N_TEST as f64)
+        .sqrt();
+    let mc_mean_se_rms =
+        (mc_mean_se.iter().map(|se| se.powi(2)).sum::<f64>() / N_TEST as f64).sqrt();
+    let mc_output_std_rms =
+        (mc_std.iter().map(|std| std.powi(2)).sum::<f64>() / N_TEST as f64).sqrt();
 
     println!("sampling-free error bars vs {MC_SAMPLES}-sample Monte Carlo:");
     match r {
@@ -229,8 +258,14 @@ fn main() {
             ratios.len(),
             N_TEST,
         ),
-        None => println!("  std mean ratio (mp / MC)  = undefined (no outputs with MC std > 1e-6; 0 of {N_TEST} included)"),
+        None => println!(
+            "  std mean ratio (mp / MC)  = undefined (no outputs with MC std > 1e-6; 0 of {N_TEST} included)"
+        ),
     }
+    println!("  mean absolute difference    = {mean_abs_error:.5}   (propagated mean vs MC mean)");
+    println!(
+        "  mean RMS difference         = {mean_rms_error:.5}   (MC mean SE RMS {mc_mean_se_rms:.5}; MC output std RMS {mc_output_std_rms:.5})"
+    );
     println!(
         "  MC output-draw coverage    = {coverage:.3}   (95% Gaussian reference; not a coverage guarantee)"
     );
@@ -256,6 +291,8 @@ mod tests {
         for value in [1_000_000.0f32, 1_000_001.0, 1_000_002.0, 1_000_003.0] {
             moments.push(value as f64);
         }
+        assert!((moments.mean - 1_000_001.5).abs() < 1e-12);
         assert!((moments.sample_variance().unwrap() - 5.0 / 3.0).abs() < 1e-12);
+        assert!((moments.standard_error_of_mean().unwrap() - (5.0 / 12.0f64).sqrt()).abs() < 1e-12);
     }
 }

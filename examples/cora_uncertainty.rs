@@ -11,6 +11,9 @@
 //! Provide a directory containing raw `cora.content` and `cora.cites` files. Run:
 //! `cargo run --release --example cora_uncertainty --features burn`
 //! (optionally pass a path to a dir holding `cora.content` + `cora.cites`).
+//! Append `-- --quick` for a short workflow smoke check. It reduces training
+//! epochs and Monte Carlo draws, but does not make this dense graph example
+//! memory-efficient or provide study evidence.
 
 #![allow(clippy::needless_range_loop)]
 
@@ -34,8 +37,72 @@ use stableprop::burn_sdp::{
 
 const HIDDEN: usize = 16;
 const INPUT_STD: f64 = 0.1;
-const MC_SAMPLES: usize = 200;
+const STUDY_EPOCHS: usize = 200;
+const STUDY_MC_SAMPLES: usize = 200;
+const STUDY_SEED: u64 = 0xC0A0_0001;
+const QUICK_EPOCHS: usize = 20;
+const QUICK_MC_SAMPLES: usize = 8;
 const FISHER_PRIOR_PREC: f64 = 1e-2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RunConfig {
+    epochs: usize,
+    mc_samples: usize,
+    seed: u64,
+    quick: bool,
+}
+
+impl RunConfig {
+    fn study() -> Self {
+        Self {
+            epochs: STUDY_EPOCHS,
+            mc_samples: STUDY_MC_SAMPLES,
+            seed: STUDY_SEED,
+            quick: false,
+        }
+    }
+    fn quick() -> Self {
+        Self {
+            epochs: QUICK_EPOCHS,
+            mc_samples: QUICK_MC_SAMPLES,
+            quick: true,
+            ..Self::study()
+        }
+    }
+}
+
+struct Cli {
+    dir: Option<PathBuf>,
+    config: RunConfig,
+}
+
+fn usage() -> &'static str {
+    "usage: cora_uncertainty [--quick] [CORA_DIR]"
+}
+
+fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Cli, String> {
+    let mut dir = None;
+    let mut quick = false;
+    for arg in args {
+        match arg.as_str() {
+            "--quick" if !quick => quick = true,
+            "--quick" => return Err("--quick was supplied more than once".into()),
+            _ if arg.starts_with('-') => {
+                return Err(format!("unknown argument `{arg}`; {}", usage()))
+            }
+            _ if dir.is_none() => dir = Some(PathBuf::from(arg)),
+            _ => return Err(format!("expected at most one Cora directory; {}", usage())),
+        }
+    }
+    Ok(Cli {
+        dir,
+        config: if quick {
+            RunConfig::quick()
+        } else {
+            RunConfig::study()
+        },
+    })
+}
 
 struct Graph {
     n: usize,
@@ -373,11 +440,12 @@ fn center_logits(logits: &mut [f64], c: usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        center_logits, centered_linear_variance, load_planetoid, remap_known_labels, spearman,
-        Moments,
+        center_logits, centered_linear_variance, load_planetoid, parse_args, remap_known_labels,
+        spearman, Moments, QUICK_EPOCHS, QUICK_MC_SAMPLES, STUDY_EPOCHS, STUDY_MC_SAMPLES,
     };
     use burn::tensor::{Device, Tensor, TensorData};
     use burn_ndarray::NdArray;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -390,6 +458,23 @@ mod tests {
     #[test]
     fn known_class_labels_close_the_held_out_gap() {
         assert_eq!(remap_known_labels(&[0, 1, 2, 3], 1, 4), vec![0, 0, 1, 2]);
+    }
+
+    #[test]
+    fn quick_preset_is_explicit_and_parser_rejects_ambiguous_inputs() {
+        let cli = parse_args(["--quick".to_string(), "fixture/cora".to_string()]).unwrap();
+        assert!(cli.config.quick);
+        assert_eq!(cli.config.epochs, QUICK_EPOCHS);
+        assert_eq!(cli.config.mc_samples, QUICK_MC_SAMPLES);
+        assert_eq!(cli.dir.unwrap(), PathBuf::from("fixture/cora"));
+
+        let study = parse_args(Vec::<String>::new()).unwrap();
+        assert!(!study.config.quick);
+        assert_eq!(study.config.epochs, STUDY_EPOCHS);
+        assert_eq!(study.config.mc_samples, STUDY_MC_SAMPLES);
+        assert!(parse_args(["--unknown".to_string()]).is_err());
+        assert!(parse_args(["--quick".to_string(), "--quick".to_string()]).is_err());
+        assert!(parse_args(["one".to_string(), "two".to_string()]).is_err());
     }
 
     #[test]
@@ -599,8 +684,13 @@ fn epistemic_centered_logit_variance<B: AutodiffBackend>(
     (0..n).map(|i| v[i] as f64).collect()
 }
 
-fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) -> std::io::Result<()> {
-    <B as Backend>::seed(&device, 0xC0A0_0001);
+fn run<B: AutodiffBackend>(
+    device: B::Device,
+    dir: &Path,
+    name: &str,
+    config: RunConfig,
+) -> std::io::Result<()> {
+    <B as Backend>::seed(&device, config.seed);
     let g = load_planetoid(dir, name)?;
     let (train_idx, test_idx) = split(&g.labels, g.n_classes);
     println!(
@@ -629,8 +719,8 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) -> std::io
     let mut optim = AdamConfig::new()
         .with_weight_decay(Some(WeightDecayConfig::new(5e-4)))
         .init();
-    println!("training 2-layer GCN (200 epochs)...");
-    for epoch in 1..=200 {
+    println!("training 2-layer GCN ({} epochs)...", config.epochs);
+    for epoch in 1..=config.epochs {
         let logits = model.forward(x.clone(), adj.clone());
         let train_logits = logits.select(0, train_sel.clone());
         let train_targets = targets.clone().select(0, train_sel.clone());
@@ -659,7 +749,7 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) -> std::io
     let len = g.n * g.n_classes;
     let mut acc_mean = vec![0.0f64; len];
     let mut acc_sq = vec![0.0f64; len];
-    for _ in 0..MC_SAMPLES {
+    for _ in 0..config.mc_samples {
         let noise = Tensor::<B, 2>::random(
             [g.n, g.n_features],
             burn::tensor::Distribution::Normal(0.0, INPUT_STD),
@@ -679,7 +769,7 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) -> std::io
             acc_sq[i] += yk[i].powi(2);
         }
     }
-    let kf = MC_SAMPLES as f64;
+    let kf = config.mc_samples as f64;
     let mc_node_var: Vec<f64> = (0..g.n)
         .map(|node| {
             (0..g.n_classes)
@@ -728,8 +818,9 @@ fn run<B: AutodiffBackend>(device: B::Device, dir: &Path, name: &str) -> std::io
         auroc(&u_epi, &errors)
     );
     println!(
-        "  MC centered-logit input-noise AUROC = {:.4}  ({MC_SAMPLES} samples)",
-        auroc(&u_mc, &errors)
+        "  MC centered-logit input-noise AUROC = {:.4}  ({} samples)",
+        auroc(&u_mc, &errors),
+        config.mc_samples,
     );
     println!("  (0.5 = uninformative, 1.0 = flags every wrong prediction)");
 
@@ -757,8 +848,9 @@ fn ood_eval<B: AutodiffBackend>(
     dir: &Path,
     name: &str,
     held_out: i32,
+    config: RunConfig,
 ) -> std::io::Result<()> {
-    <B as Backend>::seed(&device, 0xC0A0_0002);
+    <B as Backend>::seed(&device, config.seed ^ 0x0000_0003);
     let g = load_planetoid(dir, name)?;
     if g.n_classes < 2 || !(0..g.n_classes as i32).contains(&held_out) {
         return Err(std::io::Error::new(
@@ -813,7 +905,7 @@ fn ood_eval<B: AutodiffBackend>(
     let mut optim = AdamConfig::new()
         .with_weight_decay(Some(WeightDecayConfig::new(5e-4)))
         .init();
-    for _ in 1..=200 {
+    for _ in 1..=config.epochs {
         let logits = model.forward(x.clone(), adj.clone());
         let tl = logits.select(0, train_sel.clone());
         let tt = targets.clone().select(0, train_sel.clone());
@@ -869,8 +961,15 @@ fn ood_eval<B: AutodiffBackend>(
 }
 
 fn main() -> ExitCode {
-    let (dir, explicit_dir): (PathBuf, bool) = match std::env::args().nth(1) {
-        Some(p) => (PathBuf::from(p), true),
+    let cli = match parse_args(std::env::args().skip(1)) {
+        Ok(cli) => cli,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (dir, explicit_dir): (PathBuf, bool) = match cli.dir {
+        Some(path) => (path, true),
         None => match std::env::var_os("STABLEPROP_CORA_DIR") {
             Some(p) => (PathBuf::from(p), true),
             None => (
@@ -890,11 +989,25 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         };
     }
-    if let Err(err) = run::<Autodiff<NdArray<f32>>>(Default::default(), &dir, "cora") {
+    let mode = if cli.config.quick {
+        "quick workflow check"
+    } else {
+        "study"
+    };
+    println!(
+        "run: {mode}; epochs {}; MC draws {}; seed {:#x}",
+        cli.config.epochs, cli.config.mc_samples, cli.config.seed
+    );
+    if cli.config.quick {
+        println!("quick mode is a smoke/workflow check, not study evidence; dense graph memory is unchanged.");
+    }
+    if let Err(err) = run::<Autodiff<NdArray<f32>>>(Default::default(), &dir, "cora", cli.config) {
         eprintln!("could not run Cora evaluation: {err}");
         return ExitCode::FAILURE;
     }
-    if let Err(err) = ood_eval::<Autodiff<NdArray<f32>>>(Default::default(), &dir, "cora", 0) {
+    if let Err(err) =
+        ood_eval::<Autodiff<NdArray<f32>>>(Default::default(), &dir, "cora", 0, cli.config)
+    {
         eprintln!("could not run Cora transductive novel-class evaluation: {err}");
         return ExitCode::FAILURE;
     }

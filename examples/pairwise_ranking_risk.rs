@@ -7,11 +7,15 @@
 //! query fraction. Reference, held-out, and sampled-policy draws are independent.
 //!
 //! Run: `cargo run --release --example pairwise_ranking_risk --features burn`
-//! Add `-- --study` for 30 fixtures and larger Monte Carlo budgets.
+//! Add `-- --study` for 30 fixed-model fixtures and larger Monte Carlo budgets.
+//! Add `-- --generalize` for independently generated, untrained networks and
+//! candidate/query fixtures; `-- --generalize --quick` is a three-model
+//! descriptive workflow check.
 
 use burn::tensor::{Device, Tensor, TensorData};
 use burn_ndarray::NdArray;
 use stableprop::burn_sdp::{propagate_linear_full, propagate_relu_full, MomentsFull};
+use std::time::Instant;
 
 type Nd = NdArray<f32>;
 const D: usize = 2;
@@ -44,6 +48,21 @@ const STUDY: Config = Config {
     heldout: 256,
     sampled: 128,
 };
+const GENERALIZE: Config = Config {
+    reps: 3,
+    reference: 4096,
+    heldout: 192,
+    sampled: 96,
+};
+const GENERALIZE_QUICK: Config = Config {
+    reps: 1,
+    reference: 1024,
+    heldout: 64,
+    sampled: 32,
+};
+const GENERALIZE_MODELS: usize = 30;
+const GENERALIZE_QUICK_MODELS: usize = 3;
+const GENERALIZE_STDS: [f64; 3] = [0.15, 0.30, 0.45];
 
 /// Host RNG keeps all evaluation streams independent of Burn's RNG.
 struct Rng(u64);
@@ -313,6 +332,198 @@ fn local_probability(
     out
 }
 
+/// A generated fixture has the same small architecture as the walkthrough,
+/// but its weights, candidates and query locations are independently seeded.
+/// These are untrained random networks: the study measures propagation
+/// sensitivity under the stated feature-noise laws, not learned ranking value.
+#[derive(Clone)]
+struct Model {
+    w: [[f64; H]; D],
+    b: [f64; H],
+    e: [[f64; C]; H],
+}
+
+fn generated_model(fixture: usize) -> Model {
+    let mut rng = Rng::new(stream_seed(20, fixture));
+    let mut model = Model {
+        w: [[0.0; H]; D],
+        b: [0.0; H],
+        e: [[0.0; C]; H],
+    };
+    for row in &mut model.w {
+        for value in row {
+            *value = 0.75 * rng.normal();
+        }
+    }
+    for value in &mut model.b {
+        *value = 0.20 * rng.normal();
+    }
+    for row in &mut model.e {
+        for value in row {
+            *value = 0.75 * rng.normal();
+        }
+    }
+    model
+}
+
+fn model_scores(model: &Model, x: [f64; D], relu: bool) -> [f64; C] {
+    let mut hidden = [0.0; H];
+    for (j, value) in hidden.iter_mut().enumerate() {
+        *value = model.b[j] + (0..D).map(|d| x[d] * model.w[d][j]).sum::<f64>();
+        if relu {
+            *value = value.max(0.0);
+        }
+    }
+    std::array::from_fn(|c| (0..H).map(|j| hidden[j] * model.e[j][c]).sum())
+}
+
+fn generated_queries(fixture: usize, set: usize) -> Vec<[f64; D]> {
+    let mut rng = Rng::new(stream_seed(21 + set as u32, fixture));
+    (0..Q)
+        .map(|i| {
+            let t = (i as f64 + 0.5) / Q as f64;
+            [
+                2.4 * t - 1.2 + 0.20 * rng.normal(),
+                (7.0 * t - 3.5).sin() + 0.20 * rng.normal(),
+            ]
+        })
+        .collect()
+}
+
+fn sampled_rates_model(
+    model: &Model,
+    query: &[[f64; D]],
+    relu: bool,
+    std: f64,
+    draws: usize,
+    seed: u64,
+) -> Vec<f64> {
+    let point: Vec<_> = query
+        .iter()
+        .map(|&x| winner(model_scores(model, x, relu)).0)
+        .collect();
+    let mut count = vec![0usize; Q];
+    let mut rng = Rng::new(seed);
+    for _ in 0..draws {
+        for (i, &x) in query.iter().enumerate() {
+            let noisy = [x[0] + std * rng.normal(), x[1] + std * rng.normal()];
+            count[i] += usize::from(winner(model_scores(model, noisy, relu)).0 != point[i]);
+        }
+    }
+    count.into_iter().map(|n| n as f64 / draws as f64).collect()
+}
+
+fn moment_probabilities_model(
+    model: &Model,
+    query: &[[f64; D]],
+    relu: bool,
+    std: f64,
+    dev: &Device<Nd>,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    let x = tensor2(
+        query
+            .iter()
+            .flat_map(|v| v.iter().map(|&v| v as f32))
+            .collect(),
+        [Q, D],
+        dev,
+    );
+    let w = tensor2(
+        model.w.iter().flatten().map(|&v| v as f32).collect(),
+        [D, H],
+        dev,
+    );
+    let b = tensor1(model.b.iter().map(|&v| v as f32).collect(), dev);
+    let e = tensor2(
+        model.e.iter().flatten().map(|&v| v as f32).collect(),
+        [H, C],
+        dev,
+    );
+    let input = MomentsFull::from_diagonal(x, Tensor::<Nd, 2>::full([Q, D], std * std, dev));
+    let hidden = propagate_linear_full(&input, w, Some(b));
+    let output = if relu {
+        propagate_linear_full(&propagate_relu_full(&hidden), e, None)
+    } else {
+        propagate_linear_full(&hidden, e, None)
+    };
+    let mean: Vec<f64> = output
+        .mean
+        .to_data()
+        .to_vec::<f32>()
+        .unwrap()
+        .into_iter()
+        .map(f64::from)
+        .collect();
+    let cov: Vec<f64> = output
+        .cov
+        .to_data()
+        .to_vec::<f32>()
+        .unwrap()
+        .into_iter()
+        .map(f64::from)
+        .collect();
+    validate_score_covariance(&cov);
+    let point: Vec<_> = query
+        .iter()
+        .map(|&x| winner(model_scores(model, x, relu)))
+        .collect();
+    let winners: Vec<_> = point.iter().map(|point| point.0).collect();
+    let rank_only: Vec<_> = point.iter().map(|point| -point.1.abs()).collect();
+    let full = margin_probability(&mean, &cov, &winners, false, dev);
+    let dropped = margin_probability(&mean, &cov, &winners, true, dev);
+    let local = local_probability_model(model, query, &winners, relu, std, dev);
+    for (name, probability) in [
+        ("full-covariance", &full),
+        ("dropped-covariance", &dropped),
+        ("local-Jacobian", &local),
+    ] {
+        validate_probability(name, probability);
+    }
+    (full, dropped, local, rank_only)
+}
+
+fn local_probability_model(
+    model: &Model,
+    query: &[[f64; D]],
+    winners: &[usize],
+    relu: bool,
+    std: f64,
+    dev: &Device<Nd>,
+) -> Vec<f64> {
+    let mut out = vec![0.0; Q];
+    let mut ix = Vec::new();
+    let mut z = Vec::with_capacity(Q);
+    for (i, (&x, &w)) in query.iter().zip(winners).enumerate() {
+        let (point_winner, margin) = winner(model_scores(model, x, relu));
+        assert_eq!(
+            w, point_winner,
+            "point winner changed during local propagation"
+        );
+        let l = 1 - w;
+        let mut variance = 0.0;
+        for weight_row in &model.w {
+            let mut derivative = 0.0;
+            for (h, &weight) in weight_row.iter().enumerate() {
+                let pre = model.b[h] + (0..D).map(|j| x[j] * model.w[j][h]).sum::<f64>();
+                derivative += weight
+                    * if relu && pre <= 0.0 { 0.0 } else { 1.0 }
+                    * (model.e[h][w] - model.e[h][l]);
+            }
+            variance += std * std * derivative * derivative;
+        }
+        if variance <= 0.0 {
+            out[i] = deterministic_flip_probability(w, margin);
+        } else {
+            ix.push(i);
+            z.push((-margin / variance.sqrt()) as f32);
+        }
+    }
+    for (i, probability) in ix.into_iter().zip(cdf(z, dev)) {
+        out[i] = probability;
+    }
+    out
+}
+
 fn mae(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum::<f64>() / Q as f64
 }
@@ -400,16 +611,315 @@ fn report(name: &str, row: &Rows) {
     }
 }
 
+fn report_generalized(name: &str, row: &Rows, uncertainty: bool) {
+    let show = |values: &[f64]| {
+        let (mean, se) = mean_se(values);
+        if uncertainty {
+            format!("{mean:.4} ± {se:.4}")
+        } else {
+            format!("{mean:.4}")
+        }
+    };
+    let mae: Vec<_> = row.mae.iter().flatten().copied().collect();
+    let brier: Vec<_> = row.brier.iter().flatten().copied().collect();
+    println!(
+        "  {name:<25} {:>15} {:>18}",
+        if mae.is_empty() {
+            "rank only".into()
+        } else {
+            show(&mae)
+        },
+        if brier.is_empty() {
+            "not probabilistic".into()
+        } else {
+            show(&brier)
+        }
+    );
+    for (i, &rate) in DEFER.iter().enumerate() {
+        println!(
+            "    defer {}/{} ({:.1}%): retained {}; avoided/defer {}",
+            deferred_count(rate),
+            Q,
+            100.0 * deferred_count(rate) as f64 / Q as f64,
+            show(&row.retained[i]),
+            show(&row.avoided[i])
+        );
+    }
+}
+
+fn report_contrast(name: &str, full: &Rows, other: &Rows, uncertainty: bool) {
+    let difference = |left: &[f64], right: &[f64]| -> Vec<f64> {
+        left.iter().zip(right).map(|(a, b)| a - b).collect()
+    };
+    let show = |values: Vec<f64>| {
+        let (mean, se) = mean_se(&values);
+        if uncertainty {
+            format!("{mean:+.4} ± {se:.4}")
+        } else {
+            format!("{mean:+.4}")
+        }
+    };
+    let full_mae: Vec<_> = full.mae.iter().flatten().copied().collect();
+    let other_mae: Vec<_> = other.mae.iter().flatten().copied().collect();
+    let full_brier: Vec<_> = full.brier.iter().flatten().copied().collect();
+    let other_brier: Vec<_> = other.brier.iter().flatten().copied().collect();
+    let mae = if full_mae.is_empty() || other_mae.is_empty() {
+        "n/a".into()
+    } else {
+        show(difference(&full_mae, &other_mae))
+    };
+    let brier = if full_brier.is_empty() || other_brier.is_empty() {
+        "n/a".into()
+    } else {
+        show(difference(&full_brier, &other_brier))
+    };
+    let primary = 1;
+    println!("  full minus {name:<20} MAE {mae:>14}; Brier {brier:>14}; retained {:+.4}{}; avoided {:+.4}{}",
+        mean_se(&difference(&full.retained[primary], &other.retained[primary])).0,
+        if uncertainty { format!(" ± {:.4}", mean_se(&difference(&full.retained[primary], &other.retained[primary])).1) } else { String::new() },
+        mean_se(&difference(&full.avoided[primary], &other.avoided[primary])).0,
+        if uncertainty { format!(" ± {:.4}", mean_se(&difference(&full.avoided[primary], &other.avoided[primary])).1) } else { String::new() },
+    );
+}
+
+fn append_fixture_mean(destination: &mut Rows, source: &Rows) {
+    destination
+        .mae
+        .push(if source.mae.iter().all(Option::is_none) {
+            None
+        } else {
+            Some(mean_se(&source.mae.iter().flatten().copied().collect::<Vec<_>>()).0)
+        });
+    destination
+        .brier
+        .push(if source.brier.iter().all(Option::is_none) {
+            None
+        } else {
+            Some(mean_se(&source.brier.iter().flatten().copied().collect::<Vec<_>>()).0)
+        });
+    for i in 0..DEFER.len() {
+        destination.retained[i].push(mean_se(&source.retained[i]).0);
+        destination.avoided[i].push(mean_se(&source.avoided[i]).0);
+    }
+}
+
+fn report_regime_policy_contrasts(rows: &[Rows; 5], std: f64, uncertainty: bool) {
+    let difference = |left: &[f64], right: &[f64]| -> (f64, f64) {
+        mean_se(
+            &left
+                .iter()
+                .zip(right)
+                .map(|(a, b)| a - b)
+                .collect::<Vec<_>>(),
+        )
+    };
+    println!("  std {std:.2}:");
+    for (name, other) in [
+        "dropped covariance",
+        "local Jacobian",
+        "sampled score",
+        "point margin",
+    ]
+    .iter()
+    .zip(rows.iter().skip(1))
+    {
+        let (retained, retained_se) = difference(&rows[0].retained[1], &other.retained[1]);
+        let (avoided, avoided_se) = difference(&rows[0].avoided[1], &other.avoided[1]);
+        if uncertainty {
+            println!("    full minus {name:<20}: retained {retained:+.4} ± {retained_se:.4}; avoided {avoided:+.4} ± {avoided_se:.4}");
+        } else {
+            println!("    full minus {name:<20}: retained {retained:+.4}; avoided {avoided:+.4}");
+        }
+    }
+}
+
+fn generalization_study(config: Config, models: usize, quick: bool, dev: &Device<Nd>) {
+    let started = Instant::now();
+    let mut rows: [Rows; 5] = std::array::from_fn(|_| Rows::default());
+    let mut rows_by_regime: Vec<[Rows; 5]> = (0..GENERALIZE_STDS.len())
+        .map(|_| std::array::from_fn(|_| Rows::default()))
+        .collect();
+    let mut affine_error = Vec::new();
+    for fixture in 0..models {
+        let model = generated_model(fixture);
+        let mut within: [Rows; 5] = std::array::from_fn(|_| Rows::default());
+        let mut within_by_regime: Vec<[Rows; 5]> = (0..GENERALIZE_STDS.len())
+            .map(|_| std::array::from_fn(|_| Rows::default()))
+            .collect();
+        for set in 0..config.reps {
+            let query = generated_queries(fixture, set);
+            for (regime, &std) in GENERALIZE_STDS.iter().enumerate() {
+                let (full, dropped, local, margin) =
+                    moment_probabilities_model(&model, &query, true, std, dev);
+                let role = 30 + (set * GENERALIZE_STDS.len() + regime) as u32 * 3;
+                let reference = sampled_rates_model(
+                    &model,
+                    &query,
+                    true,
+                    std,
+                    config.reference,
+                    stream_seed(role, fixture),
+                );
+                let heldout = sampled_rates_model(
+                    &model,
+                    &query,
+                    true,
+                    std,
+                    config.heldout,
+                    stream_seed(role + 1, fixture),
+                );
+                let sampled = sampled_rates_model(
+                    &model,
+                    &query,
+                    true,
+                    std,
+                    config.sampled,
+                    stream_seed(role + 2, fixture),
+                );
+                for (name, probability) in [
+                    ("reference", &reference),
+                    ("held-out", &heldout),
+                    ("sampled", &sampled),
+                ] {
+                    validate_probability(name, probability);
+                }
+                for (index, (probability, probabilistic)) in [
+                    (full, true),
+                    (dropped, true),
+                    (local, true),
+                    (sampled, true),
+                    (margin, false),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let (retained, avoided) = policy(&probability, &heldout);
+                    within[index]
+                        .mae
+                        .push(probabilistic.then(|| mae(&probability, &reference)));
+                    within[index]
+                        .brier
+                        .push(probabilistic.then(|| brier(&probability, &heldout)));
+                    for i in 0..DEFER.len() {
+                        within[index].retained[i].push(retained[i]);
+                        within[index].avoided[i].push(avoided[i]);
+                        within_by_regime[regime][index].retained[i].push(retained[i]);
+                        within_by_regime[regime][index].avoided[i].push(avoided[i]);
+                    }
+                    within_by_regime[regime][index]
+                        .mae
+                        .push(probabilistic.then(|| mae(&probability, &reference)));
+                    within_by_regime[regime][index]
+                        .brier
+                        .push(probabilistic.then(|| brier(&probability, &heldout)));
+                }
+            }
+        }
+        // This affine control is meaningful for each independently generated
+        // model: full propagation and its local Jacobian must agree exactly.
+        let query = generated_queries(fixture, 0);
+        let (affine_full, _, affine_local, _) =
+            moment_probabilities_model(&model, &query, false, GENERALIZE_STDS[1], dev);
+        let max_difference = affine_full
+            .iter()
+            .zip(affine_local)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            max_difference <= AFFINE_AGREEMENT_TOLERANCE,
+            "generated affine full/local probabilities disagree by {max_difference}"
+        );
+        affine_error.push(max_difference);
+        for (destination, source) in rows.iter_mut().zip(&within) {
+            append_fixture_mean(destination, source);
+        }
+        for (destination_set, source_set) in rows_by_regime.iter_mut().zip(&within_by_regime) {
+            for (destination, source) in destination_set.iter_mut().zip(source_set) {
+                append_fixture_mean(destination, source);
+            }
+        }
+    }
+    println!("pairwise ranking generalization under Gaussian feature noise:");
+    println!("  {models} independently generated untrained model/candidate fixtures; {} query sets/model; std regimes {:?}", config.reps, GENERALIZE_STDS);
+    println!(
+        "  reference {}, held-out {}, sampled-policy {} draws/query; all streams are independent",
+        config.reference, config.heldout, config.sampled
+    );
+    println!("  each displayed model-fixture value is an equal-weight average over the three fixed noise regimes and nested query sets; the 25% budget is primary and 10% is secondary");
+    println!(
+        "  {:<25} {:>15} {:>18}",
+        "policy", "probability MAE", "Brier"
+    );
+    for (name, row) in [
+        "full score covariance",
+        "dropped score covariance",
+        "local Jacobian",
+        "sampled score",
+        "point margin rank",
+    ]
+    .iter()
+    .zip(&rows)
+    {
+        report_generalized(name, row, !quick);
+    }
+    println!("\nper-regime paired policy contrasts at the primary 25% deferral budget (full minus comparator):");
+    for (std, regime_rows) in GENERALIZE_STDS.iter().zip(&rows_by_regime) {
+        report_regime_policy_contrasts(regime_rows, *std, !quick);
+    }
+    println!("\npaired contrasts at the model-fixture unit, 25% deferral (full minus comparator):");
+    for (name, row) in [
+        "dropped covariance",
+        "local Jacobian",
+        "sampled score",
+        "point margin",
+    ]
+    .iter()
+    .zip(rows.iter().skip(1))
+    {
+        report_contrast(name, &rows[0], row, !quick);
+    }
+    let (affine_mean, affine_se) = mean_se(&affine_error);
+    if quick {
+        println!("\naffine control: mean per-model maximum full/local difference {affine_mean:.2e} (descriptive quick run)");
+    } else {
+        println!("\naffine control: mean per-model maximum full/local difference {affine_mean:.2e} ± {affine_se:.2e} (SE across model fixtures)");
+    }
+    println!("MC reference and held-out draws still add finite-sampling error; model-fixture SEs do not isolate it. These untrained generated networks establish only synthetic input-noise sensitivity, not trained-model ranking performance.");
+    let elapsed = started.elapsed();
+    println!("end-to-end wall time {:.2}s ({:.2}s/model): fixture generation, analytic propagation, and all MC streams are included; compilation is excluded, so this is workload context rather than a per-method speed comparison.", elapsed.as_secs_f64(), elapsed.as_secs_f64() / models as f64);
+}
+
 fn main() {
     let mut study = false;
+    let mut generalize = false;
+    let mut quick = false;
     for argument in std::env::args().skip(1) {
         match argument.as_str() {
             "--study" => study = true,
-            _ => panic!("unknown argument {argument:?}; expected optional --study"),
+            "--generalize" => generalize = true,
+            "--quick" => quick = true,
+            _ => {
+                panic!("unknown argument {argument:?}; expected --study, --generalize, or --quick")
+            }
         }
     }
+    assert!(!quick || generalize, "--quick requires --generalize");
     let config = if study { STUDY } else { DEFAULT };
     let dev = Device::<Nd>::default();
+    if generalize {
+        assert!(
+            !study,
+            "--study is the fixed-model protocol; --generalize already runs its 30-model study"
+        );
+        let config = if quick { GENERALIZE_QUICK } else { GENERALIZE };
+        let models = if quick {
+            GENERALIZE_QUICK_MODELS
+        } else {
+            GENERALIZE_MODELS
+        };
+        generalization_study(config, models, quick, &dev);
+        return;
+    }
     let mut rows: [Rows; 5] = std::array::from_fn(|_| Rows::default());
     let mut affine_full = Vec::new();
     let mut affine_repeat = Vec::new();
