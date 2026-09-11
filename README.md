@@ -152,6 +152,10 @@ and smoke runs, and benchmark correctness checks. Run `just` to list individual
 recipes, or read the [justfile](justfile)
 for the Cargo commands used by CI.
 
+The API docs include executable recipes for propagation, tensor precision,
+autodiff, and correlated residuals. The [reference generator](scripts/README.md)
+reproduces the Gaussian pair fixtures using independent numerical integration.
+
 Use `just bench` or `just bench-burn` for repeatable CPU measurements; the
 [benchmark guide](benches/README.md) explains fixtures and timing boundaries.
 

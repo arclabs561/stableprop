@@ -4,7 +4,7 @@ use burn::backend::Autodiff;
 use burn::tensor::{DType, Tensor, TensorData};
 use burn_ndarray::NdArray;
 use proptest::prelude::*;
-use stableprop::burn_sdp::{propagate_relu_full, MomentsFull};
+use stableprop::burn_sdp::{propagate_linear_full, propagate_relu_full, MomentsFull};
 
 fn relu_moments_and_omitted_energy(mu: f64, sigma: f64, p: f64) -> (f64, f64, f64) {
     let alpha = mu / sigma;
@@ -60,6 +60,94 @@ fn relu_covariance_correlation_gradient(mean: [f64; 2], std: [f64; 2], rho: f64)
 }
 
 #[derive(Clone, Copy)]
+struct ScalarReluOracle {
+    mean: f64,
+    variance: f64,
+    mean_mu: f64,
+    mean_var: f64,
+    variance_mu: f64,
+    variance_var: f64,
+    coefficients: [f64; 3],
+    coefficient_mu: [f64; 3],
+    coefficient_var: [f64; 3],
+}
+
+fn scalar_relu_oracle(mu: f64, variance: f64, p: f64) -> ScalarReluOracle {
+    let sigma = variance.sqrt();
+    let alpha = mu / sigma;
+    let phi = (-0.5 * alpha * alpha).exp() / (2.0 * std::f64::consts::PI).sqrt();
+    let mean = mu * p + sigma * phi;
+    let raw_second = (mu * mu + variance) * p + mu * sigma * phi;
+    let output_variance = raw_second - mean * mean;
+
+    ScalarReluOracle {
+        mean,
+        variance: output_variance,
+        mean_mu: p,
+        mean_var: phi / (2.0 * sigma),
+        variance_mu: 2.0 * mean * (1.0 - p),
+        variance_var: p - mean * phi / sigma,
+        coefficients: [sigma * p, sigma * phi, -sigma * alpha * phi],
+        coefficient_mu: [phi, -alpha * phi, (alpha * alpha - 1.0) * phi],
+        coefficient_var: [
+            (p - alpha * phi) / (2.0 * sigma),
+            (1.0 + alpha * alpha) * phi / (2.0 * sigma),
+            -alpha.powi(3) * phi / (2.0 * sigma),
+        ],
+    }
+}
+
+#[derive(Clone, Copy)]
+struct K3PairOracle {
+    covariance: f64,
+    covariance_mu: [f64; 2],
+    covariance_var: [f64; 2],
+    covariance_q: f64,
+}
+
+fn k3_pair_oracle(
+    mu: [f64; 2],
+    variance: [f64; 2],
+    q: f64,
+    p: [f64; 2],
+) -> (ScalarReluOracle, ScalarReluOracle, K3PairOracle) {
+    let left = scalar_relu_oracle(mu[0], variance[0], p[0]);
+    let right = scalar_relu_oracle(mu[1], variance[1], p[1]);
+    let sigma_product = (variance[0] * variance[1]).sqrt();
+    let rho = q / sigma_product;
+    let factorial = [1.0, 2.0, 6.0];
+    let mut covariance = 0.0;
+    let mut covariance_mu = [0.0; 2];
+    let mut covariance_var = [0.0; 2];
+    let mut covariance_rho = 0.0;
+
+    for (k, denominator) in factorial.iter().enumerate() {
+        let order = (k + 1) as i32;
+        let factor = rho.powi(order) / denominator;
+        let product = left.coefficients[k] * right.coefficients[k];
+        covariance += factor * product;
+        covariance_mu[0] += factor * left.coefficient_mu[k] * right.coefficients[k];
+        covariance_mu[1] += factor * left.coefficients[k] * right.coefficient_mu[k];
+        covariance_var[0] += factor * left.coefficient_var[k] * right.coefficients[k];
+        covariance_var[1] += factor * left.coefficients[k] * right.coefficient_var[k];
+        covariance_rho += order as f64 * rho.powi(order - 1) * product / denominator;
+    }
+    covariance_var[0] += covariance_rho * -rho / (2.0 * variance[0]);
+    covariance_var[1] += covariance_rho * -rho / (2.0 * variance[1]);
+
+    (
+        left,
+        right,
+        K3PairOracle {
+            covariance,
+            covariance_mu,
+            covariance_var,
+            covariance_q: covariance_rho / sigma_product,
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
 struct NonzeroReluFixture {
     mean: [f64; 2],
     std: [f64; 2],
@@ -78,6 +166,7 @@ struct NonzeroReluFixture {
 // phi(Z) Phi((alpha_r + rho Z) / sqrt(1-rho^2)) over Z > -alpha_l.
 // The fixtures include positive and negative products alpha_l alpha_r, so the
 // third Hermite coefficient has both product signs.
+// Regenerate the Rust literals with: uv run --script scripts/reference_relu.py --format rust
 const NONZERO_RELU_FIXTURES: [NonzeroReluFixture; 8] = [
     NonzeroReluFixture {
         mean: [-0.75, 1.1],
@@ -319,6 +408,140 @@ fn nonzero_mean_covariance_gradient_matches_the_truncated_series() {
                 (actual - exact).abs() <= remainder_bound + 4096.0 * f64::EPSILON,
                 "rho={rho}, exact={exact}, derivative={actual}, bound={remainder_bound}",
             );
+        }
+    }
+}
+
+fn assert_composed_k3_moment_gradients(fixture: NonzeroReluFixture, scales: [f64; 2]) {
+    // Interior, strictly positive-definite fixtures keep every perturbation
+    // coordinate inside the Gaussian model. This validates derivatives of the
+    // implemented K3 approximation, not derivatives of exact pair moments.
+    type Ad = Autodiff<NdArray<f64>>;
+
+    let mean_values = [fixture.mean[0] * scales[0], fixture.mean[1] * scales[1]];
+    let std = [fixture.std[0] * scales[0], fixture.std[1] * scales[1]];
+    let variance = [std[0] * std[0], std[1] * std[1]];
+    let q = fixture.rho * std[0] * std[1];
+    assert!(q * q < variance[0] * variance[1]);
+    let weight_values = [0.7, -1.1];
+    let variance_weight = 0.3;
+    let (left, right, pair) = k3_pair_oracle(mean_values, variance, q, fixture.cdf);
+
+    let expected_mean_gradient = [
+        weight_values[0] * left.mean_mu
+            + variance_weight
+                * (weight_values[0] * weight_values[0] * left.variance_mu
+                    + 2.0 * weight_values[0] * weight_values[1] * pair.covariance_mu[0]),
+        weight_values[1] * right.mean_mu
+            + variance_weight
+                * (weight_values[1] * weight_values[1] * right.variance_mu
+                    + 2.0 * weight_values[0] * weight_values[1] * pair.covariance_mu[1]),
+    ];
+    let expected_variance_gradient = [
+        weight_values[0] * left.mean_var
+            + variance_weight
+                * (weight_values[0] * weight_values[0] * left.variance_var
+                    + 2.0 * weight_values[0] * weight_values[1] * pair.covariance_var[0]),
+        weight_values[1] * right.mean_var
+            + variance_weight
+                * (weight_values[1] * weight_values[1] * right.variance_var
+                    + 2.0 * weight_values[0] * weight_values[1] * pair.covariance_var[1]),
+    ];
+    let expected_q_gradient =
+        variance_weight * 2.0 * weight_values[0] * weight_values[1] * pair.covariance_q;
+    let expected_weight_gradient = [
+        left.mean
+            + variance_weight
+                * (2.0 * weight_values[0] * left.variance
+                    + 2.0 * weight_values[1] * pair.covariance),
+        right.mean
+            + variance_weight
+                * (2.0 * weight_values[1] * right.variance
+                    + 2.0 * weight_values[0] * pair.covariance),
+    ];
+
+    let device = Default::default();
+    let mean = Tensor::<Ad, 2>::from_data(
+        TensorData::new(mean_values.to_vec(), [1, 2]),
+        (&device, DType::F64),
+    )
+    .require_grad();
+    let covariance = Tensor::<Ad, 3>::from_data(
+        TensorData::new(vec![variance[0], q, q, variance[1]], [1, 2, 2]),
+        (&device, DType::F64),
+    )
+    .require_grad();
+    let weight = Tensor::<Ad, 2>::from_data(
+        TensorData::new(weight_values.to_vec(), [2, 1]),
+        (&device, DType::F64),
+    )
+    .require_grad();
+    let output = propagate_linear_full(
+        &propagate_relu_full(&MomentsFull::new(mean.clone(), covariance.clone())),
+        weight.clone(),
+        None,
+    );
+    let gradients = (output.mean.sum() + output.cov.sum().mul_scalar(variance_weight)).backward();
+    let actual_mean = mean
+        .grad(&gradients)
+        .unwrap()
+        .into_data()
+        .to_vec::<f64>()
+        .unwrap();
+    let actual_covariance = covariance
+        .grad(&gradients)
+        .unwrap()
+        .into_data()
+        .to_vec::<f64>()
+        .unwrap();
+    let actual_weight = weight
+        .grad(&gradients)
+        .unwrap()
+        .into_data()
+        .to_vec::<f64>()
+        .unwrap();
+
+    let tolerance = 8192.0 * f64::EPSILON;
+    for i in 0..2 {
+        assert!(
+            (actual_mean[i] - expected_mean_gradient[i]).abs()
+                <= tolerance * expected_mean_gradient[i].abs().max(1.0),
+            "mean gradient {i}: {} vs {}",
+            actual_mean[i],
+            expected_mean_gradient[i],
+        );
+        let covariance_index = if i == 0 { 0 } else { 3 };
+        assert!(
+            (actual_covariance[covariance_index] - expected_variance_gradient[i]).abs()
+                <= tolerance * expected_variance_gradient[i].abs().max(1.0),
+            "variance gradient {i}: {} vs {}",
+            actual_covariance[covariance_index],
+            expected_variance_gradient[i],
+        );
+        assert!(
+            (actual_weight[i] - expected_weight_gradient[i]).abs()
+                <= tolerance * expected_weight_gradient[i].abs().max(1.0),
+            "weight gradient {i}: {} vs {}",
+            actual_weight[i],
+            expected_weight_gradient[i],
+        );
+    }
+    // The symmetric q coordinate changes both stored off-diagonal entries.
+    let actual_q_gradient = actual_covariance[1] + actual_covariance[2];
+    assert!(
+        (actual_q_gradient - expected_q_gradient).abs()
+            <= tolerance * expected_q_gradient.abs().max(1.0),
+        "covariance gradient: {actual_q_gradient} vs {expected_q_gradient}",
+    );
+}
+
+#[test]
+fn composed_k3_moment_gradients_match_an_independent_oracle() {
+    // Endpoint correlations are excluded: their mathematical derivative is
+    // one-sided while the tensor clamp defines the implementation boundary.
+    for fixture in NONZERO_RELU_FIXTURES.iter().take(6) {
+        for scales in [[1.0, 1.0], [1e-6, 1e6], [1e6, 1e-6]] {
+            assert_composed_k3_moment_gradients(*fixture, scales);
         }
     }
 }
