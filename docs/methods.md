@@ -384,6 +384,31 @@ calibration symmetry under its sampling assumptions. That requires an explicit
 partial-observation protocol. Neither method follows from retaining covariance
 between features or batch rows.
 
+### Choosing settings under execution noise
+
+An uncertain input can describe how a chosen setting will be executed. For a
+fixed surrogate $f$ and target $t$, the expected squared deviation is
+$(\mathbb{E}[f(X)]-t)^2+\text{Var}(f(X))$. The output need not be Gaussian for
+this identity. The [`robust_selection` example](../examples/README.md#candidate-choice-under-execution-noise)
+uses propagated moments to compare fixed settings, then evaluates the chosen
+settings on a separate analytic simulator.
+
+This objective connects propagation to robust design. [AIRBO, §2.1](https://arxiv.org/html/2310.20145#S2.SS1)
+optimizes expected performance under uncertain execution; its GP posterior,
+distribution kernel and sequential acquisition are additional machinery.
+[Robustimizer (2025), §2.2](https://www.sciencedirect.com/science/article/pii/S2352711025000445#sec2)
+likewise separates surrogate validation, input-noise specification, moment
+evaluation and optimization. stableprop supplies the moment calculation for
+supported neural layers. It does not supply a posterior over the unknown
+simulator or decide which new observation to acquire.
+
+The example separates propagation error, an incorrect execution covariance,
+and surrogate error. All can affect the chosen setting; accurate moments of a
+poor surrogate do not establish a useful decision. The
+[loss and regret derivations](derivations.md#an-exact-reference-for-candidate-selection)
+give its independent reference and explain why average moment accuracy alone
+does not bound selection regret.
+
 ### Application choices
 
 | Application | What stableprop provides now | What to measure or add |
@@ -391,6 +416,7 @@ between features or batch rows.
 | [Sensor-noise propagation through a regressor](../examples/regression_intervals.rs) | Gaussian moment estimates with diagonal or full covariance | Compare output means, variance error, coverage, and runtime against Monte Carlo. Coverage of noisy model outputs is different from coverage of observed labels. |
 | Calibrated regression intervals | A per-input scale for [`conformal_intervals`](../examples/conformal_intervals.rs) | Held-out calibration and test splits; interval width and coverage. [Split conformal](https://arxiv.org/abs/2107.07511) assumes exchangeability and targets marginal coverage. |
 | [Grouped real measurements](../examples/README.md#grouped-measurements) | A sensitivity scale compared with constant width on Airfoil and Parkinsons data | Keep complete groups separate; compare group coverage and width under the stated observation scheme. |
+| [Settings under execution noise](../examples/README.md#candidate-choice-under-execution-noise) | Expected squared-loss estimates from a fixed neural surrogate | Compare chosen settings against independent simulator losses; separate propagation, noise-model and surrogate errors. |
 | [Embedding stability](../examples/tuplet_contrastive.rs) | Differentiable variance penalty alongside [tuplet](https://github.com/arclabs561/tuplet)'s contrastive loss | Shared initialization, held-out examples, shared perturbations, and downstream accuracy with and without noise. A penalty can also erase useful signal. |
 | Learned dynamics and state estimation | Marginal and [cross-covariance transport](../examples/correlated_residual.rs) through affine/ReLU layers | A filtering or control system also needs joint-state bookkeeping, process and observation noise, and conditioning. [Kuang & Lin's filtering and smoothing study](https://arxiv.org/abs/2511.09016), revised May 2026, constructs those joint distributions and evaluates Lorenz/Wiener systems and feedback control. It argues for scoring the uncertainty as well as RMSE. |
 | GCN or classifier uncertainty | Input-noise propagation and experimental [risk](../examples/misclassification_risk.rs)/[ranking](../examples/gcn_uncertainty.rs) examples | Node correlations, calibration, and suitable softmax/MC baselines. A synthetic graph or one Cora split does not establish general OOD performance. |

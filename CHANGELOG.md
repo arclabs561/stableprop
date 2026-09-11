@@ -15,6 +15,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Candidate selection under Gaussian execution noise, comparing a trained
+  surrogate's predicted losses with exact quadratic-simulator losses.
 - Grouped real-data interval comparisons on Airfoil and Parkinsons Telemonitoring,
   with group-disjoint fitting and calibration, Monte Carlo model checks, and
   constant-width baselines.

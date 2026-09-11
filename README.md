@@ -112,6 +112,7 @@ timings. These checks use `f32`; small workloads can be faster on CPU.
 | Compare output uncertainty with sampled noisy inputs | [regression_intervals](examples/regression_intervals.rs) |
 | Calibrate prediction intervals against held-out labels | [conformal_intervals](examples/conformal_intervals.rs) |
 | Evaluate intervals on grouped real measurements | [grouped_intervals](examples/README.md#grouped-measurements) |
+| Choose settings under execution noise | [robust_selection](examples/README.md#candidate-choice-under-execution-noise) |
 | Train with an output-variance penalty | [robust_training](examples/robust_training.rs) |
 | Measure the effect of retaining covariance | [full_covariance](examples/full_covariance.rs) |
 | Derive a residual branch's covariance with its input | [correlated_residual](examples/correlated_residual.rs) |

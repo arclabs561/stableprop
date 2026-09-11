@@ -27,9 +27,9 @@ test:
     cargo test --all-features
     cargo test --all-features --examples
 
-# Sample more propagation and calibration-rank cases; optionally set the count.
+# Sample propagation, calibration-rank and simulator-oracle properties.
 property-test cases="4096":
-    PROPTEST_CASES="$1" cargo test --features burn --test properties --test burn_properties --test relu_covariance_reference --example grouped_intervals
+    PROPTEST_CASES="$1" cargo test --features burn --test properties --test burn_properties --test relu_covariance_reference --example grouped_intervals --example robust_selection
 
 # Regenerate independent values and compare them with frozen Rust fixtures.
 # Requires uv; kept separate from the Python-free Rust checks.
@@ -51,6 +51,7 @@ smoke:
     cargo run --release --example basic
     cargo run --release --features burn --example uncertainty_sources
     cargo run --release --features burn --example pairwise_ranking_risk
+    cargo run --release --features burn --example robust_selection -- --quick
 
 # Run an example on CPU; forward remaining arguments to it.
 example name *args:

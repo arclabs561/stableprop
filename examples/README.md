@@ -16,6 +16,7 @@ still differ across backend or dependency versions.
 | Calibrate intervals against observed targets | [`conformal_intervals`](conformal_intervals.rs) |
 | Evaluate intervals on grouped real measurements | [`grouped_intervals`](grouped_intervals.rs) |
 | Add a differentiable variance penalty to training | [`robust_training`](robust_training.rs) |
+| Choose a setting under execution noise | [`robust_selection`](robust_selection.rs) |
 | Compare diagonal and full covariance | [`full_covariance`](full_covariance.rs) |
 | Carry dependence through a residual branch | [`correlated_residual`](correlated_residual.rs) |
 | Evaluate sensitivity as an acquisition score | [`active_selection`](active_selection.rs) |
@@ -261,6 +262,75 @@ calibration score at 90%; wide intervals are possible. If the requested rank
 exceeds the available calibration groups, the quantile is infinite. Neither
 more recordings from the same subjects nor a more accurate propagated
 variance removes this finite-group limitation.
+
+## Candidate choice under execution noise
+
+```sh
+cargo run --release --features burn --example robust_selection -- --quick
+cargo run --release --features burn --example robust_selection
+cargo run --release --features burn --example robust_selection -- --fit-study
+```
+
+`robust_selection` fits a one-hidden-layer ReLU surrogate to a two-dimensional
+quadratic response surface. It chooses among 169 fixed settings to minimize
+expected squared deviation from each of three target responses. Gaussian
+execution noise perturbs the chosen setting. Its correlated covariance is a
+supplied test condition, not a measured actuator model; the simulator is a
+controlled mathematical example.
+
+The selectors compare a point prediction, local Jacobian, four positive-weight
+sigma points, diagonal hidden moments, full K3 covariance, and sampled
+surrogate outputs. The diagonal-hidden variant uses `MomentsFull` to compute
+the first affine marginal variances from correlated inputs, then converts to
+`Moments`, discarding hidden correlations before ReLU. Full K3 retains their
+truncated ReLU covariance. With one hidden ReLU, the full
+path has no repeated nonlinear Gaussian approximation. The four sigma points
+match the input mean and covariance; this does not make their nonlinear
+loss estimate exact.
+
+Read three different comparisons:
+
+- Method error compares estimated losses with independent Monte Carlo through
+  the same surrogate and assumed covariance.
+- Reference discrepancies compare the assumed and true execution laws, then
+  the surrogate and simulator under the true law. These sampled comparisons
+  retain Monte Carlo error, even when the covariance ratio is one.
+- Selected loss and regret use the simulator's exact Gaussian quadratic-loss
+  formula. Regret is relative to the best of the fixed candidate settings,
+  without a sampled-oracle error.
+
+Covariance ratios 0.75, 1 and 1.25 test misspecification; they multiply
+covariance, not standard deviation. All methods share candidates and targets,
+and every selected setting is evaluated under the same true execution law.
+Training, held-out clean validation, selector sampling and reference sampling
+use separate seeded streams. The clean RMSE alone does not establish
+surrogate accuracy under execution noise.
+
+The full run fits 20 surrogates independently. Paired differences first average
+over targets and covariance ratios within a fit, then use the fits as the
+independent units for standard errors. Per-target and per-ratio summaries
+expose effects hidden by that aggregate. The three-fit quick run is descriptive.
+
+The default study trains for 500 epochs. `--fit-study` compares frozen snapshots
+at 500 and 2,000 epochs from the same optimizer trajectory, with the same
+validation points and sampling streams at both checkpoints. Its paired changes
+in clean RMSE, true-law surrogate-vs-simulator loss MAE, and selected loss
+show whether better fitting changes the decisions. Standard errors still use
+whole fits, not individual targets or candidates. Combine it with `--quick`
+for three fits at 80 and 320 epochs. The checkpoints are fixed in advance;
+this experiment does not select a training duration.
+
+In a 20-fit run with the stated seeds, clean RMSE fell from 0.608 to 0.139
+between checkpoints. At the correct covariance, full K3 loss MAE against
+surrogate Monte Carlo was similar (0.0117 and 0.0135), while mean simulator
+regret fell from 0.1653 to 0.0029. Accurate surrogate moments were insufficient
+when the surrogate itself was poorly fitted. The printed target and covariance
+breakdowns show where the selectors differ.
+
+The [derivation](../docs/derivations.md#an-exact-reference-for-candidate-selection)
+gives the exact reference and a finite-candidate regret bound. The
+[method guide](../docs/methods.md#choosing-settings-under-execution-noise)
+connects this calculation to robust design and sequential optimization.
 
 ## Covariance and heavy tails
 

@@ -460,6 +460,8 @@ suffice to evaluate expected squared deviation from a fixed setpoint, even
 when they do not determine a threshold probability. For a neural surrogate
 under execution noise, it gives a concrete objective for comparing candidate
 settings; uncertainty about the surrogate itself remains a separate error.
+The [`robust_selection` example](../examples/robust_selection.rs) compares these
+choices against an independent quadratic simulator.
 
 The mean in this identity is the expectation over perturbed inputs, which can
 differ from the network at the input mean. The
@@ -468,6 +470,80 @@ weighted variance penalty to point-prediction MSE. Even with unit weight, that
 objective is not generally the expected noisy squared loss. If the target is
 also random and correlated with the output, its variance and cross-covariance
 must enter the expected-loss calculation too.
+
+### An exact reference for candidate selection
+
+Let the simulator be $h(x)=x^\top Qx+b^\top x+c$, with symmetric $Q$, and let
+execution at nominal setting $u$ give $X=u+\epsilon$, where
+$\epsilon\sim\mathcal{N}(0,\Sigma)$. Write $g=2Qu+b$. Expansion gives
+
+$$
+h(X)=h(u)+g^\top\epsilon+\epsilon^\top Q\epsilon.
+$$
+
+The linear term has zero mean. Gaussian third moments vanish, so it is
+uncorrelated with the quadratic term. Using
+$\mathbb{E}[\epsilon_{i}\epsilon_{j}\epsilon_{k}\epsilon_{l}]
+=\Sigma_{ij}\Sigma_{kl}+\Sigma_{ik}\Sigma_{jl}+\Sigma_{il}\Sigma_{jk}$
+for the quadratic term gives
+
+$$
+\begin{aligned}
+\mathbb{E}[h(X)]&=h(u)+\text{tr}(Q\Sigma),\\
+\text{Var}(h(X))&=g^\top\Sigma g+2\text{tr}(Q\Sigma Q\Sigma).
+\end{aligned}
+$$
+
+Substitute these moments into the squared-loss identity above to obtain the
+exact expected simulator loss $L(u)$ at each candidate. The example's
+selectors only see a fitted ReLU surrogate; the simulator formula evaluates
+their choices afterward. Regret is $L(\hat u)-\min_{u\in C}L(u)$ for the fixed
+candidate set $C$. It is not regret against the best setting in a continuous
+domain, and its reference does not have Monte Carlo selection bias.
+
+### From score error to decision error
+
+Suppose estimated losses $\hat L$ satisfy
+$|\hat L(u)-L(u)|\leq\delta$ for every candidate. If $\hat u$ minimizes
+$\hat L$ and $u^*$ minimizes $L$, then
+
+$$
+L(\hat u)\leq\hat L(\hat u)+\delta
+\leq\hat L(u^*)+\delta\leq L(u^*)+2\delta.
+$$
+
+Thus uniform loss accuracy controls finite-candidate regret. An average
+moment error does not establish this bound: a large error at one promising
+candidate can change the choice.
+
+There are several sources of loss error. For a fixed surrogate $f$, let
+$L_f^a$ and $L_f^*$ denote its exact expected loss under the assumed and true
+execution laws, and let $L_h^*$ be the true simulator loss. Then
+
+$$
+\hat L-L_h^*
+=(\hat L-L_f^a)+(L_f^a-L_f^*)+(L_f^*-L_h^*).
+$$
+
+These terms separate propagation or quadrature error, noise-model error, and
+surrogate error. The example compares each method with an independent
+surrogate-Monte-Carlo reference under the assumed law, then compares reference
+estimates across laws and against the analytic simulator. Those comparisons
+still have Monte Carlo error; their absolute errors do not add to an exact
+decomposition.
+
+Surrogate error must be checked under the execution law. The triangle
+inequality in $L^2$ gives
+
+$$
+\left|\sqrt{\mathbb{E}[(f(X)-t)^2]}
+-\sqrt{\mathbb{E}[(h(X)-t)^2]}\right|
+\leq\sqrt{\mathbb{E}[(f(X)-h(X))^2]}.
+$$
+
+A small fitting or clean-test RMSE under a different input distribution does
+not supply this bound. Improving covariance propagation cannot correct a
+surrogate or execution model that is wrong where candidates are evaluated.
 
 ## Design consequences and verification
 

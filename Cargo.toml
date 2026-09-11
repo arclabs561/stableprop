@@ -69,6 +69,10 @@ name = "robust_training"
 required-features = ["burn"]
 
 [[example]]
+name = "robust_selection"
+required-features = ["burn"]
+
+[[example]]
 name = "full_covariance"
 required-features = ["burn"]
 
