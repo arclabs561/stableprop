@@ -45,6 +45,9 @@ Rust 1.80. The optional Burn backend requires Rust 1.92 or newer.
 stableprop = "0.5.2"
 ```
 
+The input standard deviations describe independent Gaussian features. Affine
+layers retain covariance; this API drops off-diagonal covariance at each ReLU.
+
 ```rust
 use stableprop::{propagate_sequential, Layer};
 
@@ -55,7 +58,9 @@ let layers = [
     },
     Layer::ReLU,
 ];
-let output = propagate_sequential(&layers, &[0.0, 0.0], &[0.3, 0.4]);
+let input_mean = [0.0, 0.0];
+let input_std = [0.3, 0.4];
+let output = propagate_sequential(&layers, &input_mean, &input_std);
 println!("mean = {:.4}, variance = {:.4}", output.mean[0], output.cov[0][0]);
 ```
 
@@ -68,9 +73,6 @@ Run this example from the checkout:
 ```sh
 cargo run --release --example basic
 ```
-
-The input standard deviations describe independent features. Affine layers
-retain covariance; this API drops off-diagonal covariance at each ReLU.
 
 ## Burn models
 
@@ -154,7 +156,8 @@ for the Cargo commands used by CI.
 
 The API docs include executable recipes for propagation, tensor precision,
 autodiff, and correlated residuals. The [reference generator](scripts/README.md)
-reproduces the Gaussian pair fixtures using independent numerical integration.
+can regenerate values for the Gaussian pair fixtures using independent
+numerical integration.
 
 Use `just bench` or `just bench-burn` for repeatable CPU measurements; the
 [benchmark guide](benches/README.md) explains fixtures and timing boundaries.

@@ -112,9 +112,9 @@ cargo run --release --features burn --example conformal_intervals -- --study
 This slower mode fits 30 models on separate clean-feature training sets.
 Calibration and test targets use one draw of independent Gaussian noise in
 each feature, with a known scale that varies by input, plus label noise. The
-feature scale is supplied to propagation and never fitted from residuals. Calibration and
-test data share the same distribution; training data need not share it for the
-split-conformal coverage argument.
+feature scale is supplied to propagation and never fitted from residuals.
+Calibration and test data share the same distribution; training data need not
+share it for the split-conformal coverage argument.
 
 The output gives approximate 95% intervals across repeats and paired
 scaled-minus-constant differences. Read coverage and width together: the
