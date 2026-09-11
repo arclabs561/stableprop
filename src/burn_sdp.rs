@@ -616,8 +616,10 @@ pub fn propagate_relu_full<B: Backend>(m: &MomentsFull<B>) -> MomentsFull<B> {
     // in the input mean are d1 = Phi(a), d2 = phi(a)/sigma, d3 = -a phi(a)/sigma^2.
     // The diagonal is then overwritten with the univariate variance.
     let sigma = terms.safe_sigma;
-    let sigma_i = sigma.clone().unsqueeze_dim::<3>(2);
-    let sigma_j = sigma.unsqueeze_dim::<3>(1);
+    // Match the masked-selection shapes explicitly. Burn 0.21 GPU kernels can
+    // leave part of a broadcast mask_where output unevaluated.
+    let sigma_i = sigma.clone().unsqueeze_dim::<3>(2).expand([n, d, d]);
+    let sigma_j = sigma.unsqueeze_dim::<3>(1).expand([n, d, d]);
     let sigma_outer = sigma_i.clone() * sigma_j.clone();
     let off_mask = eye_d
         .clone()

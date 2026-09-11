@@ -12,7 +12,7 @@ use burn::{
         init_setup, CubeBackend, RuntimeOptions, WgpuDevice, WgpuRuntime,
     },
     backend::{Autodiff, Metal as MetalBackend, Wgpu},
-    tensor::{backend::Backend, Tensor},
+    tensor::{backend::Backend, Tensor, TensorData},
 };
 use burn_ndarray::NdArray;
 use stableprop::burn_sdp::{
@@ -791,6 +791,94 @@ fn diagonal_training_work<B: Backend>(
     mean.grad(&output.mean.sum().backward()).unwrap()
 }
 
+struct FullBackwardFixture<B: Backend> {
+    mean: Tensor<Autodiff<B>, 2>,
+    cov: Tensor<Autodiff<B>, 3>,
+    weight: Tensor<Autodiff<B>, 2>,
+}
+
+struct FullBackwardGradients<B: Backend> {
+    mean: Tensor<B, 2>,
+    cov: Tensor<B, 3>,
+    weight: Tensor<B, 2>,
+}
+
+fn full_backward_fixture<B: Backend>(
+    device: &B::Device,
+    batch: usize,
+    width: usize,
+) -> FullBackwardFixture<B> {
+    let cov: Vec<f32> = (0..batch)
+        .flat_map(|_| {
+            (0..width).flat_map(move |i| (0..width).map(move |j| if i == j { 0.3 } else { 0.001 }))
+        })
+        .collect();
+    FullBackwardFixture {
+        mean: Tensor::<Autodiff<B>, 2>::from_data(
+            TensorData::new(vec![0.2; batch * width], [batch, width]),
+            device,
+        ),
+        cov: Tensor::<Autodiff<B>, 3>::from_data(
+            TensorData::new(cov, [batch, width, width]),
+            device,
+        ),
+        weight: Tensor::<Autodiff<B>, 2>::from_data(
+            TensorData::new(vec![0.01; width * width], [width, width]),
+            device,
+        ),
+    }
+}
+
+fn full_backward_work<B: Backend>(fixture: &FullBackwardFixture<B>) -> FullBackwardGradients<B> {
+    let mean = fixture.mean.clone().require_grad();
+    let cov = fixture.cov.clone().require_grad();
+    let weight = fixture.weight.clone().require_grad();
+    let output = propagate_relu_full(&propagate_linear_full(
+        &MomentsFull::new(mean.clone(), cov.clone()),
+        weight.clone(),
+        None,
+    ));
+    let gradients = (output.mean.sum() + output.cov.sum()).backward();
+    FullBackwardGradients {
+        mean: mean.grad(&gradients).unwrap(),
+        cov: cov.grad(&gradients).unwrap(),
+        weight: weight.grad(&gradients).unwrap(),
+    }
+}
+
+#[test]
+#[ignore = "requires a Metal GPU"]
+fn metal_rank_one_full_backward_matches_ndarray() {
+    // Several rows and features expose partially evaluated broadcast selection
+    // kernels that tiny matrices can miss. Constant weight columns produce a
+    // rank-one output covariance and equal feature standard deviations.
+    fn compare<B: Backend>(device: &B::Device, width: usize, cpu: &FullBackwardGradients<Cpu>) {
+        let fixture = full_backward_fixture::<B>(device, 8, width);
+        let gradients = full_backward_work(&fixture);
+        close(
+            &data(gradients.mean),
+            &data(cpu.mean.clone()),
+            "rank-one mean gradient",
+        );
+        close(
+            &data(gradients.cov),
+            &data(cpu.cov.clone()),
+            "rank-one covariance gradient",
+        );
+        close(
+            &data(gradients.weight),
+            &data(cpu.weight.clone()),
+            "rank-one weight gradient",
+        );
+    }
+    let dev = metal_device();
+    for width in [4, 16] {
+        let cpu = full_backward_work(&full_backward_fixture::<Cpu>(&Default::default(), 8, width));
+        compare::<GpuEager>(&dev, width, &cpu);
+        compare::<GpuMsl>(&dev, width, &cpu);
+    }
+}
+
 fn timed<B: Backend, T>(label: &str, device: &B::Device, mut work: impl FnMut() -> T) -> T {
     let warmup = work();
     B::sync(device).unwrap();
@@ -801,6 +889,76 @@ fn timed<B: Backend, T>(label: &str, device: &B::Device, mut work: impl FnMut() 
     let elapsed = start.elapsed();
     eprintln!("{label}: {elapsed:?}");
     black_box(result)
+}
+
+fn timed_repeated<B: Backend, T>(
+    label: &str,
+    device: &B::Device,
+    mut work: impl FnMut() -> T,
+) -> T {
+    let warmup = work();
+    B::sync(device).unwrap();
+    black_box(warmup);
+    let mut last = None;
+    for repeat in 1..=3 {
+        let start = Instant::now();
+        let result = work();
+        B::sync(device).unwrap();
+        eprintln!("{label} repeat={repeat}: {:?}", start.elapsed());
+        last = Some(result);
+    }
+    black_box(last.unwrap())
+}
+
+#[test]
+#[ignore = "requires a Metal GPU and is an informational local benchmark"]
+fn metal_full_covariance_backward_timing_matches_ndarray_and_series_control() {
+    let cpu_device = Default::default();
+    let gpu_device = metal_device();
+    eprintln!("Warmed f32 full backward; tensor-resident timing includes graph allocation, host validation excluded.");
+    for &(batch, width, iterations) in &[(8, 16, 8), (64, 64, 1)] {
+        let cpu_fixture = full_backward_fixture::<Cpu>(&cpu_device, batch, width);
+        let gpu_fixture = full_backward_fixture::<GpuMsl>(&gpu_device, batch, width);
+        let cpu = timed_repeated::<Cpu, _>(
+            &format!("CPU full backward b={batch} w={width} n={iterations}"),
+            &cpu_device,
+            || {
+                let mut last = full_backward_work(&cpu_fixture);
+                for _ in 1..iterations {
+                    last = full_backward_work(&cpu_fixture);
+                }
+                last
+            },
+        );
+        let gpu = timed_repeated::<GpuMsl, _>(
+            &format!("Metal full backward b={batch} w={width} n={iterations}"),
+            &gpu_device,
+            || {
+                let mut last = full_backward_work(&gpu_fixture);
+                for _ in 1..iterations {
+                    last = full_backward_work(&gpu_fixture);
+                }
+                last
+            },
+        );
+        close(
+            &data(gpu.mean),
+            &data(cpu.mean),
+            "timed full backward mean gradient",
+        );
+        close(
+            &data(gpu.cov),
+            &data(cpu.cov),
+            "timed full backward covariance gradient",
+        );
+        close(
+            &data(gpu.weight),
+            &data(cpu.weight),
+            "timed full backward weight gradient",
+        );
+    }
+    assert_mixed_scale_covariance_gradients::<Cpu>(&cpu_device);
+    assert_mixed_scale_covariance_gradients::<GpuMsl>(&gpu_device);
 }
 
 #[test]

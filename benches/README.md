@@ -47,3 +47,9 @@ On macOS, `just metal-test` separately checks CPU/Metal values and gradients
 and prints synchronized workload timings. Each workload is warmed up first.
 Measurements include tensor allocation; host result validation runs afterward.
 These are local diagnostics, not Criterion comparisons.
+
+The full-covariance backward workload composes affine propagation and ReLU,
+then differentiates the sum of output means and covariances. CPU and Metal
+start from the same host values. Input upload is outside timing; each of three
+synchronized repeats includes graph construction and intermediate allocation.
+Mean, covariance, and weight gradients are compared after measurement.
