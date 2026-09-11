@@ -2,8 +2,10 @@
 //! logit covariance and compares it with Monte Carlo.
 //!
 //! For true class `t`, competitor `j` wins when `logit_t - logit_j` is negative.
-//! Its variance is `S_tt + S_jj - 2 S_tj`. Summing Gaussian margin-tail
+//! Its variance is `S_tt + S_jj - S_tj - S_jt`. Summing Gaussian margin-tail
 //! probabilities gives the risk estimate.
+//! A deterministic tie contributes zero to this strict-margin estimate;
+//! classifier tie-breaking can differ.
 //!
 //! Nonlinear propagation and the Gaussian-logit assumption are approximate,
 //! so this estimate can fall above or below the true per-input error rate.
@@ -65,6 +67,29 @@ fn erf(x: f64) -> f64 {
 }
 fn phi_cdf(x: f64) -> f64 {
     0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
+}
+
+/// `Pr[margin < 0]` under a Gaussian margin approximation.
+///
+/// A zero-variance margin is deterministic. Small negative values can arise
+/// when f32 covariance terms cancel, but a material negative variance signals
+/// invalid propagated moments and must not be turned into a plausible risk.
+fn gaussian_margin_loss_probability(mean: f64, covariance_terms: [f64; 4]) -> f64 {
+    assert!(mean.is_finite(), "margin mean must be finite");
+    let variance =
+        covariance_terms[0] + covariance_terms[1] - covariance_terms[2] - covariance_terms[3];
+    assert!(variance.is_finite(), "margin variance must be finite");
+    let scale = covariance_terms.iter().map(|term| term.abs()).sum::<f64>();
+    let roundoff_tolerance = 64.0 * f64::from(f32::EPSILON) * scale;
+    assert!(
+        variance >= -roundoff_tolerance,
+        "margin variance {variance:e} is materially negative (tolerance {roundoff_tolerance:e})"
+    );
+    let variance = variance.max(0.0);
+    if variance == 0.0 {
+        return if mean < 0.0 { 1.0 } else { 0.0 };
+    }
+    phi_cdf(-mean / variance.sqrt())
 }
 
 /// Class-conditional Gaussian blobs: balanced classes, blob `c` shifted on two
@@ -130,9 +155,10 @@ fn main() {
             if j == t {
                 continue;
             }
-            let mm = mu(t) - mu(j);
-            let mv = (s(t, t) + s(j, j) - 2.0 * s(t, j)).max(1e-9);
-            p += phi_cdf(-mm / mv.sqrt());
+            p += gaussian_margin_loss_probability(
+                mu(t) - mu(j),
+                [s(t, t), s(j, j), s(t, j), s(j, t)],
+            );
         }
         bound[i] = p.min(1.0);
     }
@@ -182,4 +208,49 @@ fn main() {
         "  mean absolute per-input error = {mean_abs_error:.4}; estimate >= MC on {:.1}% of inputs.",
         100.0 * above
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identical_affine_scores_have_deterministic_margin_risk() {
+        let device = Device::<Nd>::default();
+        let moments = MomentsFull::<Nd>::from_diagonal(
+            Tensor::from_data([[0.5, -0.25]], &device),
+            Tensor::from_data([[0.25, 0.5]], &device),
+        );
+        let identical_scores = Tensor::from_data([[1.0, 1.0], [-2.0, -2.0]], &device);
+        let propagated = propagate_linear_full(&moments, identical_scores, None);
+        let covariance = propagated.cov.to_data().to_vec::<f32>().unwrap();
+        let terms = [
+            f64::from(covariance[0]),
+            f64::from(covariance[3]),
+            f64::from(covariance[1]),
+            f64::from(covariance[2]),
+        ];
+
+        assert_eq!(gaussian_margin_loss_probability(0.25, terms), 0.0);
+        assert_eq!(gaussian_margin_loss_probability(-0.25, terms), 1.0);
+        assert_eq!(gaussian_margin_loss_probability(0.0, terms), 0.0);
+    }
+
+    #[test]
+    fn one_standard_deviation_margin_has_gaussian_tail_probability() {
+        let probability = gaussian_margin_loss_probability(1.0, [1.0, 0.0, 0.0, 0.0]);
+        assert!((probability - 0.158_655).abs() < 1e-5);
+    }
+
+    #[test]
+    #[should_panic(expected = "margin variance must be finite")]
+    fn rejects_nonfinite_margin_variance() {
+        gaussian_margin_loss_probability(0.0, [f64::NAN, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "materially negative")]
+    fn rejects_materially_negative_margin_variance() {
+        gaussian_margin_loss_probability(0.0, [0.0, 0.0, 1.0, 0.0]);
+    }
 }

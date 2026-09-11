@@ -123,7 +123,15 @@ fn main() {
             .to_vec::<f32>()
             .unwrap()
             .iter()
-            .map(|v| (*v as f64).max(1e-12).sqrt())
+            .map(|v| {
+                let variance = f64::from(*v);
+                assert!(
+                    variance.is_finite() && variance >= 0.0,
+                    "propagated variance must be finite and nonnegative"
+                );
+                // A minimum normalization scale keeps conformal residuals finite.
+                variance.max(1e-12).sqrt()
+            })
             .collect();
         (mean, std)
     };

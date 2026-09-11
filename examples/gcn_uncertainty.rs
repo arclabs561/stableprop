@@ -35,7 +35,16 @@ fn sdp_gcn(m: &Moments<B>, layer: &GCNConv<B>, adj: Tensor<B, 2>) -> Moments<B> 
     output
 }
 
-fn pearson(a: &[f64], b: &[f64]) -> f64 {
+fn pearson(a: &[f64], b: &[f64]) -> Option<f64> {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "Pearson inputs must have matching lengths"
+    );
+    assert!(a.iter().chain(b).all(|value| value.is_finite()));
+    if a.len() < 2 {
+        return None;
+    }
     let n = a.len() as f64;
     let ma = a.iter().sum::<f64>() / n;
     let mb = b.iter().sum::<f64>() / n;
@@ -47,7 +56,15 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
         va += (x - ma).powi(2);
         vb += (y - mb).powi(2);
     }
-    cov / (va.sqrt() * vb.sqrt())
+    (va > 0.0 && vb > 0.0).then(|| cov / (va.sqrt() * vb.sqrt()))
+}
+
+fn pearson_undefined_reason(a: &[f64], b: &[f64]) -> &'static str {
+    if a.len() < 2 || b.len() < 2 {
+        "fewer than two samples"
+    } else {
+        "zero spread"
+    }
 }
 
 fn main() {
@@ -77,6 +94,12 @@ fn main() {
     let m1 = propagate_relu(&sdp_gcn(&m0, &layer1, adj.clone()));
     let m2 = sdp_gcn(&m1, &layer2, adj.clone());
     let sdp_var = m2.var.to_data().to_vec::<f32>().unwrap();
+    assert!(
+        sdp_var
+            .iter()
+            .all(|variance| variance.is_finite() && *variance >= 0.0),
+        "propagated variances must be finite and nonnegative"
+    );
 
     // --- MC: K noisy inputs through the deterministic GCN ---
     let len = n * d_out;
@@ -111,6 +134,9 @@ fn main() {
     for v in mc_var.iter_mut() {
         *v /= (k - 1) as f64;
     }
+    assert!(mc_var
+        .iter()
+        .all(|variance| variance.is_finite() && *variance >= 0.0));
 
     // --- Compare ---
     let sdp_var_f: Vec<f64> = sdp_var.iter().map(|x| *x as f64).collect();
@@ -121,20 +147,36 @@ fn main() {
         .filter(|(_, m)| **m > 1e-9)
         .map(|(s, m)| s / m)
         .collect();
-    let mean_ratio = ratios.iter().sum::<f64>() / ratios.len() as f64;
+    let mean_ratio = (!ratios.is_empty()).then(|| ratios.iter().sum::<f64>() / ratios.len() as f64);
 
     println!("2-layer GCN (GCNConv -> ReLU -> GCNConv), n={n} nodes, d_out={d_out}");
     println!("input noise std = {input_std}, MC samples = {k}\n");
     println!("SDP var vs MC var:");
-    println!("  Pearson r   = {r:.4}   (1.0 = perfect agreement)");
-    println!("  mean ratio  = {mean_ratio:.3}  (SDP / MC)\n");
+    match r {
+        Some(r) => println!("  Pearson r   = {r:.4}   (1.0 = perfect agreement)"),
+        None => println!(
+            "  Pearson r   = undefined ({})",
+            pearson_undefined_reason(&sdp_var_f, &mc_var)
+        ),
+    }
+    match mean_ratio {
+        Some(mean_ratio) => println!(
+            "  mean ratio  = {mean_ratio:.3}  (SDP / MC; {} of {len} outputs with MC variance > 1e-9)\n",
+            ratios.len(),
+        ),
+        None => println!("  mean ratio  = undefined (no outputs with MC variance > 1e-9; 0 of {len} included)\n"),
+    }
 
     println!("per-output predictive std (sqrt var), first 8 of {len}:");
     println!("  {:>10}  {:>10}  {:>8}", "sdp_std", "mc_std", "ratio");
     for i in 0..len.min(8) {
         let s = sdp_var_f[i].sqrt();
         let m = mc_var[i].sqrt();
-        println!("  {:>10.4}  {:>10.4}  {:>8.3}", s, m, s / m.max(1e-9));
+        if m > 0.0 {
+            println!("  {s:>10.4}  {m:>10.4}  {:>8.3}", s / m);
+        } else {
+            println!("  {s:>10.4}  {m:>10.4}  undefined (MC std is zero)");
+        }
     }
 
     // --- Thresholding mechanics only: this random, unlabeled graph cannot

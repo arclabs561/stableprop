@@ -61,7 +61,16 @@ fn target(x: &[f32]) -> f32 {
     (s * 0.7).sin() + 0.5 * x[0] * x[1] - 0.3 * x[2] * x[2] + 0.4 * (x[3] - x[4]).abs()
 }
 
-fn pearson(a: &[f64], b: &[f64]) -> f64 {
+fn pearson(a: &[f64], b: &[f64]) -> Option<f64> {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "Pearson inputs must have matching lengths"
+    );
+    assert!(a.iter().chain(b).all(|value| value.is_finite()));
+    if a.len() < 2 {
+        return None;
+    }
     let n = a.len() as f64;
     let (ma, mb) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
     let mut cov = 0.0;
@@ -72,7 +81,35 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
         va += (x - ma).powi(2);
         vb += (y - mb).powi(2);
     }
-    cov / (va.sqrt() * vb.sqrt())
+    (va > 0.0 && vb > 0.0).then(|| cov / (va.sqrt() * vb.sqrt()))
+}
+
+fn pearson_undefined_reason(a: &[f64], b: &[f64]) -> &'static str {
+    if a.len() < 2 || b.len() < 2 {
+        "fewer than two samples"
+    } else {
+        "zero spread"
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct RunningMoments {
+    count: usize,
+    mean: f64,
+    m2: f64,
+}
+
+impl RunningMoments {
+    fn push(&mut self, value: f64) {
+        self.count += 1;
+        let delta = value - self.mean;
+        self.mean += delta / self.count as f64;
+        self.m2 += delta * (value - self.mean);
+    }
+
+    fn sample_variance(self) -> Option<f64> {
+        (self.count >= 2).then(|| self.m2 / (self.count - 1) as f64)
+    }
 }
 
 fn main() {
@@ -128,18 +165,20 @@ fn main() {
     let m1 = propagate_relu(&propagate_linear(&m0, w1.clone(), b1.clone()));
     let m2 = propagate_linear(&m1, w2.clone(), b2.clone());
     let mp_mean = m2.mean.to_data().to_vec::<f32>().unwrap();
-    let mp_std: Vec<f64> = m2
-        .var
-        .to_data()
-        .to_vec::<f32>()
-        .unwrap()
+    let mp_variance = m2.var.to_data().to_vec::<f32>().unwrap();
+    assert!(
+        mp_variance
+            .iter()
+            .all(|variance| variance.is_finite() && *variance >= 0.0),
+        "propagated variances must be finite and nonnegative"
+    );
+    let mp_std: Vec<f64> = mp_variance
         .iter()
-        .map(|v| (*v as f64).max(0.0).sqrt())
+        .map(|variance| (*variance as f64).sqrt())
         .collect();
 
     // Monte Carlo: K noisy copies through the deterministic net.
-    let mut sums = vec![0.0f64; N_TEST];
-    let mut sumsq = vec![0.0f64; N_TEST];
+    let mut mc_moments = vec![RunningMoments::default(); N_TEST];
     let mut within = 0usize;
     let mut total = 0usize;
     for _ in 0..MC_SAMPLES {
@@ -152,8 +191,7 @@ fn main() {
             .unwrap();
         for i in 0..N_TEST {
             let v = yk[i] as f64;
-            sums[i] += v;
-            sumsq[i] += v * v;
+            mc_moments[i].push(v);
             let lo = mp_mean[i] as f64 - 1.96 * mp_std[i];
             let hi = mp_mean[i] as f64 + 1.96 * mp_std[i];
             if v >= lo && v <= hi {
@@ -162,13 +200,9 @@ fn main() {
             total += 1;
         }
     }
-    let kf = MC_SAMPLES as f64;
-    let mc_std: Vec<f64> = (0..N_TEST)
-        .map(|i| {
-            ((sumsq[i] - sums[i] * sums[i] / kf) / (kf - 1.0))
-                .max(0.0)
-                .sqrt()
-        })
+    let mc_std: Vec<f64> = mc_moments
+        .into_iter()
+        .map(|moments| moments.sample_variance().unwrap().sqrt())
         .collect();
 
     let r = pearson(&mp_std, &mc_std);
@@ -178,16 +212,50 @@ fn main() {
         .filter(|(_, m)| **m > 1e-6)
         .map(|(s, m)| s / m)
         .collect();
-    let mean_ratio = ratios.iter().sum::<f64>() / ratios.len() as f64;
+    let mean_ratio = (!ratios.is_empty()).then(|| ratios.iter().sum::<f64>() / ratios.len() as f64);
     let coverage = within as f64 / total as f64;
 
     println!("sampling-free error bars vs {MC_SAMPLES}-sample Monte Carlo:");
-    println!("  std agreement (Pearson r) = {r:.4}   (1.0 = perfectly correlated)");
-    println!("  std mean ratio (mp / MC)  = {mean_ratio:.3}");
+    match r {
+        Some(r) => println!("  std agreement (Pearson r) = {r:.4}   (1.0 = perfectly correlated)"),
+        None => println!(
+            "  std agreement (Pearson r) = undefined ({})",
+            pearson_undefined_reason(&mp_std, &mc_std)
+        ),
+    }
+    match mean_ratio {
+        Some(mean_ratio) => println!(
+            "  std mean ratio (mp / MC)  = {mean_ratio:.3}   ({} of {} outputs with MC std > 1e-6)",
+            ratios.len(),
+            N_TEST,
+        ),
+        None => println!("  std mean ratio (mp / MC)  = undefined (no outputs with MC std > 1e-6; 0 of {N_TEST} included)"),
+    }
     println!(
         "  MC output-draw coverage    = {coverage:.3}   (95% Gaussian reference; not a coverage guarantee)"
     );
     println!(
         "\nthis comparison uses one propagated evaluation and {MC_SAMPLES} sampled evaluations."
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pearson_is_affine_invariant_and_rejects_constants() {
+        let correlation = pearson(&[1.0, 2.0, 3.0], &[7.0, 9.0, 11.0]).unwrap();
+        assert!((correlation - 1.0).abs() < 1e-12);
+        assert_eq!(pearson(&[1.0, 2.0, 3.0], &[4.0, 4.0, 4.0]), None);
+    }
+
+    #[test]
+    fn welford_keeps_sample_variance_at_a_large_f32_offset() {
+        let mut moments = RunningMoments::default();
+        for value in [1_000_000.0f32, 1_000_001.0, 1_000_002.0, 1_000_003.0] {
+            moments.push(value as f64);
+        }
+        assert!((moments.sample_variance().unwrap() - 5.0 / 3.0).abs() < 1e-12);
+    }
 }

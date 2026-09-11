@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Validate example variances before computing intervals or risk, and handle
+  deterministic margins and undefined comparison statistics explicitly.
 - Materialize Burn example parameters before cloning baselines or changing RNG
   seeds, so training comparisons share their intended initial weights.
 - Avoid cancellation in negative Gaussian ReLU tails, including Burn means,
@@ -37,7 +39,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A derivation reference for Gaussian moments, cross-covariance, the Hermite
   series, its PSD property and error bound, and numerical design choices.
 - Nonzero-mean Gaussian pair references, independent feature-scale properties,
-  and a check of the truncated covariance gradient. `just property-test` runs
+  and covariance-gradient checks against the finite series and an independent
+  exact-derivative error bound. `just property-test` runs
   the algebraic and Gaussian-reference properties with a larger sample count.
 
 ## [0.5.0] - 2026-09-10
