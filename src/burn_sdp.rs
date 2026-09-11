@@ -44,6 +44,34 @@ impl<B: Backend> Moments<B> {
     /// Construct matching mean and variance tensors. See the module's value
     /// requirements; tensor contents are not checked.
     ///
+    /// Burn selects precision when a tensor is created. This recipe requests
+    /// `f64` explicitly; the backend type alone does not select it.
+    ///
+    /// ```
+    /// use burn::tensor::{DType, Tensor, TensorData};
+    /// use burn_ndarray::NdArray;
+    /// use stableprop::burn_sdp::{propagate_linear, Moments};
+    ///
+    /// let device = Default::default();
+    /// let mean = Tensor::<NdArray<f64>, 2>::from_data(
+    ///     TensorData::new(vec![1.0_f64], [1, 1]),
+    ///     (&device, DType::F64),
+    /// );
+    /// let variance = Tensor::<NdArray<f64>, 2>::from_data(
+    ///     TensorData::new(vec![0.25_f64], [1, 1]),
+    ///     (&device, DType::F64),
+    /// );
+    /// let output = propagate_linear(
+    ///     &Moments::new(mean, variance),
+    ///     Tensor::<NdArray<f64>, 2>::from_data([[2.0]], (&device, DType::F64)),
+    ///     Some(Tensor::<NdArray<f64>, 1>::from_data([0.5], (&device, DType::F64))),
+    /// );
+    ///
+    /// assert_eq!(output.mean.dtype(), DType::F64);
+    /// assert_eq!(output.mean.into_data().to_vec::<f64>().unwrap(), vec![2.5]);
+    /// assert_eq!(output.var.into_data().to_vec::<f64>().unwrap(), vec![1.0]);
+    /// ```
+    ///
     /// # Panics
     /// Panics if the tensor shapes differ.
     pub fn new(mean: Tensor<B, 2>, var: Tensor<B, 2>) -> Self {
@@ -355,6 +383,30 @@ pub fn propagate_residual_add<B: Backend>(skip: &Moments<B>, branch: &Moments<B>
 /// All tensors must have the same shape and describe a valid joint distribution;
 /// in particular `abs(skip_branch_cov) <= sqrt(skip.var * branch.var)`.
 /// Values are not checked; invalid joint moments can produce negative variance.
+///
+/// ```
+/// use burn::tensor::Tensor;
+/// use burn_ndarray::NdArray;
+/// use stableprop::burn_sdp::{propagate_residual_add_correlated, Moments};
+///
+/// let device = Default::default();
+/// let skip = Moments::new(
+///     Tensor::<NdArray<f32>, 2>::from_data([[2.0]], &device),
+///     Tensor::<NdArray<f32>, 2>::from_data([[3.0]], &device),
+/// );
+/// let branch = Moments::new(
+///     Tensor::<NdArray<f32>, 2>::from_data([[5.0]], &device),
+///     Tensor::<NdArray<f32>, 2>::from_data([[12.0]], &device),
+/// );
+/// let output = propagate_residual_add_correlated(
+///     &skip,
+///     &branch,
+///     Tensor::<NdArray<f32>, 2>::from_data([[6.0]], &device),
+/// );
+///
+/// // Var(skip + branch) = 3 + 12 + 2 * 6.
+/// assert_eq!(output.var.into_data().to_vec::<f32>().unwrap(), vec![27.0]);
+/// ```
 pub fn propagate_residual_add_correlated<B: Backend>(
     skip: &Moments<B>,
     branch: &Moments<B>,
@@ -502,6 +554,41 @@ pub fn propagate_linear_full<B: Backend>(
 /// Gradients differentiate this finite approximation. In particular, it need
 /// not preserve the exact covariance's monotonicity in input correlation when
 /// the marginal means and variances are fixed.
+///
+/// With an autodiff backend, propagation remains in the loss graph. This uses
+/// `burn-ndarray` only for a CPU backend; applications need Burn's `autodiff`
+/// feature enabled to differentiate.
+///
+/// ```
+/// use burn::{backend::Autodiff, tensor::Tensor};
+/// use burn_ndarray::NdArray;
+/// use stableprop::burn_sdp::{propagate_relu_full, MomentsFull};
+///
+/// type Backend = Autodiff<NdArray<f32>>;
+/// let device = Default::default();
+/// let mean = Tensor::<Backend, 2>::from_data([[0.0, 0.0]], &device).require_grad();
+/// let covariance = Tensor::<Backend, 3>::from_data(
+///     [[[1.0, 0.5], [0.5, 1.0]]],
+///     &device,
+/// )
+/// .require_grad();
+/// let output = propagate_relu_full(&MomentsFull::new(mean, covariance.clone()));
+///
+/// let first_mean = output.mean.clone().into_data().to_vec::<f32>().unwrap()[0];
+/// let expected = 1.0 / (2.0 * std::f32::consts::PI).sqrt();
+/// assert!((first_mean - expected).abs() < 1e-6);
+/// let gradients = output.cov.slice([0..1, 0..1, 1..2]).sum().backward();
+/// let gradient = covariance
+///     .grad(&gradients)
+///     .unwrap()
+///     .into_data()
+///     .to_vec::<f32>()
+///     .unwrap()[1];
+/// // At zero mean and correlation 0.5, d Cov(ReLU(X_0), ReLU(X_1))/d Cov(X_0, X_1)
+/// // is 1/4 + 1/(4 pi) for the implemented third-order series.
+/// let expected_gradient = 0.25 + 0.25 / std::f32::consts::PI;
+/// assert!((gradient - expected_gradient).abs() < 1e-6);
+/// ```
 pub fn propagate_relu_full<B: Backend>(m: &MomentsFull<B>) -> MomentsFull<B> {
     let [n, d, _] = m.cov.dims();
     let dev = m.cov.device();

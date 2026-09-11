@@ -276,6 +276,27 @@ pub fn propagate_relu(moments: &Moments) -> Moments {
 /// standard deviations. Affine layers retain covariance; ReLU drops its
 /// off-diagonal entries. An empty layer sequence returns the input moments.
 ///
+/// # Example
+///
+/// ```
+/// use stableprop::{propagate_sequential, Layer};
+///
+/// let layers = [
+///     Layer::Linear {
+///         weight: vec![vec![1.0, -1.0]],
+///         bias: vec![0.0],
+///     },
+///     Layer::ReLU,
+/// ];
+/// let output = propagate_sequential(&layers, &[0.0, 0.0], &[0.3, 0.4]);
+///
+/// // X_0 - X_1 has variance 0.3^2 + 0.4^2 = 0.25 before ReLU.
+/// let expected_mean = 0.5 / (2.0 * std::f64::consts::PI).sqrt();
+/// let expected_variance = 0.125 - expected_mean * expected_mean;
+/// assert!((output.mean[0] - expected_mean).abs() < 1e-12);
+/// assert!((output.cov[0][0] - expected_variance).abs() < 1e-12);
+/// ```
+///
 /// # Panics
 /// Panics on empty or mismatched input vectors, non-finite inputs, negative
 /// standard deviations, standard deviations whose nonzero squared variance is
