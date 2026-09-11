@@ -371,7 +371,7 @@ fn run_study(dev: &Device<Ad>) {
         println!("  study repeat {}/{}", repeat + 1, STUDY_REPEATS);
         trials.push(evaluate(
             // Train on clean centers so the network approximates f. Only
-            // calibration/test targets contain one feature perturbation.
+            // calibration/test targets include independent feature perturbations.
             make_data(STUDY_TRAIN, study_seed(repeat, 1), true, false),
             make_data(STUDY_CAL, study_seed(repeat, 2), true, true),
             make_data(STUDY_TEST, study_seed(repeat, 3), true, true),
