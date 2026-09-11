@@ -349,6 +349,12 @@ that calculation in a deeper network still replaces non-Gaussian layer inputs
 by Gaussians. Removing covariance-series truncation removes one error source,
 not this closure error.
 
+An exact identity still needs numerical special functions. The
+[Kuang–Lin implementation](https://github.com/simontheflutist/analytic-moments/blob/79186d364b41c93a4299eda52d260da7ee08a65a/neural_uncertainty_propagation/activation.py#L83-L122)
+evaluates a bivariate Gaussian CDF contribution using 30-point Gaussian
+quadrature. Replacing the series therefore requires checking integration error,
+gradients near degenerate correlations, and runtime against the current path.
+
 ## Design consequences and verification
 
 The historical connections are distinct: Bussgang relates a nonlinear output
@@ -380,8 +386,10 @@ The validation layers correspond to different claims:
   identities and sampled joint distributions.
 - [Property tests](../tests/burn_properties.rs) check transformations that
   should commute with propagation and numerical covariance constraints.
-- [Exact centered pair references](../tests/relu_covariance_reference.rs)
-  measure the error of the finite series rather than demanding false exactness.
+- [Gaussian pair references](../tests/relu_covariance_reference.rs) use the
+  centered closed form and independent nonzero-mean quadrature fixtures to
+  check the series remainder across feature scales. A separate gradient test
+  checks the derivative of the approximation, not of the exact pair moments.
 - [Extreme-scale gradients](../tests/burn_extreme_scales.rs) and
   [Metal comparisons](../tests/burn_metal.rs) test floating-point and backend
   behavior separately from the symbolic formulas.

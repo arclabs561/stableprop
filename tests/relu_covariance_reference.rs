@@ -1,9 +1,155 @@
 #![cfg(feature = "burn")]
 
+use burn::backend::Autodiff;
 use burn::tensor::{DType, Tensor, TensorData};
 use burn_ndarray::NdArray;
 use proptest::prelude::*;
 use stableprop::burn_sdp::{propagate_relu_full, MomentsFull};
+
+fn relu_moments_and_omitted_energy(mu: f64, sigma: f64, p: f64) -> (f64, f64, f64) {
+    let alpha = mu / sigma;
+    let phi = (-0.5 * alpha * alpha).exp() / (2.0 * std::f64::consts::PI).sqrt();
+    let mean = mu * p + sigma * phi;
+    let raw_second = (mu * mu + sigma * sigma) * p + mu * sigma * phi;
+    let variance = raw_second - mean * mean;
+    let c1 = sigma * p;
+    let c2 = sigma * phi;
+    let c3 = -sigma * alpha * phi;
+    let omitted_energy = variance - c1 * c1 - c2 * c2 / 2.0 - c3 * c3 / 6.0;
+    (mean, variance, omitted_energy)
+}
+
+#[derive(Clone, Copy)]
+struct NonzeroReluFixture {
+    mean: [f64; 2],
+    std: [f64; 2],
+    cdf: [f64; 2],
+    rho: f64,
+    covariance: f64,
+}
+
+// mpmath at 90 decimal digits generated these values and agreed with an
+// independent 50-digit run. For |rho| < 1, write X = mu_l + sigma_l Z;
+// condition on Z and integrate X_+ E[Y_+ | Z] phi(Z), where Y | Z has mean
+// mu_r + rho sigma_r Z and standard deviation sigma_r sqrt(1-rho^2). At
+// rho = +/-1, integrate the resulting deterministic one-dimensional pair.
+// The fixtures include positive and negative products alpha_l alpha_r, so the
+// third Hermite coefficient has both product signs.
+const NONZERO_RELU_FIXTURES: [NonzeroReluFixture; 8] = [
+    NonzeroReluFixture {
+        mean: [-0.75, 1.1],
+        std: [0.8, 1.7],
+        cdf: [0.174_250_711_880_542_4, 0.7412030632713038],
+        rho: -0.8,
+        covariance: -0.09702746076403964,
+    },
+    NonzeroReluFixture {
+        mean: [1.4, -0.35],
+        std: [0.6, 1.3],
+        cdf: [0.9901846713713547, 0.39387605185723835],
+        rho: 0.75,
+        covariance: 0.22969598162322754,
+    },
+    NonzeroReluFixture {
+        mean: [-1.25, -0.55],
+        std: [1.1, 0.7],
+        cdf: [0.12790220398830822, 0.21601744600250372],
+        rho: 0.6,
+        covariance: 0.022873544351819026,
+    },
+    NonzeroReluFixture {
+        mean: [0.35, 1.25],
+        std: [1.7, 0.5],
+        cdf: [0.5815585947678864, 0.9937903346742238],
+        rho: -0.65,
+        covariance: -0.3183978902145745,
+    },
+    NonzeroReluFixture {
+        mean: [-0.4, 0.9],
+        std: [1.2, 0.8],
+        cdf: [0.3694413401817636, 0.869_705_482_863_191],
+        rho: 0.98,
+        covariance: 0.3316340030070209,
+    },
+    NonzeroReluFixture {
+        mean: [0.4, -0.9],
+        std: [1.2, 0.8],
+        cdf: [0.6305586598182364, 0.13029451713680886],
+        rho: -0.98,
+        covariance: -0.03683090939107107,
+    },
+    NonzeroReluFixture {
+        mean: [0.25, -0.45],
+        std: [0.9, 1.4],
+        cdf: [0.609408524566425, 0.3739428170267853],
+        rho: 1.0,
+        covariance: 0.3814289914100701,
+    },
+    NonzeroReluFixture {
+        mean: [0.25, -0.45],
+        std: [0.9, 1.4],
+        cdf: [0.609408524566425, 0.3739428170267853],
+        rho: -1.0,
+        covariance: -0.18027030895089536,
+    },
+];
+
+fn assert_nonzero_relu_fixture(fixture: NonzeroReluFixture, scales: [f64; 2]) {
+    let mean_left = fixture.mean[0] * scales[0];
+    let mean_right = fixture.mean[1] * scales[1];
+    let sigma_left = fixture.std[0] * scales[0];
+    let sigma_right = fixture.std[1] * scales[1];
+    let covariance_unit = sigma_left * sigma_right;
+    let device = Default::default();
+    let input = MomentsFull::new(
+        Tensor::<NdArray<f64>, 2>::from_data(
+            TensorData::new(vec![mean_left, mean_right], [1, 2]),
+            (&device, DType::F64),
+        ),
+        Tensor::<NdArray<f64>, 3>::from_data(
+            TensorData::new(
+                vec![
+                    sigma_left * sigma_left,
+                    fixture.rho * covariance_unit,
+                    fixture.rho * covariance_unit,
+                    sigma_right * sigma_right,
+                ],
+                [1, 2, 2],
+            ),
+            (&device, DType::F64),
+        ),
+    );
+    let output = propagate_relu_full(&input);
+    let mean = output.mean.into_data().to_vec::<f64>().unwrap();
+    let cov = output.cov.into_data().to_vec::<f64>().unwrap();
+    let (expected_mean_left, expected_variance_left, delta_left) =
+        relu_moments_and_omitted_energy(mean_left, sigma_left, fixture.cdf[0]);
+    let (expected_mean_right, expected_variance_right, delta_right) =
+        relu_moments_and_omitted_energy(mean_right, sigma_right, fixture.cdf[1]);
+    assert!(delta_left >= 0.0 && delta_right >= 0.0);
+
+    let mean_floor_left = 4096.0 * f64::EPSILON * (mean_left.abs() + sigma_left);
+    let mean_floor_right = 4096.0 * f64::EPSILON * (mean_right.abs() + sigma_right);
+    let variance_floor_left =
+        4096.0 * f64::EPSILON * (mean_left * mean_left + sigma_left * sigma_left);
+    let variance_floor_right =
+        4096.0 * f64::EPSILON * (mean_right * mean_right + sigma_right * sigma_right);
+    let covariance_floor = 4096.0 * f64::EPSILON * covariance_unit;
+    let remainder_bound = fixture.rho.abs().powi(4) * (delta_left * delta_right).sqrt();
+    let exact_covariance = fixture.covariance * scales[0] * scales[1];
+
+    assert!((mean[0] - expected_mean_left).abs() <= mean_floor_left);
+    assert!((mean[1] - expected_mean_right).abs() <= mean_floor_right);
+    assert!((cov[0] - expected_variance_left).abs() <= variance_floor_left);
+    assert!((cov[3] - expected_variance_right).abs() <= variance_floor_right);
+    assert!(
+        (cov[1] - exact_covariance).abs() <= remainder_bound + covariance_floor,
+        "rho={}, scales={scales:?}, exact={exact_covariance}, implemented={}, bound={remainder_bound}, floor={covariance_floor}",
+        fixture.rho,
+        cov[1],
+    );
+    assert!((cov[1] - cov[2]).abs() <= covariance_floor);
+}
 
 #[test]
 fn centered_relu_covariance_stays_within_series_remainder() {
@@ -94,6 +240,60 @@ proptest! {
             (exact_centered - implemented).abs() <= remainder_bound + roundoff_floor,
             "rho={rho}, sigmas=({sigma_left}, {sigma_right}), exact={exact_centered}, \
              implemented={implemented}, bound={remainder_bound}, floor={roundoff_floor}",
+        );
+    }
+}
+
+#[test]
+fn nonzero_mean_covariance_gradient_matches_the_truncated_series() {
+    type Ad = Autodiff<NdArray<f64>>;
+    let device = Default::default();
+    let p = 0.158_655_253_931_457_05; // Phi(-1), independently tabulated.
+    let phi_squared = (-1.0f64).exp() / (2.0 * std::f64::consts::PI);
+    for rho in [-0.9, 0.0, 0.9] {
+        let mean = Tensor::<Ad, 2>::from_data([[-1.0, -1.0]], (&device, DType::F64));
+        let covariance =
+            Tensor::<Ad, 3>::from_data([[[1.0, rho], [rho, 1.0]]], (&device, DType::F64))
+                .require_grad();
+        let output = propagate_relu_full(&MomentsFull::new(mean, covariance.clone()));
+        let gradients = output.cov.slice([0..1, 0..1, 1..2]).sum().backward();
+        let gradient = covariance
+            .grad(&gradients)
+            .unwrap()
+            .into_data()
+            .to_vec::<f64>()
+            .unwrap();
+        // Both off-diagonal input entries change with rho. Differentiate the
+        // cubic polynomial, independently of the tensor graph. At rho=-0.9,
+        // this derivative is negative; the exact Gaussian covariance is
+        // increasing by Price's identity. Autodiff correctness does not remove
+        // the approximation error in the derivative.
+        let expected = p * p + phi_squared * (rho + 0.5 * rho * rho);
+        let actual = gradient[1] + gradient[2];
+        assert!(
+            (actual - expected).abs() <= 4096.0 * f64::EPSILON,
+            "rho={rho}, derivative={actual}, series derivative={expected}",
+        );
+    }
+}
+
+#[test]
+fn nonzero_mean_relu_covariance_obeys_hermite_remainder() {
+    for fixture in NONZERO_RELU_FIXTURES {
+        assert_nonzero_relu_fixture(fixture, [1.0, 1.0]);
+    }
+}
+
+proptest! {
+    #[test]
+    fn nonzero_mean_relu_covariance_preserves_hermite_bound_across_scales(
+        fixture_index in 0usize..NONZERO_RELU_FIXTURES.len(),
+        left_exponent in -6i32..=6,
+        right_exponent in -6i32..=6,
+    ) {
+        assert_nonzero_relu_fixture(
+            NONZERO_RELU_FIXTURES[fixture_index],
+            [10.0f64.powi(left_exponent), 10.0f64.powi(right_exponent)],
         );
     }
 }

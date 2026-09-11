@@ -410,11 +410,14 @@ fn eye<B: Backend>(d: usize, device: &B::Device, dtype: DType) -> Tensor<B, 2> {
     Tensor::<B, 2>::from_data(TensorData::new(v, [d, d]), (device, dtype))
 }
 
-/// Mean and full covariance of a batch of `n` independent Gaussians.
+/// A batch of means and within-row covariance matrices.
 ///
-/// `mean` is `[n, d]`, `cov` is `[n, d, d]`. Unlike [`Moments`], this keeps the
-/// cross-feature correlations that diagonal propagation drops. Covariance storage
-/// costs `O(n d^2)`. An affine map from `d_in` to `d_out` costs
+/// `mean` is `[n, d]`, `cov` is `[n, d, d]`. Each row describes one distribution;
+/// covariance between rows is not represented. Unlike [`Moments`], this keeps
+/// cross-feature covariance. Each covariance matrix must be symmetric positive
+/// semidefinite; tensor contents are not checked.
+///
+/// Covariance storage costs `O(n d^2)`. An affine map from `d_in` to `d_out` costs
 /// `O(n d_in d_out (d_in + d_out))` work, or `O(n d^3)` for a square layer.
 #[derive(Clone, Debug)]
 pub struct MomentsFull<B: Backend> {
@@ -491,6 +494,9 @@ pub fn propagate_linear_full<B: Backend>(
 /// with numerical tail handling, and a third-order covariance series off-diagonal.
 ///
 /// The leading series term is the smooth gate `Phi(alpha_i) Phi(alpha_j)`.
+/// Gradients differentiate this finite approximation. In particular, it need
+/// not preserve the exact covariance's monotonicity in input correlation when
+/// the marginal means and variances are fixed.
 pub fn propagate_relu_full<B: Backend>(m: &MomentsFull<B>) -> MomentsFull<B> {
     let [n, d, _] = m.cov.dims();
     let dev = m.cov.device();
@@ -712,9 +718,12 @@ pub fn propagate_linear_cauchy<B: Backend>(
     Cauchy { location, scale }
 }
 
-/// Cauchy propagation through ReLU via local linearization (Petersen 2024): the
-/// gate is 1 where the location is strictly positive (including 0 uses the
-/// inactive branch); the location is rectified and the scale is gated.
+/// Approximate ReLU with a local gate on Cauchy location and scale.
+///
+/// The gate is one at positive locations and zero otherwise, including at zero
+/// (Petersen 2024). The location is rectified and the scale is gated. ReLU of a
+/// nondegenerate Cauchy variable is not Cauchy; the returned parameters describe
+/// this local approximation, not the transformed distribution.
 pub fn propagate_relu_cauchy<B: Backend>(c: &Cauchy<B>) -> Cauchy<B> {
     let gate = c.location.clone().clamp_min(0.0).sign();
     Cauchy {
