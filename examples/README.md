@@ -58,11 +58,20 @@ exact variance decomposition with a product term; simply adding the two
 single-source variances misses it. Seeded Monte Carlo checks the result.
 The parameter distributions are supplied, not learned by this example.
 
-`pairwise_ranking_risk` scores two fixed candidates for 128 query points.
-It estimates how often Gaussian query-feature noise changes the winner,
-then compares with a 2,048-draw Monte Carlo estimate. The score difference
-depends on both score variances and their covariance. Its baseline drops only
-the final score covariance; the hidden-layer calculation is shared.
+`pairwise_ranking_risk` compares deferral policies for two fixed candidates
+under Gaussian query-feature noise. Full covariance, a baseline that drops
+only final score covariance, a local Jacobian, sampled scores, and the point
+score margin each defer the same number of queries. It reports the flip rate
+among retained queries and the flips avoided per deferred query. Deferral
+withholds a decision; the example does not model how a later measurement would
+resolve it.
+
+Probability estimates are compared with a separately sampled reference.
+Brier scores use held-out binary flip outcomes; the point margin is a rank-only
+baseline. The default runs eight sets of 96 query points on one fixed model,
+with 2,048 reference draws per query. Append `-- --study` for 30 sets and
+16,384 reference draws. Reported standard errors summarize variation across
+query sets, conditional on this model and perturbation distribution.
 
 An affine control isolates the exact Gaussian-margin calculation; the Monte
 Carlo comparison still has sampling error. The ReLU network additionally
@@ -93,6 +102,28 @@ constant-width split-conformal intervals on separate calibration and test data.
 Read coverage and average width together. Split conformal targets marginal
 coverage under exchangeability; a finite test split need not hit 90% exactly.
 The adaptive scale need not produce narrower intervals than the constant one.
+
+For a repeated heteroscedastic experiment, run:
+
+```sh
+cargo run --release --features burn --example conformal_intervals -- --study
+```
+
+This slower mode fits 30 models on separate clean-feature training sets.
+Calibration and test targets use one draw of independent Gaussian noise in
+each feature, with a known scale that varies by input, plus label noise. The
+feature scale is supplied to propagation and never fitted from residuals. Calibration and
+test data share the same distribution; training data need not share it for the
+split-conformal coverage argument.
+
+The output gives approximate 95% intervals across repeats and paired
+scaled-minus-constant differences. Read coverage and width together: the
+predeclared screens require coverage within two percentage points of 90% and
+at least 2% lower mean width with a paired interval below zero. These are
+pilot-study criteria, not coverage guarantees. Low/high noise-bin coverage is
+descriptive. The score construction follows
+[locally weighted split conformal prediction](https://arxiv.org/html/1604.04173#S5.SS2),
+using a propagated sensitivity scale in place of a fitted residual scale.
 
 `robust_training` compares plain MSE with MSE plus a propagated-variance penalty,
 using shared initial weights and test noise. It prints RMSE with and without

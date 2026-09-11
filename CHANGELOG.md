@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Expand both standard-deviation tensors before masked selection in
+  full-covariance ReLU. This avoids partially evaluated broadcast outputs in
+  Burn 0.21 GPU kernels and non-finite gradients on larger batches.
+
+### Added
+
+- Executable API recipes for Gaussian propagation, explicit tensor precision,
+  full-covariance autodiff, and correlated residual addition.
+- A reproducible Gaussian pair reference generator and independent checks of
+  composed moment gradients with respect to means, covariance, and weights.
+- Repeated conformal-interval and ranking-deferral studies with separate
+  evaluation draws and uncertainty summaries across trials.
+- A Metal full-covariance forward/backward workload with shared CPU/GPU inputs
+  and gradient comparisons.
+
 ## [0.5.1] - 2026-09-11
 
 ### Fixed
