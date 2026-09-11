@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Share conformal rank selection with `statskit`; keep residual scores,
+  sensitivity scales and group aggregation in the interval examples.
+
 ### Fixed
 
 - Reject mismatched floating dtypes in Burn distribution constructors, before

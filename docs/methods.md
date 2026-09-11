@@ -340,9 +340,19 @@ high sensitivity can indicate useful signal or unreliable measurements.
 The [sensitivity and selection note](sensitivity-and-selection.md) develops
 that distinction, its active-learning evidence, and possible extensions.
 
+### Calibration of prediction intervals
+
 Calibration asks another question: do the reported intervals cover the target
 at the intended rate? Propagation alone does not answer it. The conformal
-example uses held-out labels to calibrate a propagated scale.
+example uses held-out labels to calibrate a propagated scale. It divides
+absolute prediction residuals by a fixed positive scale, then calibrates
+the resulting scores. Fix the predictor and scale independently of
+calibration; the calibration and future scores must be exchangeable.
+[`statskit::conformal`](https://docs.rs/statskit/latest/statskit/conformal/)
+selects the scalar threshold. Stableprop's examples define residual scores
+and turn that threshold into intervals. [Heyting](https://github.com/arclabs561/heyting)
+uses the same rank operation for query answer sets; its score construction
+and prediction target differ.
 
 ### Calibration for grouped observations
 

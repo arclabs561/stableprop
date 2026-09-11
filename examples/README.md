@@ -147,6 +147,12 @@ Read coverage and average width together. Split conformal targets marginal
 coverage under exchangeability; a finite test split need not hit 90% exactly.
 The adaptive scale need not produce narrower intervals than the constant one.
 
+Both interval examples use
+[`statskit::conformal`](https://docs.rs/statskit/latest/statskit/conformal/)
+for finite-sample rank selection. Residual scores, sensitivity scales and
+group aggregation are defined here; propagation itself does not calibrate
+coverage.
+
 This slower mode fits 30 models on separate clean-feature training sets.
 Calibration and test targets use one draw of independent Gaussian noise in
 each feature, with a known scale that varies by input, plus label noise. The

@@ -27,6 +27,7 @@ use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::Backend;
 use burn::tensor::{activation, Device, Tensor, TensorData};
 use burn_ndarray::NdArray;
+use statskit::conformal::{calibrate_in_place, Coverage, Threshold};
 
 use stableprop::burn_sdp::{
     propagate_linear, propagate_linear_full, propagate_relu, propagate_relu_full, Moments,
@@ -442,12 +443,17 @@ fn conformal_quantile(mut scores: Vec<f64>) -> f64 {
     assert!(scores
         .iter()
         .all(|score| score.is_finite() && *score >= 0.0));
-    let rank = ((scores.len() + 1) as f64 * (1.0 - ALPHA)).ceil() as usize;
-    if rank > scores.len() {
+    // Calibrate at the miscoverage value represented by ALPHA.
+    let coverage = Coverage::from_miscoverage(ALPHA).expect("ALPHA must be in (0, 1)");
+    if scores.is_empty() {
         return f64::INFINITY;
     }
-    scores.sort_by(f64::total_cmp);
-    scores[rank - 1]
+    match calibrate_in_place(&mut scores, coverage)
+        .expect("validated finite nonnegative scores must calibrate")
+    {
+        Threshold::Finite(value) => value,
+        Threshold::Unbounded => f64::INFINITY,
+    }
 }
 
 fn interval_metrics(
@@ -957,12 +963,19 @@ mod tests {
 
     #[test]
     fn conformal_rank_preserves_unbounded_and_configured_finite_cases() {
+        assert!(conformal_quantile(Vec::new()).is_infinite());
         assert!(conformal_quantile(vec![1.0; 8]).is_infinite());
         assert_eq!(conformal_quantile(vec![1.0; 9]), 1.0);
         for (count, expected) in [(400, 361.0), (1000, 901.0)] {
             let scores = (1..=count).rev().map(f64::from).collect();
             assert_eq!(conformal_quantile(scores), expected);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn conformal_adapter_rejects_signed_residual_scores() {
+        let _ = conformal_quantile(vec![0.0, -0.01]);
     }
 
     #[test]

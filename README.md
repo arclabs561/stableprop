@@ -26,7 +26,7 @@ it does not infer those distributions from data.
 | [Gaussian embeddings](docs/methods.md#uncertainty-sources-and-downstream-methods) | Learn a distribution for each representation | Propagate supplied embedding moments through supported layers |
 | [Bayesian models](docs/methods.md#how-the-methods-developed) | Learn parameter uncertainty from observations | Propagate supplied moments; posterior fitting and updating are external |
 | Contrastive learning | Train representations using pair relationships | Add a differentiable sensitivity penalty, as in [`tuplet_contrastive`](examples/tuplet_contrastive.rs) |
-| Conformal prediction | Calibrate prediction sets using held-out observations | Supply an input-dependent scale for [`conformal_intervals`](examples/conformal_intervals.rs) |
+| [Conformal prediction](docs/methods.md#calibration-of-prediction-intervals) | Calibrate prediction sets using held-out observations | Supply an input-dependent scale for [`conformal_intervals`](examples/conformal_intervals.rs), with calibration ranks from [statskit](https://github.com/arclabs561/statskit) |
 
 Input sensitivity and parameter uncertainty arise from different random
 quantities. A stable score can still be poorly learned; a well-learned model

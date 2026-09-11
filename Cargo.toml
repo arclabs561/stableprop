@@ -31,6 +31,7 @@ burn = { version = "0.21.0", default-features = false, features = ["std"], optio
 burn = { version = "0.21.0", default-features = false, features = ["std", "autodiff"] }
 burn-ndarray = "0.21.0"
 ricci = "0.10"
+statskit = "0.3.0"
 tuplet = { version = "0.3", features = ["burn-ndarray"] }
 proptest = "1.5"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }

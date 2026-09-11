@@ -33,6 +33,7 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{activation, Device, Tensor, TensorData};
 use burn_ndarray::NdArray;
 use stableprop::burn_sdp::{propagate_linear, propagate_relu, Moments};
+use statskit::conformal::{calibrate_in_place, Coverage, Threshold};
 
 type Ad = Autodiff<NdArray<f32>>;
 type Nd = NdArray<f32>;
@@ -489,13 +490,17 @@ fn quantile(scores: &mut [f64]) -> f64 {
     {
         panic!("conformal scores must be finite and nonnegative");
     }
-    let groups = scores.len();
-    let rank = (9 * (groups + 1)).div_ceil(10);
-    if rank > groups {
+    // Request exactly 90% group coverage.
+    let coverage = Coverage::from_ratio(9, 10).expect("9/10 must be valid coverage");
+    if scores.is_empty() {
         return f64::INFINITY;
     }
-    scores.sort_by(f64::total_cmp);
-    scores[rank - 1]
+    match calibrate_in_place(scores, coverage)
+        .expect("validated finite nonnegative scores must calibrate")
+    {
+        Threshold::Finite(value) => value,
+        Threshold::Unbounded => f64::INFINITY,
+    }
 }
 
 fn group_scores(
@@ -845,6 +850,7 @@ mod tests {
 
     #[test]
     fn group_quantile_has_unbounded_eight_group_boundary_and_handles_ties() {
+        assert!(quantile(&mut []).is_infinite());
         assert!(quantile(&mut vec![1.0; 8]).is_infinite());
         assert_eq!(quantile(&mut vec![1.0; 9]), 1.0);
         let rows = Rows {
@@ -859,5 +865,11 @@ mod tests {
         once.sort_by(f64::total_cmp);
         duplicated.sort_by(f64::total_cmp);
         assert_eq!(once, duplicated);
+    }
+
+    #[test]
+    #[should_panic(expected = "conformal scores must be finite and nonnegative")]
+    fn group_quantile_adapter_rejects_signed_residual_scores() {
+        let _ = quantile(&mut [0.0, -0.01]);
     }
 }
