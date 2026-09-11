@@ -112,14 +112,24 @@ cargo run --release --features burn --example correlated_residual
 cargo run --release --features burn --example cauchy_tails
 ```
 
-`full_covariance` compares diagonal propagation and the third-order ReLU
-covariance approximation against 400 Monte Carlo samples through an MLP. Read
-the mean absolute relative standard-deviation error alongside the mean ratio:
-a ratio near one can hide errors that cancel. This seeded comparison does not establish a general ordering.
-It also reports normalized Frobenius error across the within-row output covariance
-matrices, embedding the diagonal prediction on each matrix's diagonal. With one
-hidden ReLU layer, this measures covariance approximation without repeated
-Gaussian closure; the Monte Carlo reference still has sampling error.
+`full_covariance` compares diagonal and full propagation at one, two, and three
+hidden ReLU layers across three seeds. Each seed shares network prefixes,
+the output affine map, 128 input centers, and Gaussian perturbations across
+depths. Each Monte Carlo estimate uses 2,048 draws per center; an independent
+repeat shows sampling variability, not an error bound.
+
+The table reports normalized errors in output means, covariance matrices, and
+the standard deviation of the score difference `output[0] - output[1]`.
+Mean error is scaled by the square root of total output variance; covariance
+and margin-standard-deviation errors use the corresponding reference norms.
+The diagonal estimate is embedded in a full matrix for comparison. Read each
+metric separately: accurate marginal variances need not give accurate margins.
+
+At depth one, full propagation has covariance-series error but no repeated
+Gaussian closure. Additional layers introduce both errors. A scalar control
+isolates closure: repeated ReLU leaves every sample unchanged after its first
+application, yet repeatedly replacing that output by a Gaussian changes the
+propagated moments. This sweep does not establish a general ordering of methods.
 
 `correlated_residual` propagates `Y = X + ReLU(X W + b) V`. It carries
 `Cov(X, branch)` through affine and ReLU helpers, then supplies its diagonal to

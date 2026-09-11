@@ -226,8 +226,8 @@ The [`active_selection`](../examples/active_selection.rs) example implements
 the four basic policies on a fixed two-class synthetic pool. It holds the
 training recipe and evaluation noise fixed, refits from shared initial weights,
 and reports learning curves over three seeds without a variance penalty.
-In the reference run at 96 labels, mean unperturbed accuracy was 0.992 for entropy,
-0.965 for random, 0.944 for analytic disagreement, and 0.965 for sampled
+In a Burn 0.21 NdArray run at 96 labels, mean unperturbed accuracy was 0.992 for entropy,
+0.965 for random, 0.944 for analytic disagreement, and 0.964 for sampled
 disagreement. Agreement between the two disagreement scores did not make them
 better selectors. The [example guide](../examples/README.md#active-selection)
 describes the controls and timing limits.
@@ -249,10 +249,9 @@ Affine and Gaussian ReLU cross-covariance transport is implemented and exercised
 by [`correlated_residual`](../examples/correlated_residual.rs). A filtering
 application still needs a joint state model, process and observation noise,
 and a conditioning step; those are not supplied by the propagation helpers.
-An exact Gaussian layer calculation still does not make a deep network's
-pushforward Gaussian. Fixed-rank covariance also needs care: an affine map
-turns a diagonal residual into a generally dense covariance. Keeping only its
-diagonal is a projection, not an exact update.
+The [derivation guide](derivations.md#design-consequences-and-verification)
+explains the remaining Gaussian approximation and why fixed-rank covariance
+requires a projection policy.
 
 ## References
 

@@ -1,12 +1,14 @@
-//! Compares full and diagonal covariance propagation through a two-layer MLP
-//! against Monte Carlo.
+//! Measures covariance propagation error as ReLU depth increases.
 //!
-//! A second affine layer recombines correlated hidden units. Full covariance
-//! retains those cross-terms; the diagonal path drops them. ReLU covariance
-//! uses a third-order approximation, so the seeded result does not establish
-//! a general ordering of the methods.
-//! With one hidden ReLU layer, no repeated Gaussian approximation is needed.
-//! The Monte Carlo reference still has sampling error.
+//! In the full-covariance path, depth one tests the finite ReLU covariance
+//! series without repeated Gaussian closure. Each deeper network also
+//! approximates the preceding ReLU output as Gaussian. Its extra
+//! error therefore combines a new series truncation with repeated Gaussian
+//! closure; the depth sweep does not attribute that gap to closure alone.
+//!
+//! A scalar control below isolates closure: `ReLU(ReLU(X)) == ReLU(X)` for
+//! every sample, while repeated Gaussian moment propagation need not preserve
+//! those moments after the first ReLU.
 //!
 //! Run: `cargo run --release --example full_covariance --features burn`
 
@@ -26,192 +28,402 @@ type Nd = NdArray<f32>;
 const D_IN: usize = 8;
 const HIDDEN: usize = 24;
 const D_OUT: usize = 4;
-const N: usize = 1000;
+const N: usize = 128;
 const INPUT_STD: f64 = 0.4;
-const MC_SAMPLES: usize = 400;
+const MC_SAMPLES: usize = 2_048;
+const DEPTHS: [usize; 3] = [1, 2, 3];
+const SEEDS: [u64; 3] = [0xF011_C0A1, 0xF011_C0A2, 0xF011_C0A3];
+const MODEL_SEED: u64 = 0x4D4F_4445;
+const INPUT_SEED: u64 = 0x494E_5054;
+const MC_SEED: u64 = 0x4D43_4E4F;
+const REPEAT_SEED: u64 = 0x5245_5045;
 
 #[derive(Module, Debug)]
 struct Mlp<B: Backend> {
-    lin1: Linear<B>,
-    lin2: Linear<B>,
+    input: Linear<B>,
+    hidden1: Linear<B>,
+    hidden2: Linear<B>,
+    output: Linear<B>,
 }
 
 impl<B: Backend> Mlp<B> {
     fn init(device: &B::Device) -> Self {
+        let model = Self {
+            input: LinearConfig::new(D_IN, HIDDEN).init(device),
+            hidden1: LinearConfig::new(HIDDEN, HIDDEN).init(device),
+            hidden2: LinearConfig::new(HIDDEN, HIDDEN).init(device),
+            output: LinearConfig::new(HIDDEN, D_OUT).init(device),
+        };
+        // Burn parameters are lazy. Fix every weight before later RNG resets,
+        // including layers first used at greater depth.
+        for layer in model.hidden_layers(3).chain(std::iter::once(&model.output)) {
+            drop(weights(layer));
+        }
+        model
+    }
+
+    fn hidden_layers(&self, depth: usize) -> impl Iterator<Item = &Linear<B>> {
+        assert!(DEPTHS.contains(&depth), "unsupported ReLU depth {depth}");
+        [&self.input, &self.hidden1, &self.hidden2]
+            .into_iter()
+            .take(depth)
+    }
+}
+
+struct Estimate {
+    mean: Vec<f64>,
+    cov: Vec<f64>,
+}
+
+/// Per-row, within-output covariance accumulated in f64 without storing every
+/// Monte Carlo output. Each `push` contains one independent draw per input row.
+struct OnlineMoments {
+    count: usize,
+    mean: Vec<f64>,
+    cov_m2: Vec<f64>,
+}
+
+impl OnlineMoments {
+    fn new() -> Self {
         Self {
-            lin1: LinearConfig::new(D_IN, HIDDEN).init(device),
-            lin2: LinearConfig::new(HIDDEN, D_OUT).init(device),
+            count: 0,
+            mean: vec![0.0; N * D_OUT],
+            cov_m2: vec![0.0; N * D_OUT * D_OUT],
+        }
+    }
+
+    fn push(&mut self, values: &[f32]) {
+        assert_eq!(values.len(), self.mean.len(), "unexpected MC output shape");
+        self.count += 1;
+        let n = self.count as f64;
+        for row in 0..N {
+            let mut delta = [0.0; D_OUT];
+            for (feature, difference) in delta.iter_mut().enumerate() {
+                let index = row * D_OUT + feature;
+                *difference = f64::from(values[index]) - self.mean[index];
+                self.mean[index] += *difference / n;
+            }
+            for (left, difference) in delta.iter().enumerate() {
+                for right in 0..D_OUT {
+                    let right_index = row * D_OUT + right;
+                    let covariance_index = (row * D_OUT + left) * D_OUT + right;
+                    self.cov_m2[covariance_index] +=
+                        difference * (f64::from(values[right_index]) - self.mean[right_index]);
+                }
+            }
+        }
+    }
+
+    fn finish(self) -> Estimate {
+        assert!(
+            self.count > 1,
+            "Monte Carlo covariance needs at least two draws"
+        );
+        let divisor = (self.count - 1) as f64;
+        Estimate {
+            mean: self.mean,
+            cov: self
+                .cov_m2
+                .into_iter()
+                .map(|value| value / divisor)
+                .collect(),
         }
     }
 }
 
-fn mean_ratio(est: &[f64], mc: &[f64]) -> f64 {
-    let r: Vec<f64> = est
-        .iter()
-        .zip(mc)
-        .filter(|(_, m)| **m > 1e-6)
-        .map(|(e, m)| e / m)
+fn weights<B: Backend>(layer: &Linear<B>) -> (Tensor<B, 2>, Tensor<B, 1>) {
+    (
+        layer.weight.val(),
+        layer
+            .bias
+            .as_ref()
+            .expect("LinearConfig enables a bias")
+            .val(),
+    )
+}
+
+fn full_estimate(model: &Mlp<Nd>, x: Tensor<Nd, 2>, var: Tensor<Nd, 2>, depth: usize) -> Estimate {
+    let mut hidden = MomentsFull::from_diagonal(x, var);
+    for layer in model.hidden_layers(depth) {
+        let (w, b) = weights(layer);
+        hidden = propagate_relu_full(&propagate_linear_full(&hidden, w, Some(b)));
+    }
+    let (w_out, b_out) = weights(&model.output);
+    let output = propagate_linear_full(&hidden, w_out, Some(b_out));
+    Estimate {
+        mean: output
+            .mean
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .into_iter()
+            .map(f64::from)
+            .collect(),
+        cov: output
+            .cov
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .into_iter()
+            .map(f64::from)
+            .collect(),
+    }
+}
+
+fn diagonal_estimate(
+    model: &Mlp<Nd>,
+    x: Tensor<Nd, 2>,
+    var: Tensor<Nd, 2>,
+    depth: usize,
+) -> Estimate {
+    let mut hidden = Moments::new(x, var);
+    for layer in model.hidden_layers(depth) {
+        let (w, b) = weights(layer);
+        hidden = propagate_relu(&propagate_linear(&hidden, w, Some(b)));
+    }
+    let (w_out, b_out) = weights(&model.output);
+    let output = propagate_linear(&hidden, w_out, Some(b_out));
+    let mean = output
+        .mean
+        .to_data()
+        .to_vec::<f32>()
+        .unwrap()
+        .into_iter()
+        .map(f64::from)
         .collect();
-    r.iter().sum::<f64>() / r.len() as f64
-}
-
-fn mean_abs_relative_error(est: &[f64], mc: &[f64]) -> f64 {
-    let errors: Vec<f64> = est
-        .iter()
-        .zip(mc)
-        .filter(|(_, m)| **m > 1e-6)
-        .map(|(e, m)| (e - m).abs() / m)
-        .collect();
-    errors.iter().sum::<f64>() / errors.len() as f64
-}
-
-fn normalized_frobenius_error(est: &[f64], mc: &[f64]) -> f64 {
-    let squared_error: f64 = est
-        .iter()
-        .zip(mc)
-        .map(|(estimate, reference)| (estimate - reference).powi(2))
-        .sum();
-    let reference_norm: f64 = mc.iter().map(|value| value.powi(2)).sum();
-    squared_error.sqrt() / reference_norm.sqrt().max(1e-12)
-}
-
-fn main() {
-    let dev = Device::<Nd>::default();
-    <Nd as Backend>::seed(&dev, 0xF011_C0A1);
-    let model = Mlp::<Nd>::init(&dev);
-    let w1 = model.lin1.weight.val();
-    let b1 = model.lin1.bias.as_ref().map(|p| p.val());
-    let w2 = model.lin2.weight.val();
-    let b2 = model.lin2.bias.as_ref().map(|p| p.val());
-
-    let x = Tensor::<Nd, 2>::random([N, D_IN], Distribution::Normal(0.0, 1.0), &dev);
-    let var0 = Tensor::<Nd, 2>::full([N, D_IN], INPUT_STD * INPUT_STD, &dev);
-
-    // Diagonal propagation.
-    let d1 = propagate_relu(&propagate_linear(
-        &Moments::new(x.clone(), var0.clone()),
-        w1.clone(),
-        b1.clone(),
-    ));
-    let d2 = propagate_linear(&d1, w2.clone(), b2.clone());
-    let diag_var: Vec<f64> = d2
+    let variance: Vec<f64> = output
         .var
         .to_data()
         .to_vec::<f32>()
         .unwrap()
-        .iter()
-        .map(|v| *v as f64)
+        .into_iter()
+        .map(f64::from)
         .collect();
-    let diag_std: Vec<f64> = diag_var.iter().map(|v| v.max(0.0).sqrt()).collect();
+    let mut cov = vec![0.0; N * D_OUT * D_OUT];
+    for row in 0..N {
+        for feature in 0..D_OUT {
+            cov[(row * D_OUT + feature) * D_OUT + feature] = variance[row * D_OUT + feature];
+        }
+    }
+    Estimate { mean, cov }
+}
 
-    // Full-covariance propagation.
-    let f1 = propagate_relu_full(&propagate_linear_full(
-        &MomentsFull::from_diagonal(x.clone(), var0),
-        w1.clone(),
-        b1.clone(),
-    ));
-    let f2 = propagate_linear_full(&f1, w2.clone(), b2.clone());
-    let full_std: Vec<f64> = f2
-        .variance()
-        .to_data()
-        .to_vec::<f32>()
-        .unwrap()
-        .iter()
-        .map(|v| (*v as f64).max(0.0).sqrt())
-        .collect();
-    let full_cov: Vec<f64> = f2
-        .cov
-        .to_data()
-        .to_vec::<f32>()
-        .unwrap()
-        .iter()
-        .map(|v| *v as f64)
-        .collect();
+fn forward(model: &Mlp<Nd>, x: Tensor<Nd, 2>, depth: usize) -> Tensor<Nd, 2> {
+    let mut hidden = x;
+    for layer in model.hidden_layers(depth) {
+        hidden = activation::relu(layer.forward(hidden));
+    }
+    let (w_out, b_out) = weights(&model.output);
+    hidden.matmul(w_out) + b_out.reshape([1, D_OUT])
+}
 
-    // Monte Carlo.
-    let len = N * D_OUT;
-    let mut sums = vec![0.0f64; len];
-    let mut sumsq = vec![0.0f64; len];
-    let mut sum_outer = vec![0.0f64; N * D_OUT * D_OUT];
+fn monte_carlo(model: &Mlp<Nd>, x: &Tensor<Nd, 2>, depth: usize, dev: &Device<Nd>) -> Estimate {
+    let mut moments = OnlineMoments::new();
     for _ in 0..MC_SAMPLES {
-        let noise = Tensor::<Nd, 2>::random([N, D_IN], Distribution::Normal(0.0, INPUT_STD), &dev);
-        let h = activation::relu(
-            (x.clone() + noise).matmul(w1.clone()) + b1.clone().unwrap().reshape([1, HIDDEN]),
-        );
-        let y = (h.matmul(w2.clone()) + b2.clone().unwrap().reshape([1, D_OUT]))
+        let noise = Tensor::<Nd, 2>::random([N, D_IN], Distribution::Normal(0.0, INPUT_STD), dev);
+        let values = forward(model, x.clone() + noise, depth)
             .to_data()
             .to_vec::<f32>()
             .unwrap();
-        for i in 0..len {
-            sums[i] += y[i] as f64;
-            sumsq[i] += (y[i] as f64).powi(2);
+        moments.push(&values);
+    }
+    moments.finish()
+}
+
+fn normalized_covariance_error(estimate: &[f64], reference: &[f64]) -> f64 {
+    assert_eq!(
+        estimate.len(),
+        reference.len(),
+        "covariance shapes must match"
+    );
+    let squared_error = estimate
+        .iter()
+        .zip(reference)
+        .map(|(left, right)| (left - right).powi(2))
+        .sum::<f64>();
+    let reference_norm = reference.iter().map(|value| value.powi(2)).sum::<f64>();
+    assert!(reference_norm > 0.0, "Monte Carlo covariance norm is zero");
+    squared_error.sqrt() / reference_norm.sqrt()
+}
+
+fn normalized_mean_error(estimate: &Estimate, reference: &Estimate) -> f64 {
+    let squared_error = estimate
+        .mean
+        .iter()
+        .zip(&reference.mean)
+        .map(|(left, right)| (left - right).powi(2))
+        .sum::<f64>();
+    let output_scale = (0..N)
+        .flat_map(|row| (0..D_OUT).map(move |feature| (row * D_OUT + feature) * D_OUT + feature))
+        .map(|index| reference.cov[index])
+        .sum::<f64>();
+    assert!(output_scale > 0.0, "Monte Carlo output variance is zero");
+    squared_error.sqrt() / output_scale.sqrt()
+}
+
+fn margin_standard_deviations(cov: &[f64]) -> Vec<f64> {
+    (0..N)
+        .map(|row| {
+            let base = row * D_OUT * D_OUT;
+            let variance = cov[base] + cov[base + D_OUT + 1] - 2.0 * cov[base + 1];
+            assert!(
+                variance >= 0.0,
+                "output margin variance is negative: {variance:e}"
+            );
+            variance.sqrt()
+        })
+        .collect()
+}
+
+fn normalized_margin_std_error(estimate: &Estimate, reference: &Estimate) -> f64 {
+    let estimate = margin_standard_deviations(&estimate.cov);
+    let reference = margin_standard_deviations(&reference.cov);
+    let squared_error = estimate
+        .iter()
+        .zip(&reference)
+        .map(|(left, right)| (left - right).powi(2))
+        .sum::<f64>();
+    let reference_scale = reference.iter().map(|value| value.powi(2)).sum::<f64>();
+    assert!(
+        reference_scale > 0.0,
+        "Monte Carlo margin standard deviation is zero"
+    );
+    squared_error.sqrt() / reference_scale.sqrt()
+}
+
+fn scalar_closure_control(dev: &Device<Nd>) {
+    let expected_mean = 1.0 / (2.0 * std::f64::consts::PI).sqrt();
+    let expected_var = 0.5 - 1.0 / (2.0 * std::f64::consts::PI);
+    let mut moments = Moments::<Nd>::new(Tensor::zeros([1, 1], dev), Tensor::ones([1, 1], dev));
+    println!("scalar ReLU closure control (exact mean {expected_mean:.6}, var {expected_var:.6}):");
+    for step in 1..=3 {
+        moments = propagate_relu(&moments);
+        let mean = f64::from(moments.mean.to_data().to_vec::<f32>().unwrap()[0]);
+        let variance = f64::from(moments.var.to_data().to_vec::<f32>().unwrap()[0]);
+        if step == 1 {
+            assert!(
+                (mean - expected_mean).abs() < 2e-6,
+                "first ReLU mean must be exact"
+            );
+            assert!(
+                (variance - expected_var).abs() < 2e-6,
+                "first ReLU variance must be exact"
+            );
         }
-        for row in 0..N {
-            for i in 0..D_OUT {
-                for j in 0..D_OUT {
-                    sum_outer[(row * D_OUT + i) * D_OUT + j] +=
-                        y[row * D_OUT + i] as f64 * y[row * D_OUT + j] as f64;
-                }
+        println!("  propagated step {step}: mean {mean:.6}, var {variance:.6}");
+    }
+}
+
+fn main() {
+    let dev = Device::<Nd>::default();
+    scalar_closure_control(&dev);
+    println!("\ndepth sweep: {N} centers, {MC_SAMPLES} draws per Monte Carlo estimate");
+    println!(
+        "  {:<10} {:>5} {:<9} {:>10} {:>10} {:>10}",
+        "seed", "depth", "method", "mean nRMS", "cov nFrob", "margin nRMS"
+    );
+    for &seed in &SEEDS {
+        // All depths receive the same initialized prefix and the same output map.
+        <Nd as Backend>::seed(&dev, seed ^ MODEL_SEED);
+        let model = Mlp::<Nd>::init(&dev);
+        // Input centers are independent of model initialization and shared across depths.
+        <Nd as Backend>::seed(&dev, seed ^ INPUT_SEED);
+        let x = Tensor::<Nd, 2>::random([N, D_IN], Distribution::Normal(0.0, 1.0), &dev);
+        for &depth in &DEPTHS {
+            let variance = Tensor::<Nd, 2>::full([N, D_IN], INPUT_STD * INPUT_STD, &dev);
+            let full = full_estimate(&model, x.clone(), variance.clone(), depth);
+            let diagonal = diagonal_estimate(&model, x.clone(), variance, depth);
+            // Re-seeding makes the perturbation sequence identical at every depth.
+            <Nd as Backend>::seed(&dev, seed ^ MC_SEED);
+            let reference = monte_carlo(&model, &x, depth, &dev);
+            // An independent, equally sized estimate shows sampling variability.
+            // This stream is also shared across depths, not across input rows.
+            <Nd as Backend>::seed(&dev, seed ^ REPEAT_SEED);
+            let repeat = monte_carlo(&model, &x, depth, &dev);
+            for (name, estimate) in [
+                ("full", &full),
+                ("diagonal", &diagonal),
+                ("MC repeat", &repeat),
+            ] {
+                println!(
+                    "  {seed:08x} {depth:>5} {name:<9} {:>10.4} {:>10.4} {:>10.4}",
+                    normalized_mean_error(estimate, &reference),
+                    normalized_covariance_error(&estimate.cov, &reference.cov),
+                    normalized_margin_std_error(estimate, &reference),
+                );
             }
         }
     }
-    let kf = MC_SAMPLES as f64;
-    let mc_std: Vec<f64> = (0..len)
-        .map(|i| {
-            ((sumsq[i] - sums[i] * sums[i] / kf) / (kf - 1.0))
-                .max(0.0)
-                .sqrt()
-        })
-        .collect();
-    let mut mc_cov = vec![0.0; N * D_OUT * D_OUT];
-    let mut diag_cov = vec![0.0; N * D_OUT * D_OUT];
-    for row in 0..N {
-        for i in 0..D_OUT {
-            for j in 0..D_OUT {
-                let index = (row * D_OUT + i) * D_OUT + j;
-                mc_cov[index] = (sum_outer[index]
-                    - sums[row * D_OUT + i] * sums[row * D_OUT + j] / kf)
-                    / (kf - 1.0);
-                if i == j {
-                    diag_cov[index] = diag_var[row * D_OUT + i];
-                }
-            }
-        }
+    println!("\nmean nRMS scales output-mean error by aggregate MC output standard deviation.");
+    println!("margin nRMS uses the fixed output-0 minus output-1 standard deviation.");
+    println!("MC repeat compares two independent estimates; it is a sampling diagnostic, not an error bound.");
+    println!("Depth 1 has no repeated Gaussian closure; deeper rows include closure and further series approximations.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sampling_seeds_do_not_change_the_initialized_network() {
+        let dev = Device::<Nd>::default();
+        let predictions = [17, 29].map(|sampling_seed| {
+            <Nd as Backend>::seed(&dev, MODEL_SEED);
+            let model = Mlp::<Nd>::init(&dev);
+            <Nd as Backend>::seed(&dev, sampling_seed);
+            DEPTHS.map(|depth| {
+                forward(&model, Tensor::from_data([[0.25; D_IN]], &dev), depth)
+                    .into_data()
+                    .to_vec::<f32>()
+                    .unwrap()
+            })
+        });
+        assert_eq!(predictions[0], predictions[1]);
     }
 
-    println!("output std vs {MC_SAMPLES}-sample Monte Carlo:");
-    println!(
-        "  {:<17} {:>11} {:>11}",
-        "method", "mean ratio", "mean abs rel err"
-    );
-    println!(
-        "  {:<17} {:>11.3} {:>11.3}",
-        "diagonal",
-        mean_ratio(&diag_std, &mc_std),
-        mean_abs_relative_error(&diag_std, &mc_std)
-    );
-    println!(
-        "  {:<17} {:>11.3} {:>11.3}",
-        "full covariance",
-        mean_ratio(&full_std, &mc_std),
-        mean_abs_relative_error(&full_std, &mc_std)
-    );
-    println!(
-        "\nRatios are analytic / MC per output; lower relative error is closer on this seeded comparison."
-    );
-    println!("\nwithin-row output covariance vs {MC_SAMPLES}-sample Monte Carlo:");
-    println!("  {:<17} {:>28}", "method", "normalized Frobenius error");
-    println!(
-        "  {:<17} {:>28.3}",
-        "diagonal",
-        normalized_frobenius_error(&diag_cov, &mc_cov)
-    );
-    println!(
-        "  {:<17} {:>28.3}",
-        "full covariance",
-        normalized_frobenius_error(&full_cov, &mc_cov)
-    );
-    println!(
-        "\nOne hidden ReLU layer avoids repeated Gaussian approximation; Monte Carlo still has sampling error."
-    );
+    #[test]
+    fn sampled_affine_outputs_have_known_covariance_and_margin_error() {
+        let slopes = [1.0, -2.0, 0.5, 3.0];
+        let mut accumulator = OnlineMoments::new();
+        // Four centered scalar observations have sample variance 20/3.
+        // Offsets test centered accumulation; signed slopes test cross terms.
+        for t in [-3.0, -1.0, 1.0, 3.0] {
+            let values = (0..N)
+                .flat_map(|row| {
+                    slopes
+                        .iter()
+                        .map(move |slope| 10_000.0 + 16.0 * row as f32 + slope * t)
+                })
+                .collect::<Vec<_>>();
+            accumulator.push(&values);
+        }
+        let reference = accumulator.finish();
+        for row in 0..N {
+            for left in 0..D_OUT {
+                assert!(
+                    (reference.mean[row * D_OUT + left] - (10_000.0 + 16.0 * row as f64)).abs()
+                        < 1e-10
+                );
+                for right in 0..D_OUT {
+                    let expected = f64::from(slopes[left] * slopes[right]) * 20.0 / 3.0;
+                    assert!(
+                        (reference.cov[(row * D_OUT + left) * D_OUT + right] - expected).abs()
+                            < 1e-10
+                    );
+                }
+            }
+        }
+        // Scaling covariance by four doubles every margin standard deviation.
+        let estimate = Estimate {
+            mean: reference.mean.iter().map(|mean| mean + 1.0).collect(),
+            cov: reference.cov.iter().map(|value| 4.0 * value).collect(),
+        };
+        assert!((normalized_covariance_error(&estimate.cov, &reference.cov) - 3.0).abs() < 1e-12);
+        assert!((normalized_margin_std_error(&estimate, &reference) - 1.0).abs() < 1e-12);
+        // Sum of marginal variances = (1 + 4 + 1/4 + 9) * 20/3 = 95 per row.
+        assert!(
+            (normalized_mean_error(&estimate, &reference) - (4.0f64 / 95.0).sqrt()).abs() < 1e-12
+        );
+        assert!((margin_standard_deviations(&reference.cov)[0] - 60.0f64.sqrt()).abs() < 1e-10);
+    }
 }

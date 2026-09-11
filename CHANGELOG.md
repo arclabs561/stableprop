@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Materialize Burn example parameters before cloning baselines or changing RNG
+  seeds, so training comparisons share their intended initial weights.
 - Avoid cancellation in negative Gaussian ReLU tails, including Burn means,
   variances, derivatives, and cross-covariance gates. Replace the vector API's
   central CDF approximation with a convergent series.
@@ -27,11 +29,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pairwise multiplications.
 - Check feature permutation, batch partitioning, correlated residual identities,
   and the centered Gaussian ReLU covariance remainder with property tests.
+- Compare covariance propagation across depths and seeds, with score-margin
+  errors, an independent Monte Carlo repeat, and a scalar closure control.
 
 ### Added
 
 - A derivation reference for Gaussian moments, cross-covariance, the Hermite
   series, its PSD property and error bound, and numerical design choices.
+- Nonzero-mean Gaussian pair references, independent feature-scale properties,
+  and a check of the truncated covariance gradient. `just property-test` runs
+  the algebraic and Gaussian-reference properties with a larger sample count.
 
 ## [0.5.0] - 2026-09-10
 

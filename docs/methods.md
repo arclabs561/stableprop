@@ -198,6 +198,15 @@ this limitation across positive and negative correlations.
 For decisions driven by cancellation between nearly identical ReLU outputs,
 compare against Monte Carlo or exact bivariate moments.
 
+Gradient accuracy is a separate question. With the two Gaussian marginals
+fixed, exact ReLU covariance increases with their correlation: Price's identity
+gives a joint activation probability as its derivative. The truncated series
+need not preserve this monotonicity. For unit variances, both means `-1`, and
+correlation `-0.9`, its derivative is about `-0.00381`, while the exact derivative
+is positive. The [gradient reference](../tests/relu_covariance_reference.rs)
+checks differentiation of the implemented series. It does not establish that
+the resulting gradient is accurate enough for an optimization objective.
+
 Independent Monte Carlo mean estimates have standard error proportional to
 `1 / sqrt(samples)` when variance is finite. Cauchy means do not satisfy that
 condition; compare quantiles or coverage instead. For Gaussian paths, compare
@@ -206,8 +215,10 @@ errors can cancel. Test calibration against the quantity the application
 actually observes, not only agreement with the model's own noisy outputs.
 For correlated outputs, also compare the covariance matrices: correct marginal
 variances can hide incorrect uncertainty in output differences or sums. The
-[full-covariance example](../examples/full_covariance.rs) reports both marginal
-standard-deviation errors and normalized covariance error against Monte Carlo.
+[full-covariance example](../examples/full_covariance.rs) reports normalized
+errors in means, covariance matrices, and score-margin standard deviations
+across depths and seeds. A repeated Monte Carlo estimate shows sampling
+variability; a scalar repeated-ReLU control isolates Gaussian closure error.
 
 ## Developments after 2024
 
@@ -332,10 +343,10 @@ example uses held-out labels to calibrate a propagated scale.
 For a first use, run
 [`regression_intervals`](../examples/regression_intervals.rs), then
 [`conformal_intervals`](../examples/conformal_intervals.rs). For a new
-application, learned-surrogate state estimation is a closer fit than
-general-purpose classification confidence: there is an explicit uncertain input
-and a downstream consumer of covariance. That is an application recommendation,
-not a capability claim for an implemented Kalman filter.
+application, learned-surrogate state estimation is worth evaluating with an
+external filtering model: it supplies an explicit uncertain input and a
+downstream use for covariance. The propagation helpers provide only one part
+of that system.
 
 Choose richer covariance only when the downstream decision benefits from it.
 The exact Gaussian formulas are worth testing against the current series for
