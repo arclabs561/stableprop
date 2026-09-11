@@ -439,9 +439,15 @@ fn target_center_mse(target_variance: f64, corrected_squared_bias: f64) -> f64 {
 }
 
 fn conformal_quantile(mut scores: Vec<f64>) -> f64 {
-    scores.sort_by(|left, right| left.partial_cmp(right).unwrap());
-    let rank = (((scores.len() + 1) as f64 * (1.0 - ALPHA)).ceil() as usize).min(scores.len()) - 1;
-    scores[rank]
+    assert!(scores
+        .iter()
+        .all(|score| score.is_finite() && *score >= 0.0));
+    let rank = ((scores.len() + 1) as f64 * (1.0 - ALPHA)).ceil() as usize;
+    if rank > scores.len() {
+        return f64::INFINITY;
+    }
+    scores.sort_by(f64::total_cmp);
+    scores[rank - 1]
 }
 
 fn interval_metrics(
@@ -944,10 +950,20 @@ fn run_diagnostic(dev: &Device<Ad>, repeats: usize, centers: usize, full_study: 
 #[cfg(test)]
 mod tests {
     use super::{
-        corrected_squared_bias, cross_batch_squared_bias, diagnostic_seed, sample_mean_variance,
-        study_seed, target_center_mse, STUDY_REPEATS,
+        conformal_quantile, corrected_squared_bias, cross_batch_squared_bias, diagnostic_seed,
+        sample_mean_variance, study_seed, target_center_mse, STUDY_REPEATS,
     };
     use std::collections::BTreeSet;
+
+    #[test]
+    fn conformal_rank_preserves_unbounded_and_configured_finite_cases() {
+        assert!(conformal_quantile(vec![1.0; 8]).is_infinite());
+        assert_eq!(conformal_quantile(vec![1.0; 9]), 1.0);
+        for (count, expected) in [(400, 361.0), (1000, 901.0)] {
+            let scores = (1..=count).rev().map(f64::from).collect();
+            assert_eq!(conformal_quantile(scores), expected);
+        }
+    }
 
     #[test]
     fn study_split_and_model_seeds_are_distinct() {

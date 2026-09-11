@@ -37,7 +37,7 @@ Carlo regression tests; a shared backend RNG can couple parallel tests.
 Materialize Burn parameters before cloning a shared experimental baseline or
 changing the RNG seed. Cloning uninitialized parameters leaves each clone to
 draw its own weights on first use.
-`just property-test` runs the algebraic and Gaussian-reference properties with
+`just property-test` runs propagation and calibration-rank properties with
 4,096 cases each; supply a count to override it.
 When changing the reference generator or its frozen fixtures, run
 `just reference-check` to regenerate the independent values and check agreement.

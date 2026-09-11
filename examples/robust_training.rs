@@ -59,7 +59,8 @@ impl<B: Backend> Mlp<B> {
     fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
         self.lin2.forward(activation::relu(self.lin1.forward(x)))
     }
-    /// Mean prediction and analytic output variance under input noise `std`.
+    /// Point prediction and propagated variance under input noise `std`.
+    /// The first output is not the mean over perturbed inputs.
     fn forward_with_var(&self, x: Tensor<B, 2>, std: f64) -> (Tensor<B, 2>, Tensor<B, 2>) {
         let [n, d] = x.dims();
         let var0 = Tensor::<B, 2>::full([n, d], std * std, &x.device());

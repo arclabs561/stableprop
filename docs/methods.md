@@ -125,11 +125,11 @@ ReLU step is an approximation.
 
 | Approach | Computation | Main accuracy limit |
 | --- | --- | --- |
-| Local linearization | Uses derivatives of the deterministic network | Can miss activation-boundary crossings and nonlinear mean shifts |
-| Diagonal moment matching | Carries one mean and variance per feature; no feature-pair covariance state | Discards correlations that later layers can amplify or cancel |
-| Full moment matching | Carries a dense feature covariance matrix per input row | Gaussian layer-input approximation; this implementation truncates the covariance series |
-| Sigma-point quadrature | Evaluates weighted input points through the network; cost grows with input dimension | A finite quadrature rule can miss activation boundaries |
-| Monte Carlo | Repeats network evaluations under the chosen noise distribution | Sampling error; rare events need many samples |
+| [Local linearization](#generalizations-and-distinctions) | Uses derivatives of the deterministic network | Can miss activation-boundary crossings and nonlinear mean shifts |
+| [Diagonal moment matching](../src/burn_sdp.rs) | Carries one mean and variance per feature; no feature-pair covariance state | Discards correlations that later layers can amplify or cancel |
+| [Full moment matching](../src/burn_sdp.rs) | Carries a dense feature covariance matrix per input row | Gaussian layer-input approximation; this implementation [truncates the covariance series](derivations.md#relu-coefficients-and-the-implemented-order) |
+| [Sigma-point quadrature](https://ieeexplore.ieee.org/document/1271397/) | Evaluates weighted input points through the network; cost grows with input dimension | A finite quadrature rule can miss activation boundaries |
+| [Monte Carlo](../examples/regression_intervals.rs) | Repeats network evaluations under the chosen noise distribution | Sampling error; rare events need many samples |
 
 For a dense square layer of width `d`, diagonal affine propagation costs
 `O(d^2)` work and `O(d)` moment storage; full covariance costs `O(d^3)` work
@@ -344,15 +344,56 @@ Calibration asks another question: do the reported intervals cover the target
 at the intended rate? Propagation alone does not answer it. The conformal
 example uses held-out labels to calibrate a propagated scale.
 
+### Calibration for grouped observations
+
+Repeated measurements change the unit of calibration. The
+[`grouped_intervals` example](../examples/README.md#grouped-measurements)
+holds out entire subjects or measured-condition groups. Let $g$ index a group
+and $i$ its recorded rows. Fit a predictor $\hat\mu$ on separate groups and
+fix a positive scale $s(x)$ before calibration. For each calibration group,
+use one score:
+
+$$
+R_g=\max_{i\in g}\frac{|y_{gi}-\hat\mu(x_{gi})|}{s(x_{gi})}.
+$$
+
+With $m$ calibration groups and target miscoverage $\alpha$, set
+$k=\lceil(m+1)(1-\alpha)\rceil$ and take the $k$th smallest group score as
+$q$, or $q=+\infty$ if $k>m$. The intervals are
+$\hat\mu(x)\pm q s(x)$. Conditional on the fitted predictor and scale,
+exchangeable complete groups give exchangeable group scores. The rank of a
+new group's score is then uniform without ties, and ties make the inclusive
+rule conservative. Thus every recorded row in that new group is covered with
+probability at least $1-\alpha$, over calibration and the new group.
+
+This is the split-conformal rank argument applied to a maximum over a group.
+Within-group independence is unnecessary, but the complete observation scheme,
+including group size, must belong to the same exchangeable population.
+It does not cover arbitrarily many future measurements. A constant scale and
+a misspecified sensitivity scale have the same rank-validity argument; their
+widths can differ. The example compares both using the same interval center.
+The role of a fixed adaptive scale follows
+[Lei et al., §5.2](https://arxiv.org/html/1604.04173v2#S5.SS2).
+
+Predicting one observation from a new group is a different, weaker target;
+[Dunn, Wasserman & Ramdas](https://arxiv.org/html/1809.07441#S4) develop
+hierarchical methods for it. The August 2026
+[Generalized HCP preprint](https://arxiv.org/html/2608.15500v1#S2)
+also uses initial labels from the test group, with a construction that restores
+calibration symmetry under its sampling assumptions. That requires an explicit
+partial-observation protocol. Neither method follows from retaining covariance
+between features or batch rows.
+
 ### Application choices
 
 | Application | What stableprop provides now | What to measure or add |
 | --- | --- | --- |
-| Sensor-noise propagation through a regressor | Gaussian moment estimates with diagonal or full covariance | Compare output means, variance error, coverage, and runtime against Monte Carlo. Coverage of noisy model outputs is different from coverage of observed labels. |
-| Calibrated regression intervals | A per-input scale for the `conformal_intervals` example | Held-out calibration and test splits; interval width and coverage. [Split conformal](https://arxiv.org/abs/2107.07511) assumes exchangeability and targets marginal coverage. |
-| Embedding stability | Differentiable variance penalty alongside [tuplet](https://github.com/arclabs561/tuplet)'s contrastive loss | Shared initialization, held-out examples, shared perturbations, and downstream accuracy with and without noise. A penalty can also erase useful signal. |
-| Learned dynamics and state estimation | Marginal and cross-covariance transport through affine/ReLU layers | A filtering or control system also needs joint-state bookkeeping, process and observation noise, and conditioning. [Kuang & Lin's filtering and smoothing study](https://arxiv.org/abs/2511.09016), revised May 2026, constructs those joint distributions and evaluates Lorenz/Wiener systems and feedback control. It argues for scoring the uncertainty as well as RMSE. |
-| GCN or classifier uncertainty | Input-noise propagation and experimental risk/ranking examples | Node correlations, calibration, and suitable softmax/MC baselines. A synthetic graph or one Cora split does not establish general OOD performance. |
+| [Sensor-noise propagation through a regressor](../examples/regression_intervals.rs) | Gaussian moment estimates with diagonal or full covariance | Compare output means, variance error, coverage, and runtime against Monte Carlo. Coverage of noisy model outputs is different from coverage of observed labels. |
+| Calibrated regression intervals | A per-input scale for [`conformal_intervals`](../examples/conformal_intervals.rs) | Held-out calibration and test splits; interval width and coverage. [Split conformal](https://arxiv.org/abs/2107.07511) assumes exchangeability and targets marginal coverage. |
+| [Grouped real measurements](../examples/README.md#grouped-measurements) | A sensitivity scale compared with constant width on Airfoil and Parkinsons data | Keep complete groups separate; compare group coverage and width under the stated observation scheme. |
+| [Embedding stability](../examples/tuplet_contrastive.rs) | Differentiable variance penalty alongside [tuplet](https://github.com/arclabs561/tuplet)'s contrastive loss | Shared initialization, held-out examples, shared perturbations, and downstream accuracy with and without noise. A penalty can also erase useful signal. |
+| Learned dynamics and state estimation | Marginal and [cross-covariance transport](../examples/correlated_residual.rs) through affine/ReLU layers | A filtering or control system also needs joint-state bookkeeping, process and observation noise, and conditioning. [Kuang & Lin's filtering and smoothing study](https://arxiv.org/abs/2511.09016), revised May 2026, constructs those joint distributions and evaluates Lorenz/Wiener systems and feedback control. It argues for scoring the uncertainty as well as RMSE. |
+| GCN or classifier uncertainty | Input-noise propagation and experimental [risk](../examples/misclassification_risk.rs)/[ranking](../examples/gcn_uncertainty.rs) examples | Node correlations, calibration, and suitable softmax/MC baselines. A synthetic graph or one Cora split does not establish general OOD performance. |
 
 For a first use, run
 [`regression_intervals`](../examples/regression_intervals.rs), then

@@ -61,6 +61,10 @@ name = "conformal_intervals"
 required-features = ["burn"]
 
 [[example]]
+name = "grouped_intervals"
+required-features = ["burn"]
+
+[[example]]
 name = "robust_training"
 required-features = ["burn"]
 

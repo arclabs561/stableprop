@@ -23,10 +23,10 @@ it does not infer those distributions from data.
 
 | Related method | Its job | Where stableprop fits |
 | --- | --- | --- |
-| Gaussian embeddings | Learn a distribution for each representation | Propagate supplied embedding moments through supported layers |
-| Bayesian models | Learn parameter uncertainty from observations | Propagate supplied moments; posterior fitting and updating are external |
-| Contrastive learning | Train representations using pair relationships | Add a differentiable sensitivity penalty, as in the tuplet example |
-| Conformal prediction | Calibrate prediction sets using held-out observations | Supply an input-dependent scale for calibration |
+| [Gaussian embeddings](docs/methods.md#uncertainty-sources-and-downstream-methods) | Learn a distribution for each representation | Propagate supplied embedding moments through supported layers |
+| [Bayesian models](docs/methods.md#how-the-methods-developed) | Learn parameter uncertainty from observations | Propagate supplied moments; posterior fitting and updating are external |
+| Contrastive learning | Train representations using pair relationships | Add a differentiable sensitivity penalty, as in [`tuplet_contrastive`](examples/tuplet_contrastive.rs) |
+| Conformal prediction | Calibrate prediction sets using held-out observations | Supply an input-dependent scale for [`conformal_intervals`](examples/conformal_intervals.rs) |
 
 Input sensitivity and parameter uncertainty arise from different random
 quantities. A stable score can still be poorly learned; a well-learned model
@@ -86,9 +86,9 @@ select double precision. Propagation preserves the input tensor dtype.
 
 | Representation | What it tracks | Main approximation |
 | --- | --- | --- |
-| `burn_sdp::Moments` | Mean and variance, each `[batch, features]` | Drops feature and row correlations |
-| `burn_sdp::MomentsFull` | Mean `[batch, features]`; covariance `[batch, features, features]` | No cross-row covariance; Gaussian layer inputs; third-order ReLU covariance series |
-| `burn_sdp::Cauchy` | Location and scale, each `[batch, features]` | Drops dependence; local ReLU gate |
+| [`burn_sdp::Moments`](https://docs.rs/stableprop/latest/stableprop/burn_sdp/struct.Moments.html) | Mean and variance, each `[batch, features]` | Drops feature and row correlations |
+| [`burn_sdp::MomentsFull`](https://docs.rs/stableprop/latest/stableprop/burn_sdp/struct.MomentsFull.html) | Mean `[batch, features]`; covariance `[batch, features, features]` | No cross-row covariance; Gaussian layer inputs; [third-order ReLU covariance series](docs/derivations.md#relu-coefficients-and-the-implemented-order) |
+| [`burn_sdp::Cauchy`](https://docs.rs/stableprop/latest/stableprop/burn_sdp/struct.Cauchy.html) | Location and scale, each `[batch, features]` | Drops dependence; local ReLU gate |
 
 The tensor API also includes leaky ReLU, diagonal convolution, fixed left
 matrix multiplication, residual addition, and affine propagation with supplied
@@ -110,6 +110,7 @@ timings. These checks use `f32`; small workloads can be faster on CPU.
 | Estimate whether noisy query features change a ranking | [pairwise_ranking_risk](examples/pairwise_ranking_risk.rs) |
 | Compare output uncertainty with sampled noisy inputs | [regression_intervals](examples/regression_intervals.rs) |
 | Calibrate prediction intervals against held-out labels | [conformal_intervals](examples/conformal_intervals.rs) |
+| Evaluate intervals on grouped real measurements | [grouped_intervals](examples/README.md#grouped-measurements) |
 | Train with an output-variance penalty | [robust_training](examples/robust_training.rs) |
 | Measure the effect of retaining covariance | [full_covariance](examples/full_covariance.rs) |
 | Derive a residual branch's covariance with its input | [correlated_residual](examples/correlated_residual.rs) |

@@ -27,9 +27,9 @@ test:
     cargo test --all-features
     cargo test --all-features --examples
 
-# Sample more algebraic and Gaussian-reference cases; optionally set the count.
+# Sample more propagation and calibration-rank cases; optionally set the count.
 property-test cases="4096":
-    PROPTEST_CASES="$1" cargo test --features burn --test properties --test burn_properties --test relu_covariance_reference
+    PROPTEST_CASES="$1" cargo test --features burn --test properties --test burn_properties --test relu_covariance_reference --example grouped_intervals
 
 # Regenerate independent values and compare them with frozen Rust fixtures.
 # Requires uv; kept separate from the Python-free Rust checks.

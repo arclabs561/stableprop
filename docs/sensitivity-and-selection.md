@@ -8,11 +8,11 @@ but it does not by itself measure what a new label would teach the model.
 
 | Quantity | What varies | What it answers |
 | --- | --- | --- |
-| Input-noise variance | Inputs, with model parameters fixed | How much does this prediction change under the chosen perturbations? |
-| Parameter-posterior variance | Parameters drawn from a fitted posterior | How uncertain is the model about this prediction under that posterior? |
-| Predictive label entropy | Labels under the predictive model | How diffuse is the predicted label distribution? |
-| Per-example parameter gradient | Parameters in a specified loss | Which update would this labeled or pseudo-labeled example induce? |
-| Acquisition utility | Possible observations followed by an update | Which observation is expected to improve the chosen learning objective? |
+| [Input-noise variance](../README.md#what-uncertainty-means-here) | Inputs, with model parameters fixed | How much does this prediction change under the chosen perturbations? |
+| [Parameter-posterior variance](methods.md#uncertainty-sources-and-downstream-methods) | Parameters drawn from a fitted posterior | How uncertain is the model about this prediction under that posterior? |
+| [Predictive label entropy](../examples/active_selection.rs) | Labels under the predictive model | How diffuse is the predicted label distribution? |
+| [Per-example parameter gradient](https://arxiv.org/abs/1906.03671) | Parameters in a specified loss | Which update would this labeled or pseudo-labeled example induce? |
+| [Acquisition utility](#from-ranking-uncertainty-to-exploration) | Possible observations followed by an update | Which observation is expected to improve the chosen learning objective? |
 
 For small perturbations, input covariance is approximated by
 `J_x S_x J_x^T`; parameter covariance by `J_theta S_theta J_theta^T`.
@@ -240,10 +240,10 @@ remain necessary before recommending the score for a new application.
 
 | Extension | New use | Required evidence |
 | --- | --- | --- |
-| More accurate bivariate ReLU moments | Reduce the current covariance-series truncation error | A reference grid including degenerate correlations; a backend-compatible derivative implementation; decision-level benefit |
+| [More accurate bivariate ReLU moments](derivations.md#exact-pairs-gaussian-process-kernels-and-deeper-networks) | Reduce the current covariance-series truncation error | A reference grid including degenerate correlations; a backend-compatible derivative implementation; decision-level benefit |
 | Jointly uncertain dot-product moments | Score two uncertain embeddings | A consumer with both input distributions and their dependence modeled; comparison with fixed-candidate scoring |
-| Broader acquisition evaluation | Test when the implemented disagreement score helps | Noisy or irrelevant pool points, diversity baselines, task-specific perturbations, and label-cost comparisons |
-| Structured covariance | Reduce memory at larger feature widths | Explicit rank/projection policy and measured accuracy–memory tradeoff |
+| [Broader acquisition evaluation](../examples/active_selection.rs) | Test when the implemented disagreement score helps | Noisy or irrelevant pool points, diversity baselines, task-specific perturbations, and label-cost comparisons |
+| [Structured covariance](derivations.md#the-covariance-series) | Reduce memory at larger feature widths | Explicit rank/projection policy and measured accuracy–memory tradeoff |
 
 Affine and Gaussian ReLU cross-covariance transport is implemented and exercised
 by [`correlated_residual`](../examples/correlated_residual.rs). A filtering

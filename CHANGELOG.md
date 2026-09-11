@@ -6,8 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve unbounded conformal intervals when a calibration set is too small
+  for the requested finite-sample rank.
+
 ### Added
 
+- Grouped real-data interval comparisons on Airfoil and Parkinsons Telemonitoring,
+  with group-disjoint fitting and calibration, Monte Carlo model checks, and
+  constant-width baselines.
+- An exact-moment ReLU ranking control that isolates Gaussian margin-shape error.
 - Conformal diagnostics separating covariance approximation, sampled model
   variation, and synthetic target noise and bias.
 - Ranking evaluations across generated model/candidate fixtures, with paired

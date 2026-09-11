@@ -290,6 +290,66 @@ fn margin_probability(
     }
     out
 }
+
+/// A one-unit ranking fixture whose propagated moments are exact, while its
+/// ReLU margin is intentionally non-Gaussian. It separates the final Gaussian
+/// margin-tail approximation from covariance-series truncation.
+struct ExactReluMarginControl {
+    relu_mean: f64,
+    relu_variance: f64,
+    margin_mean: f64,
+    margin_variance: f64,
+    exact_flip: f64,
+    gaussian_proxy: f64,
+}
+
+fn exact_relu_margin_control(dev: &Device<Nd>) -> ExactReluMarginControl {
+    let bias = 0.1f64;
+    let input = MomentsFull::from_diagonal(
+        tensor2(vec![0.0], [1, 1], dev),
+        Tensor::<Nd, 2>::full([1, 1], 1.0, dev),
+    );
+    let rectified = propagate_relu_full(&input);
+    let relu_mean = f64::from(rectified.mean.clone().to_data().to_vec::<f32>().unwrap()[0]);
+    let relu_variance = f64::from(rectified.cov.clone().to_data().to_vec::<f32>().unwrap()[0]);
+    // Scores are (bias, ReLU(X)), so the point winner is candidate zero.
+    let scores = propagate_linear_full(
+        &rectified,
+        tensor2(vec![0.0, 1.0], [1, 2], dev),
+        Some(tensor1(vec![bias as f32, 0.0], dev)),
+    );
+    let mean = scores.mean.to_data().to_vec::<f32>().unwrap();
+    let covariance = scores.cov.to_data().to_vec::<f32>().unwrap();
+    let margin_mean = f64::from(mean[0] - mean[1]);
+    let margin_variance = f64::from(covariance[0] + covariance[3] - covariance[1] - covariance[2]);
+    ExactReluMarginControl {
+        relu_mean,
+        relu_variance,
+        margin_mean,
+        margin_variance,
+        // ReLU(X) > bias iff X > bias. bias > 0 avoids a threshold tie.
+        exact_flip: cdf(vec![-bias as f32], dev)[0],
+        gaussian_proxy: cdf(vec![(-margin_mean / margin_variance.sqrt()) as f32], dev)[0],
+    }
+}
+
+fn report_exact_relu_margin_control(dev: &Device<Nd>) {
+    let control = exact_relu_margin_control(dev);
+    let gap = control.gaussian_proxy - control.exact_flip;
+    println!("ReLU margin with exact moments:");
+    println!(
+        "  exact flip {:.4}, Gaussian margin proxy {:.4}, proxy gap {gap:+.4}",
+        control.exact_flip, control.gaussian_proxy
+    );
+    println!(
+        "  ReLU mean {:.4}, variance {:.4}; margin mean {:.4}, variance {:.4}",
+        control.relu_mean, control.relu_variance, control.margin_mean, control.margin_variance
+    );
+    println!(
+        "  one hidden coordinate, one ReLU: exact moments do not determine this non-Gaussian tail"
+    );
+}
+
 fn local_probability(
     query: &[[f64; D]],
     winners: &[usize],
@@ -906,6 +966,7 @@ fn main() {
     assert!(!quick || generalize, "--quick requires --generalize");
     let config = if study { STUDY } else { DEFAULT };
     let dev = Device::<Nd>::default();
+    report_exact_relu_margin_control(&dev);
     if generalize {
         assert!(
             !study,
@@ -1012,7 +1073,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{deferred_count, deterministic_flip_probability, DEFER};
+    use super::{
+        deferred_count, deterministic_flip_probability, exact_relu_margin_control,
+        margin_probability, Device, Nd, DEFER, Q,
+    };
 
     #[test]
     fn deterministic_tie_uses_candidate_zero() {
@@ -1026,5 +1090,36 @@ mod tests {
     fn matched_defer_counts_use_the_reported_rounding() {
         assert_eq!(deferred_count(DEFER[0]), 10);
         assert_eq!(deferred_count(DEFER[1]), 24);
+    }
+
+    #[test]
+    fn exact_relu_margin_control_isolates_non_gaussian_tail_shape() {
+        let dev = Device::<Nd>::default();
+        let control = exact_relu_margin_control(&dev);
+        let expected_relu_mean = 1.0 / (2.0 * std::f64::consts::PI).sqrt();
+        let expected_relu_variance = 0.5 - 1.0 / (2.0 * std::f64::consts::PI);
+        assert!((control.relu_mean - expected_relu_mean).abs() < 2e-6);
+        assert!((control.relu_variance - expected_relu_variance).abs() < 2e-6);
+        assert!((control.margin_mean - (0.1 - expected_relu_mean)).abs() < 2e-6);
+        assert!((control.margin_variance - expected_relu_variance).abs() < 2e-6);
+        assert!((control.exact_flip - 0.460_172_16).abs() < 2e-6);
+
+        // Unlike a tail probability, expected squared deviation needs only
+        // these two moments. Direct integration gives E[X_+^2] = 1/2.
+        let squared_loss = control.margin_mean.powi(2) + control.margin_variance;
+        let integrated_loss = 0.5 - 0.2 * expected_relu_mean + 0.01;
+        assert!((squared_loss - integrated_loss).abs() < 2e-6);
+
+        // Repeat the same real score moments through the ranking estimator.
+        let mut mean = Vec::with_capacity(Q * 2);
+        let mut covariance = Vec::with_capacity(Q * 4);
+        for _ in 0..Q {
+            mean.extend([0.1, control.relu_mean]);
+            covariance.extend([0.0, 0.0, 0.0, control.relu_variance]);
+        }
+        let proxy = margin_probability(&mean, &covariance, &vec![0; Q], false, &dev)[0];
+        assert!((proxy - control.gaussian_proxy).abs() < 2e-6);
+        assert!((proxy - 0.695_690_55).abs() < 2e-6);
+        assert!(proxy - control.exact_flip > 0.20);
     }
 }

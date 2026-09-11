@@ -14,6 +14,7 @@ still differ across backend or dependency versions.
 | Estimate ranking flips under noisy query features | [`pairwise_ranking_risk`](pairwise_ranking_risk.rs) |
 | Compare propagated uncertainty with Monte Carlo | [`regression_intervals`](regression_intervals.rs) |
 | Calibrate intervals against observed targets | [`conformal_intervals`](conformal_intervals.rs) |
+| Evaluate intervals on grouped real measurements | [`grouped_intervals`](grouped_intervals.rs) |
 | Add a differentiable variance penalty to training | [`robust_training`](robust_training.rs) |
 | Compare diagonal and full covariance | [`full_covariance`](full_covariance.rs) |
 | Carry dependence through a residual branch | [`correlated_residual`](correlated_residual.rs) |
@@ -105,8 +106,13 @@ The printed elapsed time covers the whole evaluation, including references;
 it is not a comparison of method runtimes.
 
 An affine control isolates the exact Gaussian-margin calculation; the Monte
-Carlo comparison still has sampling error. The ReLU network additionally
-approximates hidden moments and the final margin distribution. Here the joint
+Carlo comparison still has sampling error. A second control compares constant
+score `0.1` with `ReLU(X)` for standard-normal `X`. Its propagated moments are
+exact, but the true flip probability is 0.4602 and the Gaussian-margin estimate
+is 0.6957. Matching moments does not determine a tail probability; the
+[derivation](../docs/derivations.md#exact-moments-do-not-determine-tail-probabilities)
+isolates this error from covariance truncation and repeated Gaussian closure.
+Here the joint
 score distribution comes from input noise. A
 fitted reward posterior can supply a joint score distribution too, using the
 same covariance arithmetic to describe uncertain margins. Exploration adds an
@@ -194,6 +200,67 @@ and autotuning. Backend RNG streams differ, so compare the two objectives
 within each run. For warmed CPU/GPU timings on fixed inputs, use
 `just metal-test`; those timings include tensor allocation and report the
 batch size, width, and number of iterations.
+
+## Grouped measurements
+
+[`grouped_intervals`](grouped_intervals.rs) compares constant-width and
+sensitivity-scaled intervals on two UCI datasets. Download and extract the
+files into the ignored `data/` directory:
+
+```sh
+mkdir -p data/airfoil data/parkinsons
+curl -fL 'https://archive.ics.uci.edu/static/public/291/airfoil+self+noise.zip' -o data/airfoil.zip
+unzip -n data/airfoil.zip -d data/airfoil
+curl -fL 'https://archive.ics.uci.edu/static/public/189/parkinsons+telemonitoring.zip' -o data/parkinsons.zip
+unzip -n data/parkinsons.zip -d data/parkinsons
+cargo run --release --features burn --example grouped_intervals -- airfoil data/airfoil/airfoil_self_noise.dat
+cargo run --release --features burn --example grouped_intervals -- parkinsons data/parkinsons/parkinsons_updrs.data
+```
+
+Append `--quick` to either run for 30 training epochs and 64 Monte Carlo draws;
+the default uses 300 epochs and 256 draws. Each run uses one fixed split and
+initialization. These are evaluation walkthroughs, not tuned benchmarks.
+
+| Dataset | Prediction target | Held-out unit |
+| --- | --- | --- |
+| [Airfoil Self-Noise](https://archive.ics.uci.edu/dataset/291/airfoil+self+noise), Brooks, Pope & Marcolini | Scaled sound pressure in dB from five wind-tunnel features | Exact tuples of attack angle, chord, velocity, and displacement thickness; frequency varies within each tuple |
+| [Parkinsons Telemonitoring](https://archive.ics.uci.edu/dataset/189/parkinsons+telemonitoring), Tsanas et al. | Interpolated motor-UPDRS score from 16 voice measures | Subject ID; metadata and both target columns are excluded from the features |
+
+Both datasets use [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+Airfoil contains 1,503 rows and 106 reconstructed condition groups; these
+tuples are not supplied experiment IDs. Parkinsons contains 5,875 recordings
+from 42 subjects. Its interpolated targets are not independent clinical
+measurements at each recording. The loader prints group sizes and rejects
+malformed or non-finite data.
+
+The example assigns whole groups to fit, calibration, and test sets in
+50/25/25 proportions, with rounding. Feature and target normalization use
+only fit rows. Both interval methods share one fitted MLP and the same point
+prediction. The adaptive scale comes from diagonal propagation of independent
+Gaussian feature perturbations with standard deviation 0.05 in standardized
+units, with output variance floored at `1e-4`. This is a sensitivity
+probe, not an estimate of measurement error; it may leave the physical support
+of a feature. A separate Monte Carlo check compares model moments on up to
+32 test rows. It does not evaluate target uncertainty.
+
+Calibration takes the largest residual score in each group, then a 90%
+split-conformal quantile across groups. The target is coverage of every
+recorded row in a new complete group under the same observation scheme.
+This requires exchangeability of complete groups, not independence of rows
+within them. The fixed datasets do not establish that deployment assumption.
+The [method guide](../docs/methods.md#calibration-for-grouped-observations)
+gives the rank argument and distinguishes this target from predicting one
+new observation.
+
+Read complete-group coverage together with interval width. The output also
+averages row coverage and width within each test group, then equally across
+groups. Its point RMSE is the square root of mean within-group squared error,
+averaged equally across test groups. With only ten calibration subjects,
+Parkinsons uses the largest
+calibration score at 90%; wide intervals are possible. If the requested rank
+exceeds the available calibration groups, the quantile is infinite. Neither
+more recordings from the same subjects nor a more accurate propagated
+variance removes this finite-group limitation.
 
 ## Covariance and heavy tails
 

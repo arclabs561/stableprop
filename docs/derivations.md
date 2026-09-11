@@ -418,6 +418,57 @@ evaluates a bivariate Gaussian CDF contribution using 30-point Gaussian
 quadrature. Replacing the series therefore requires checking integration error,
 gradients near degenerate correlations, and runtime against the current path.
 
+## Exact moments do not determine tail probabilities
+
+Let $X\sim\mathcal{N}(0,1)$ and compare scores $s_{0}=0.1$ and
+$s_{1}=X_{+}$. At the input mean, score zero wins. It loses after perturbation
+exactly when $X>0.1$, so the flip probability is $1-\Phi(0.1)\approx0.4602$.
+The Gaussian ReLU identities give exact moments for the margin $M=0.1-X_{+}$:
+
+$$
+\mathbb{E}[M]=0.1-\frac{1}{\sqrt{2\pi}},
+\qquad
+\text{Var}(M)=\frac12-\frac{1}{2\pi}.
+$$
+
+Replacing this margin by a Gaussian with those moments gives
+
+$$
+\Phi\!\left(-\frac{\mathbb{E}[M]}{\sqrt{\text{Var}(M)}}\right)
+\approx0.6957.
+$$
+
+The true margin has an atom at 0.1 with probability one half. Its first two
+moments do not specify that shape. This example has one hidden coordinate
+and one ReLU: there is neither off-diagonal series truncation nor repeated
+Gaussian closure. The [ranking control](../examples/pairwise_ranking_risk.rs)
+checks the propagated moments and displays the probability gap. Improving
+covariance alone cannot remove this error.
+
+### When two moments suffice
+
+For a scalar random output $Y$ with finite second moment and a fixed target
+$t$, expand $Y-t=(Y-\mathbb{E}[Y])+(\mathbb{E}[Y]-t)$. The cross term has
+zero expectation, giving
+
+$$
+\mathbb{E}[(Y-t)^2]=(\mathbb{E}[Y]-t)^2+\text{Var}(Y).
+$$
+
+This identity needs no Gaussian output assumption. Accurate moments therefore
+suffice to evaluate expected squared deviation from a fixed setpoint, even
+when they do not determine a threshold probability. For a neural surrogate
+under execution noise, it gives a concrete objective for comparing candidate
+settings; uncertainty about the surrogate itself remains a separate error.
+
+The mean in this identity is the expectation over perturbed inputs, which can
+differ from the network at the input mean. The
+[`robust_training` example](../examples/robust_training.rs) instead adds a
+weighted variance penalty to point-prediction MSE. Even with unit weight, that
+objective is not generally the expected noisy squared loss. If the target is
+also random and correlated with the output, its variance and cross-covariance
+must enter the expected-loss calculation too.
+
 ## Design consequences and verification
 
 The historical connections are distinct: Bussgang relates a nonlinear output
@@ -430,10 +481,10 @@ Gaussian belief networks, PBP, DVI, and distprop's local linearization.
 
 | Change | What it could improve | Required evidence |
 | --- | --- | --- |
-| Reassociate or reuse tensor expressions | Runtime and allocation without changing the moment approximation | Values and gradients across scales, CPU/Metal parity, repeated timings |
-| Exact bivariate ReLU evaluation | Remove off-diagonal series truncation | Stable values and interior derivatives in tails and near perfect correlation; explicit zero-variance gradient conventions; matrix and decision errors |
-| Structured activation covariance | Reduce dense storage | Affine and nonlinear transport rules, recompression error, and a workload whose downstream result benefits |
-| Richer uncertainty inputs | Represent a different source of randomness | A model that supplies those distributions and evaluation against the intended observations |
+| [Reassociate or reuse tensor expressions](../benches/README.md) | Runtime and allocation without changing the moment approximation | Values and gradients across scales, CPU/Metal parity, repeated timings |
+| [Exact bivariate ReLU evaluation](#exact-pairs-gaussian-process-kernels-and-deeper-networks) | Remove off-diagonal series truncation | Stable values and interior derivatives in tails and near perfect correlation; explicit zero-variance gradient conventions; matrix and decision errors |
+| [Structured activation covariance](#the-covariance-series) | Reduce dense storage | Affine and nonlinear transport rules, recompression error, and a workload whose downstream result benefits |
+| [Richer uncertainty inputs](../README.md#what-uncertainty-means-here) | Represent a different source of randomness | A model that supplies those distributions and evaluation against the intended observations |
 
 A diagonal-plus-low-rank representation is not closed under these operations:
 even $W\,\mathrm{diag}(v)W^\top$ is generally dense, and entrywise powers of
