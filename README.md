@@ -85,7 +85,7 @@ select double precision. Propagation preserves the input tensor dtype.
 | Representation | What it tracks | Main approximation |
 | --- | --- | --- |
 | `burn_sdp::Moments` | Mean and variance, each `[batch, features]` | Drops feature and row correlations |
-| `burn_sdp::MomentsFull` | Mean `[batch, features]`; covariance `[batch, features, features]` | Independent rows; Gaussian layer inputs; third-order ReLU covariance series |
+| `burn_sdp::MomentsFull` | Mean `[batch, features]`; covariance `[batch, features, features]` | No cross-row covariance; Gaussian layer inputs; third-order ReLU covariance series |
 | `burn_sdp::Cauchy` | Location and scale, each `[batch, features]` | Drops dependence; local ReLU gate |
 
 The tensor API also includes leaky ReLU, diagonal convolution, fixed left

@@ -1,15 +1,15 @@
 //! Distribution propagation on Burn tensors.
 //!
-//! Tracks a per-feature mean and variance for a batch of independent Gaussians
-//! and pushes them through linear, fixed-matmul (e.g. a GCN adjacency), and ReLU
-//! layers. Linear and matmul propagate variance exactly under the diagonal
+//! Tracks batched Gaussian marginal means and per-feature variances through
+//! linear, fixed-matmul (e.g. a GCN adjacency), and ReLU layers.
+//! Linear and matmul propagate variance exactly under the diagonal
 //! assumption; for Gaussian inputs ReLU evaluates the closed-form univariate
 //! moments from Frey & Hinton (1999) with numerical tail handling. Burn tensor
 //! operations keep propagation differentiable and backend-independent.
 //!
 //! The default [`Moments`] path approximates covariance as diagonal:
-//! cross-feature correlations introduced by a layer are dropped before the
-//! next layer. [`MomentsFull`] retains it with a third-order covariance series,
+//! covariance between features or batch rows is not stored. [`MomentsFull`]
+//! retains feature covariance with a third-order ReLU covariance series,
 //! while [`Cauchy`] applies a local-linear marginal approximation. These are
 //! related to, but do not reproduce, the Jacobian propagation in Petersen et
 //! al. (ICLR 2024).
@@ -29,7 +29,8 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{DType, Tensor, TensorData};
 use core::f64::consts::{FRAC_1_SQRT_2, PI};
 
-/// Mean and per-feature variance of a batch of independent Gaussians.
+/// Mean and per-feature variance of batched Gaussian marginals.
+/// Covariance between features or batch rows is not stored.
 ///
 /// Both tensors are shape `[n, d]` (n rows, d features). Variance is the
 /// diagonal of the covariance; off-diagonal terms are not tracked.
@@ -686,8 +687,11 @@ impl<B: Backend> Cauchy<B> {
         Self { location, scale }
     }
 
-    /// Half-width of the symmetric central interval of probability mass `p`:
+    /// Half-width of the nominal symmetric central Cauchy interval:
     /// `scale * tan(pi p / 2)` (e.g. p=0.9 -> scale * 6.31).
+    /// This interval has mass `p` for a nondegenerate Cauchy marginal.
+    /// After [`propagate_relu_cauchy`], it describes the local approximation;
+    /// the transformed distribution need not give it that coverage.
     pub fn interval_halfwidth(&self, p: f64) -> Tensor<B, 2> {
         assert!(
             p.is_finite() && (0.0..1.0).contains(&p),
