@@ -19,6 +19,46 @@ fn relu_moments_and_omitted_energy(mu: f64, sigma: f64, p: f64) -> (f64, f64, f6
     (mean, variance, omitted_energy)
 }
 
+fn relu_derivative_tail_energy(sigma: f64, alpha: f64, p: f64) -> f64 {
+    let phi_squared = (-alpha * alpha).exp() / (2.0 * std::f64::consts::PI);
+    sigma * sigma * (p - p * p - phi_squared - alpha * alpha * phi_squared / 2.0)
+}
+
+fn relu_covariance_correlation_gradient(mean: [f64; 2], std: [f64; 2], rho: f64) -> f64 {
+    type Ad = Autodiff<NdArray<f64>>;
+
+    let device = Default::default();
+    let sigma_product = std[0] * std[1];
+    let mean = Tensor::<Ad, 2>::from_data(
+        TensorData::new(mean.to_vec(), [1, 2]),
+        (&device, DType::F64),
+    );
+    let covariance = Tensor::<Ad, 3>::from_data(
+        TensorData::new(
+            vec![
+                std[0] * std[0],
+                rho * sigma_product,
+                rho * sigma_product,
+                std[1] * std[1],
+            ],
+            [1, 2, 2],
+        ),
+        (&device, DType::F64),
+    )
+    .require_grad();
+    let output = propagate_relu_full(&MomentsFull::new(mean, covariance.clone()));
+    let gradients = output.cov.slice([0..1, 0..1, 1..2]).sum().backward();
+    let gradient = covariance
+        .grad(&gradients)
+        .unwrap()
+        .into_data()
+        .to_vec::<f64>()
+        .unwrap();
+    // A symmetric correlation changes both input off-diagonal entries. Sum
+    // both partials before restoring the covariance unit dSigma_ij/d rho.
+    sigma_product * (gradient[1] + gradient[2])
+}
+
 #[derive(Clone, Copy)]
 struct NonzeroReluFixture {
     mean: [f64; 2],
@@ -26,6 +66,7 @@ struct NonzeroReluFixture {
     cdf: [f64; 2],
     rho: f64,
     covariance: f64,
+    joint_activation_probability: f64,
 }
 
 // mpmath at 90 decimal digits generated these values and agreed with an
@@ -33,6 +74,8 @@ struct NonzeroReluFixture {
 // condition on Z and integrate X_+ E[Y_+ | Z] phi(Z), where Y | Z has mean
 // mu_r + rho sigma_r Z and standard deviation sigma_r sqrt(1-rho^2). At
 // rho = +/-1, integrate the resulting deterministic one-dimensional pair.
+// The joint activation probabilities use the same conditioning, integrating
+// phi(Z) Phi((alpha_r + rho Z) / sqrt(1-rho^2)) over Z > -alpha_l.
 // The fixtures include positive and negative products alpha_l alpha_r, so the
 // third Hermite coefficient has both product signs.
 const NONZERO_RELU_FIXTURES: [NonzeroReluFixture; 8] = [
@@ -42,6 +85,7 @@ const NONZERO_RELU_FIXTURES: [NonzeroReluFixture; 8] = [
         cdf: [0.174_250_711_880_542_4, 0.7412030632713038],
         rho: -0.8,
         covariance: -0.09702746076403964,
+        joint_activation_probability: 0.03918893688859086,
     },
     NonzeroReluFixture {
         mean: [1.4, -0.35],
@@ -49,6 +93,7 @@ const NONZERO_RELU_FIXTURES: [NonzeroReluFixture; 8] = [
         cdf: [0.9901846713713547, 0.39387605185723835],
         rho: 0.75,
         covariance: 0.22969598162322754,
+        joint_activation_probability: 0.39387143501695365,
     },
     NonzeroReluFixture {
         mean: [-1.25, -0.55],
@@ -56,6 +101,7 @@ const NONZERO_RELU_FIXTURES: [NonzeroReluFixture; 8] = [
         cdf: [0.12790220398830822, 0.21601744600250372],
         rho: 0.6,
         covariance: 0.022873544351819026,
+        joint_activation_probability: 0.07544406642249715,
     },
     NonzeroReluFixture {
         mean: [0.35, 1.25],
@@ -63,6 +109,7 @@ const NONZERO_RELU_FIXTURES: [NonzeroReluFixture; 8] = [
         cdf: [0.5815585947678864, 0.9937903346742238],
         rho: -0.65,
         covariance: -0.3183978902145745,
+        joint_activation_probability: 0.5753761265388645,
     },
     NonzeroReluFixture {
         mean: [-0.4, 0.9],
@@ -70,6 +117,7 @@ const NONZERO_RELU_FIXTURES: [NonzeroReluFixture; 8] = [
         cdf: [0.3694413401817636, 0.869_705_482_863_191],
         rho: 0.98,
         covariance: 0.3316340030070209,
+        joint_activation_probability: 0.3694413401817621,
     },
     NonzeroReluFixture {
         mean: [0.4, -0.9],
@@ -77,6 +125,7 @@ const NONZERO_RELU_FIXTURES: [NonzeroReluFixture; 8] = [
         cdf: [0.6305586598182364, 0.13029451713680886],
         rho: -0.98,
         covariance: -0.03683090939107107,
+        joint_activation_probability: 5.263693173000107e-7,
     },
     NonzeroReluFixture {
         mean: [0.25, -0.45],
@@ -84,6 +133,7 @@ const NONZERO_RELU_FIXTURES: [NonzeroReluFixture; 8] = [
         cdf: [0.609408524566425, 0.3739428170267853],
         rho: 1.0,
         covariance: 0.3814289914100701,
+        joint_activation_probability: 0.37394281702678533,
     },
     NonzeroReluFixture {
         mean: [0.25, -0.45],
@@ -91,6 +141,7 @@ const NONZERO_RELU_FIXTURES: [NonzeroReluFixture; 8] = [
         cdf: [0.609408524566425, 0.3739428170267853],
         rho: -1.0,
         covariance: -0.18027030895089536,
+        joint_activation_probability: 0.0,
     },
 ];
 
@@ -246,34 +297,57 @@ proptest! {
 
 #[test]
 fn nonzero_mean_covariance_gradient_matches_the_truncated_series() {
-    type Ad = Autodiff<NdArray<f64>>;
-    let device = Default::default();
     let p = 0.158_655_253_931_457_05; // Phi(-1), independently tabulated.
     let phi_squared = (-1.0f64).exp() / (2.0 * std::f64::consts::PI);
     for rho in [-0.9, 0.0, 0.9] {
-        let mean = Tensor::<Ad, 2>::from_data([[-1.0, -1.0]], (&device, DType::F64));
-        let covariance =
-            Tensor::<Ad, 3>::from_data([[[1.0, rho], [rho, 1.0]]], (&device, DType::F64))
-                .require_grad();
-        let output = propagate_relu_full(&MomentsFull::new(mean, covariance.clone()));
-        let gradients = output.cov.slice([0..1, 0..1, 1..2]).sum().backward();
-        let gradient = covariance
-            .grad(&gradients)
-            .unwrap()
-            .into_data()
-            .to_vec::<f64>()
-            .unwrap();
+        let actual = relu_covariance_correlation_gradient([-1.0, -1.0], [1.0, 1.0], rho);
         // Both off-diagonal input entries change with rho. Differentiate the
         // cubic polynomial, independently of the tensor graph. At rho=-0.9,
         // this derivative is negative; the exact Gaussian covariance is
         // increasing by Price's identity. Autodiff correctness does not remove
         // the approximation error in the derivative.
         let expected = p * p + phi_squared * (rho + 0.5 * rho * rho);
-        let actual = gradient[1] + gradient[2];
         assert!(
             (actual - expected).abs() <= 4096.0 * f64::EPSILON,
             "rho={rho}, derivative={actual}, series derivative={expected}",
         );
+        if rho == -0.9 {
+            let exact = 1.452_984_385_414_640_2e-7;
+            let derivative_tail_energy = relu_derivative_tail_energy(1.0, -1.0, p);
+            let remainder_bound = rho.abs().powi(3) * derivative_tail_energy;
+            assert!(
+                (actual - exact).abs() <= remainder_bound + 4096.0 * f64::EPSILON,
+                "rho={rho}, exact={exact}, derivative={actual}, bound={remainder_bound}",
+            );
+        }
+    }
+}
+
+#[test]
+fn nonzero_mean_covariance_gradient_obeys_hermite_remainder() {
+    // Exact endpoint derivatives belong to the mathematical extension; the
+    // tensor clamp selects its own boundary convention.
+    for fixture in NONZERO_RELU_FIXTURES.iter().filter(|f| f.rho.abs() < 1.0) {
+        for scales in [[1.0, 1.0], [1e-6, 1e6], [1e6, 1e-6]] {
+            let mean = [fixture.mean[0] * scales[0], fixture.mean[1] * scales[1]];
+            let std = [fixture.std[0] * scales[0], fixture.std[1] * scales[1]];
+            let sigma_product = std[0] * std[1];
+            let alpha_left = mean[0] / std[0];
+            let alpha_right = mean[1] / std[1];
+            let tail_left = relu_derivative_tail_energy(std[0], alpha_left, fixture.cdf[0]);
+            let tail_right = relu_derivative_tail_energy(std[1], alpha_right, fixture.cdf[1]);
+            assert!(tail_left >= 0.0 && tail_right >= 0.0);
+
+            let actual = relu_covariance_correlation_gradient(mean, std, fixture.rho);
+            let exact = sigma_product * fixture.joint_activation_probability;
+            let remainder_bound = fixture.rho.abs().powi(3) * (tail_left * tail_right).sqrt();
+            let roundoff_floor = 4096.0 * f64::EPSILON * sigma_product;
+            assert!(
+                (actual - exact).abs() <= remainder_bound + roundoff_floor,
+                "rho={}, scales={scales:?}, exact={exact}, derivative={actual}, bound={remainder_bound}, floor={roundoff_floor}",
+                fixture.rho,
+            );
+        }
     }
 }
 
@@ -294,6 +368,34 @@ proptest! {
         assert_nonzero_relu_fixture(
             NONZERO_RELU_FIXTURES[fixture_index],
             [10.0f64.powi(left_exponent), 10.0f64.powi(right_exponent)],
+        );
+    }
+}
+
+proptest! {
+    #[test]
+    fn centered_relu_covariance_gradient_obeys_hermite_remainder(
+        rho in -0.999f64..0.999,
+        left_exponent in -6i32..=6,
+        right_exponent in -6i32..=6,
+    ) {
+        let sigma_left = 10.0f64.powi(left_exponent);
+        let sigma_right = 10.0f64.powi(right_exponent);
+        let sigma_product = sigma_left * sigma_right;
+        let actual = relu_covariance_correlation_gradient(
+            [0.0, 0.0],
+            [sigma_left, sigma_right],
+            rho,
+        );
+        let pi = std::f64::consts::PI;
+        let exact = sigma_product * (0.25 + rho.asin() / (2.0 * pi));
+        let remainder_bound = rho.abs().powi(3) * sigma_product * (0.25 - 1.0 / (2.0 * pi));
+        let roundoff_floor = 4096.0 * f64::EPSILON * sigma_product;
+
+        prop_assert!(
+            (actual - exact).abs() <= remainder_bound + roundoff_floor,
+            "rho={rho}, sigmas=({sigma_left}, {sigma_right}), exact={exact}, \
+             derivative={actual}, bound={remainder_bound}, floor={roundoff_floor}",
         );
     }
 }

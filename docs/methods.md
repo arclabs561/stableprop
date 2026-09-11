@@ -118,7 +118,8 @@ For jointly Gaussian vectors `U, V`, Gaussian integration by parts gives
 between two rectified variables, this cross-covariance needs only univariate
 Gaussian CDFs. The identity is exact at that Gaussian layer, apart from numerical
 tail handling. ReLU makes the joint distribution non-Gaussian; subsequent
-affine transport stays exact, but another Gaussian ReLU step is an approximation.
+affine transport of the first two moments stays exact, but another Gaussian
+ReLU step is an approximation.
 
 ## Efficiency and accuracy
 
@@ -200,12 +201,14 @@ compare against Monte Carlo or exact bivariate moments.
 
 Gradient accuracy is a separate question. With the two Gaussian marginals
 fixed, exact ReLU covariance increases with their correlation: Price's identity
-gives a joint activation probability as its derivative. The truncated series
-need not preserve this monotonicity. For unit variances, both means `-1`, and
-correlation `-0.9`, its derivative is about `-0.00381`, while the exact derivative
+gives a positive multiple of the joint activation probability as its derivative.
+The truncated series need not preserve this monotonicity. For unit variances,
+both means `-1`, and correlation `-0.9`, its derivative is about `-0.00381`, while the exact derivative
 is positive. The [gradient reference](../tests/relu_covariance_reference.rs)
-checks differentiation of the implemented series. It does not establish that
-the resulting gradient is accurate enough for an optimization objective.
+checks both differentiation of the implemented series and a
+[bound on its correlation-gradient error](derivations.md#correlation-gradient-error).
+That absolute bound can be loose relative to a tiny exact derivative; it does
+not establish accuracy for a multilayer optimization objective.
 
 Independent Monte Carlo mean estimates have standard error proportional to
 `1 / sqrt(samples)` when variance is finite. Cauchy means do not satisfy that

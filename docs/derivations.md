@@ -316,6 +316,65 @@ the Bussgang decomposition. Higher terms describe covariance of the nonlinear
 residual. Retaining them generalizes the expected-slope approximation; it does
 not make the output jointly Gaussian.
 
+### Correlation-gradient error
+
+Hold the marginal means and positive standard deviations fixed. Write
+$C(\rho)$ for the exact ReLU pair covariance and $C_{K}(\rho)$ for its
+truncation after order $K\geq1$. By
+[Price's theorem, Corollary 2](https://arxiv.org/html/1710.03576#Thmthm2),
+
+$$
+C'(\rho)=\sigma_i\sigma_j\,\mathbb{P}(X_i>0,X_j>0),\qquad |\rho|\lt1.
+$$
+
+Thus the exact covariance increases with correlation. A finite series need
+not preserve that sign. Its derivative error requires a separate bound; the
+covariance error bound alone cannot be differentiated.
+
+For ReLU, the weak derivative of $h_{i}(z)$ is
+$\sigma_{i}1_{z>-\alpha_{i}}$. Define the omitted derivative energy
+
+$$
+\eta_{iK}
+=\sum_{k>K}\frac{k\,c_{ik}^2}{k!}
+=\sigma_i^2\Phi(\alpha_i)-\sum_{k=1}^{K}\frac{k\,c_{ik}^2}{k!}\geq0.
+$$
+
+**Proof.** Gaussian integration by parts gives
+$\mathbb{E}[h_{i}'(Z)\mathrm{He}_{k-1}(Z)]=c_{ik}$.
+Parseval applied to this square-integrable derivative gives
+$\sum_{k\geq1}k\,c_{ik}^2/k!=\mathbb{E}[h_{i}'(Z)^2]$.
+The derivative energies make the differentiated covariance series uniformly
+absolutely convergent on $[-1,1]$. Bound each omitted power by
+$|\rho|^K$ and apply Cauchy–Schwarz to obtain
+
+$$
+\left|C'(\rho)-C_K'(\rho)\right|
+\leq |\rho|^K\sqrt{\eta_{iK}\eta_{jK}}.
+$$
+
+The endpoint statement uses one-sided derivatives. For the implemented order,
+
+$$
+\eta_{i3}=\sigma_i^2\left[
+\Phi(\alpha_i)-\Phi(\alpha_i)^2
+-\phi(\alpha_i)^2-\frac{\alpha_i^2\phi(\alpha_i)^2}{2}
+\right].
+$$
+
+This controls an absolute derivative error at a Gaussian layer. It need not
+give a useful relative error when the exact joint activation probability is
+tiny. To differentiate with respect to input covariance instead of correlation,
+divide both the derivative and its bound by $\sigma_{i}\sigma_{j}$. Bounds for
+mean, variance, weight, or multilayer gradients require further analysis.
+
+The energy subtraction can lose precision for nearly linear marginals;
+$\eta_{iK}\leq\sigma_{i}^2\Phi(\alpha_{i})$ gives a looser upper bound without
+that subtraction. Floating-point evaluation and clipped boundary gradients
+remain separate concerns. The tests use interior correlations, moderate
+standardized means, independent pair-probability references, and a scaled
+roundoff allowance.
+
 ## Exact pairs, Gaussian-process kernels, and deeper networks
 
 For zero-mean jointly Gaussian $X,Y$ with correlation $\rho$, polar integration
@@ -368,7 +427,7 @@ Gaussian belief networks, PBP, DVI, and distprop's local linearization.
 | Change | What it could improve | Required evidence |
 | --- | --- | --- |
 | Reassociate or reuse tensor expressions | Runtime and allocation without changing the moment approximation | Values and gradients across scales, CPU/Metal parity, repeated timings |
-| Exact bivariate ReLU evaluation | Remove off-diagonal series truncation | Stable values and derivatives in tails, at zero variance, and near correlations of either sign approaching one; matrix and decision errors |
+| Exact bivariate ReLU evaluation | Remove off-diagonal series truncation | Stable values and interior derivatives in tails and near perfect correlation; explicit zero-variance gradient conventions; matrix and decision errors |
 | Structured activation covariance | Reduce dense storage | Affine and nonlinear transport rules, recompression error, and a workload whose downstream result benefits |
 | Richer uncertainty inputs | Represent a different source of randomness | A model that supplies those distributions and evaluation against the intended observations |
 
@@ -388,8 +447,9 @@ The validation layers correspond to different claims:
   should commute with propagation and numerical covariance constraints.
 - [Gaussian pair references](../tests/relu_covariance_reference.rs) use the
   centered closed form and independent nonzero-mean quadrature fixtures to
-  check the series remainder across feature scales. A separate gradient test
-  checks the derivative of the approximation, not of the exact pair moments.
+  check covariance and correlation-gradient remainder bounds across feature
+  scales. A separate test checks autodiff against the derivative of the finite
+  series itself.
 - [Extreme-scale gradients](../tests/burn_extreme_scales.rs) and
   [Metal comparisons](../tests/burn_metal.rs) test floating-point and backend
   behavior separately from the symbolic formulas.
