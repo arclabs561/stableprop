@@ -24,6 +24,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Reuse Gaussian density and safe standard deviation tensors in full-covariance
+  ReLU propagation. Add benchmarks for propagation followed by backpropagation.
 - Accumulate the vector API's covariance product along contiguous rows.
 - Benchmark central and negative-tail Burn ReLU workloads, and check tail
   values and gradients against high-precision references on CPU and Metal.

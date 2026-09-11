@@ -1,7 +1,10 @@
 #![cfg(feature = "burn")]
 
-use burn::tensor::{Tensor, TensorData};
-use burn_ndarray::NdArray;
+use burn::{
+    backend::Autodiff,
+    tensor::{Tensor, TensorData},
+};
+use burn_ndarray::{NdArray, NdArrayDevice};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use stableprop::burn_sdp::{
     propagate_linear, propagate_linear_full, propagate_relu, propagate_relu_full, Moments,
@@ -10,6 +13,7 @@ use stableprop::burn_sdp::{
 use std::hint::black_box;
 
 type Backend = NdArray<f32>;
+type AutodiffBackend = Autodiff<Backend>;
 
 fn covariance(width: usize) -> Vec<f32> {
     let mut factors = vec![vec![0.0f32; width]; width];
@@ -105,6 +109,34 @@ fn assert_close(actual: &[f32], expected: &[f32]) {
             (actual - expected).abs() < 2e-5 * expected.abs().max(1.0),
             "{actual} != {expected}"
         );
+    }
+}
+
+fn assert_full_relu_backward_reference(device: &NdArrayDevice) {
+    let covariance =
+        Tensor::<AutodiffBackend, 3>::from_data([[[1.0, 0.5], [0.5, 1.0]]], device).require_grad();
+    let output = propagate_relu_full(&MomentsFull::new(
+        Tensor::<AutodiffBackend, 2>::zeros([1, 2], device),
+        covariance.clone(),
+    ));
+    // For zero-mean unit-variance inputs, one off-diagonal is
+    // C/4 + C^2/(4*pi). Its gradient checks the shared covariance path.
+    let gradients = output.cov.slice([0..1, 0..1, 1..2]).sum().backward();
+    let actual = covariance
+        .grad(&gradients)
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let variance_gradient = -0.25 / (8.0 * std::f32::consts::PI);
+    let expected = [
+        variance_gradient,
+        0.25 + 0.25 / std::f32::consts::PI,
+        0.0,
+        variance_gradient,
+    ];
+    for (actual, expected) in actual.into_iter().zip(expected) {
+        assert!((actual - expected).abs() < 2e-7, "{actual} != {expected}");
     }
 }
 
@@ -241,6 +273,54 @@ fn burn_benches(c: &mut Criterion) {
         }
     }
     relu.finish();
+
+    // The base tensors have no autodiff graph. Cloning and requiring gradients
+    // within each iteration creates fresh leaves while reusing fixture storage.
+    assert_full_relu_backward_reference(&device);
+    let mut relu_backward = c.benchmark_group("burn_relu_full_backward_f32");
+    for (batch, width) in [(8, 16), (64, 64)] {
+        let covariance_one = relu_covariance(width);
+        let covariance: Vec<f32> = (0..batch)
+            .flat_map(|_| covariance_one.iter().copied())
+            .collect();
+        let base_covariance = Tensor::<AutodiffBackend, 3>::from_data(
+            TensorData::new(covariance, [batch, width, width]),
+            &device,
+        );
+
+        for (case, mean) in [
+            (
+                "central",
+                (0..batch * width)
+                    .map(|index| [-1.0f32, 0.0, 1.0][index % 3])
+                    .collect(),
+            ),
+            ("negative_tail", vec![-7.0; batch * width]),
+        ] {
+            let base_mean = Tensor::<AutodiffBackend, 2>::from_data(
+                TensorData::new(mean, [batch, width]),
+                &device,
+            );
+            let id = format!("{case}_b{batch}w{width}");
+            relu_backward.bench_with_input(
+                BenchmarkId::new("full", id),
+                &(base_mean, base_covariance.clone()),
+                |b, (mean, covariance)| {
+                    b.iter(|| {
+                        let input = MomentsFull::new(
+                            mean.clone().require_grad(),
+                            covariance.clone().require_grad(),
+                        );
+                        let output = propagate_relu_full(&input);
+                        // Both moments participate, so backward traverses their
+                        // shared Gaussian intermediates as well as each output.
+                        black_box((output.mean.sum() + output.cov.sum()).backward())
+                    })
+                },
+            );
+        }
+    }
+    relu_backward.finish();
 }
 
 criterion_group!(benches, burn_benches);

@@ -21,6 +21,14 @@ fixtures include signed correlations; the diagonal oracle uses only their
 marginal variances. `just bench-check` runs each fixture once without collecting
 timing samples and is included in `just check`.
 
+`bench-burn` also includes `burn_relu_full_backward_f32`: central and
+negative-tail full-covariance ReLU workloads at batch/width 8/16 and 64/64.
+Each iteration creates fresh tracked leaves from prebuilt, untracked tensors,
+propagates both moments, reduces them to a scalar loss, and runs `backward`.
+Tensor allocation, graph construction, and result destruction are included.
+Fixture creation, the analytic gradient check, and host readback are outside
+the timed closure.
+
 Criterion accepts filters and saved baselines through the recipes:
 
 ```sh

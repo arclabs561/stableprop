@@ -154,7 +154,9 @@ struct GaussianReluTerms<B: Backend> {
     mean: Tensor<B, 2>,
     var: Tensor<B, 2>,
     p: Tensor<B, 2>,
+    phi: Tensor<B, 2>,
     alpha: Tensor<B, 2>,
+    safe_sigma: Tensor<B, 2>,
     deterministic: Tensor<B, 2, burn::tensor::Bool>,
     active: Tensor<B, 2, burn::tensor::Bool>,
     inactive: Tensor<B, 2, burn::tensor::Bool>,
@@ -214,15 +216,17 @@ fn gaussian_relu_terms<B: Backend>(
     // argument too, so deterministic and positive-tail gradients stay finite.
     let t = alpha.clone().neg().clamp_min(2.0);
     let (r1, r2) = normal_tail_ratios(t.clone());
-    let tail_p = phi / (t + r1.clone());
+    let tail_p = phi.clone() / (t + r1.clone());
     let tail_mean = tail_p.clone() * r1;
     let tail_var = tail_mean.clone() * r2 - tail_mean.clone() * tail_mean.clone();
     let tail = alpha.clone().lower_elem(-2.0);
     GaussianReluTerms {
-        mean: mean.mask_where(tail.clone(), sigma * tail_mean),
+        mean: mean.mask_where(tail.clone(), sigma.clone() * tail_mean),
         var: (var * normalized_var.mask_where(tail.clone(), tail_var)).clamp_min(0.0),
         p: p.mask_where(tail, tail_p),
+        phi,
         alpha: alpha.clone(),
+        safe_sigma: sigma,
         deterministic,
         active: alpha.clone().greater_equal_elem(8.0),
         inactive: alpha.lower_equal_elem(-8.0),
@@ -524,10 +528,7 @@ pub fn propagate_relu_full<B: Backend>(m: &MomentsFull<B>) -> MomentsFull<B> {
     // is the smooth gate Phi(a_i) Phi(a_j) Sigma_ij; the derivatives of E[relu]
     // in the input mean are d1 = Phi(a), d2 = phi(a)/sigma, d3 = -a phi(a)/sigma^2.
     // The diagonal is then overwritten with the univariate variance.
-    let safe_var = input_var
-        .clone()
-        .mask_fill(terms.deterministic.clone(), 1.0);
-    let sigma = safe_var.clone().sqrt();
+    let sigma = terms.safe_sigma;
     let sigma_i = sigma.clone().unsqueeze_dim::<3>(2);
     let sigma_j = sigma.unsqueeze_dim::<3>(1);
     let sigma_outer = sigma_i.clone() * sigma_j.clone();
@@ -545,10 +546,6 @@ pub fn propagate_relu_full<B: Backend>(m: &MomentsFull<B>) -> MomentsFull<B> {
         .mask_where(i_smaller.clone(), sigma_j.clone());
     let smaller = sigma_j.mask_where(i_smaller, sigma_i);
     let rho = ((m.cov.clone() * off_mask / larger) / smaller).clamp(-1.0, 1.0);
-    let phi = (terms.alpha.clone() * terms.alpha.clone())
-        .mul_scalar(-0.5)
-        .exp()
-        .mul_scalar(1.0 / (2.0 * PI).sqrt());
     let outer = |t: Tensor<B, 2>| t.clone().unsqueeze_dim::<3>(2) * t.unsqueeze_dim::<3>(1);
     // Apply the same linear tail limits to covariance as to marginal moments.
     // An inactive output cannot covary; an active output is the input itself.
@@ -557,7 +554,7 @@ pub fn propagate_relu_full<B: Backend>(m: &MomentsFull<B>) -> MomentsFull<B> {
         .p
         .mask_fill(terms.active, 1.0)
         .mask_fill(terms.inactive, 0.0);
-    let off_phi = phi.mask_fill(tail.bool_or(terms.deterministic), 0.0);
+    let off_phi = terms.phi.mask_fill(tail.bool_or(terms.deterministic), 0.0);
     let off_alpha_phi = terms.alpha * off_phi.clone();
     // Horner form evaluates the cubic with two fewer pairwise multiplications.
     let series = outer(off_p)
