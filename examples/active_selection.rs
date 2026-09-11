@@ -57,10 +57,18 @@ struct Net<B: Backend> {
 
 impl<B: Backend> Net<B> {
     fn init(device: &B::Device) -> Self {
-        Self {
+        let model = Self {
             lin1: LinearConfig::new(D_IN, HIDDEN).init(device),
             lin2: LinearConfig::new(HIDDEN, N_CLASS).init(device),
+        };
+        // Burn parameters initialize lazily; materialize before cloning a baseline.
+        for layer in [&model.lin1, &model.lin2] {
+            drop(layer.weight.val());
+            if let Some(bias) = &layer.bias {
+                drop(bias.val());
+            }
         }
+        model
     }
     fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
         self.lin2.forward(activation::relu(self.lin1.forward(x)))
@@ -611,7 +619,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{centered_disagreement, correlation, ranks};
+    use super::{
+        centered_disagreement, correlation, ranks, Ad, Backend, Device, Net, Tensor, TensorData,
+        D_IN,
+    };
 
     #[test]
     fn centered_disagreement_ignores_common_logit_shift_covariance() {
@@ -636,5 +647,29 @@ mod tests {
         assert_eq!(tied, vec![1.0, 1.0, 1.0]);
         assert_eq!(correlation(&tied, &[0.0, 1.0, 2.0]), None);
         assert_eq!(correlation(&[1.0, 1.0], &[2.0, 3.0]), None);
+    }
+
+    #[test]
+    fn cloned_baseline_has_identical_forward_predictions() {
+        let device = Device::<Ad>::default();
+        <Ad as Backend>::seed(&device, 0x51EC_7E57);
+        let baseline = Net::<Ad>::init(&device);
+        let left = baseline.clone();
+        let right = baseline.clone();
+        let probe = Tensor::<Ad, 2>::from_data(
+            TensorData::new(vec![-1.0, 0.5, 1.25, -0.75], [2, D_IN]),
+            &device,
+        );
+
+        let left = left
+            .forward(probe.clone())
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        let right = right.forward(probe).into_data().to_vec::<f32>().unwrap();
+        assert_eq!(
+            left, right,
+            "cloned baselines must share initialized weights"
+        );
     }
 }

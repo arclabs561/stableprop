@@ -34,6 +34,11 @@ Run changed examples using the commands in their guide. For numerical changes,
 check the relevant mathematical invariant or independent reference, including
 autodiff when changing Burn operations. Use local seeded sampling for Monte
 Carlo regression tests; a shared backend RNG can couple parallel tests.
+Materialize Burn parameters before cloning a shared experimental baseline or
+changing the RNG seed. Cloning uninitialized parameters leaves each clone to
+draw its own weights on first use.
+`just property-test` runs the algebraic and Gaussian-reference properties with
+4,096 cases each; supply a count to override it.
 
 On macOS, run `just metal-check` to compile the GPU tests and training example, and
 `just metal-test` to compare values and gradients on a Metal device. CI only

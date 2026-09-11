@@ -40,10 +40,18 @@ struct Encoder<B: Backend> {
 
 impl<B: Backend> Encoder<B> {
     fn init(device: &B::Device) -> Self {
-        Self {
+        let model = Self {
             lin1: LinearConfig::new(D_IN, HIDDEN).init(device),
             lin2: LinearConfig::new(HIDDEN, EMBED).init(device),
+        };
+        // Burn parameters initialize lazily; materialize before cloning a baseline.
+        for layer in [&model.lin1, &model.lin2] {
+            drop(layer.weight.val());
+            if let Some(bias) = &layer.bias {
+                drop(bias.val());
+            }
         }
+        model
     }
     fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
         self.lin2.forward(activation::relu(self.lin1.forward(x)))
@@ -186,4 +194,38 @@ fn main() {
         "tuplet's pairwise contrastive loss while stableprop supplies the analytic embedding variance."
     );
     println!("This fixed-pair synthetic comparison is not a general performance guarantee.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cloned_baseline_has_identical_forward_predictions() {
+        let device = Device::<Ad>::default();
+        <Ad as Backend>::seed(&device, 0x7A91_7E57);
+        let baseline = Encoder::<Ad>::init(&device);
+        let left = baseline.clone();
+        let right = baseline.clone();
+        let probe = Tensor::<Ad, 2>::from_data(
+            TensorData::new(
+                vec![
+                    -1.0, -0.5, 0.25, 0.75, 1.25, 1.5, 0.4, -0.8, 1.2, -1.6, 2.0, -2.4,
+                ],
+                [2, D_IN],
+            ),
+            &device,
+        );
+
+        let left = left
+            .forward(probe.clone())
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        let right = right.forward(probe).into_data().to_vec::<f32>().unwrap();
+        assert_eq!(
+            left, right,
+            "cloned baselines must share initialized weights"
+        );
+    }
 }

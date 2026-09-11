@@ -25,7 +25,11 @@ lint:
 test:
     cargo test
     cargo test --all-features
-    cargo test --all-features --example cora_uncertainty --example active_selection --example gcn_uncertainty
+    cargo test --all-features --examples
+
+# Sample more algebraic and Gaussian-reference cases; optionally set the count.
+property-test cases="4096":
+    PROPTEST_CASES="$1" cargo test --features burn --test properties --test burn_properties --test relu_covariance_reference
 
 # Build both sets of API docs with warnings treated as errors.
 docs:
