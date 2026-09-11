@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Reject mismatched floating dtypes in Burn distribution constructors, before
+  they reach backend arithmetic.
 - Preserve unbounded conformal intervals when a calibration set is too small
   for the requested finite-sample rank.
 

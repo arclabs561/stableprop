@@ -15,11 +15,12 @@
 //! al. (ICLR 2024).
 //!
 //! Callers must supply finite tensor values, nonnegative variances and scales,
-//! and valid positive-semidefinite covariance matrices. Constructors check
-//! shapes, but do not inspect tensor contents or synchronize devices to validate
-//! values. Public fields carry the same requirements. Negative Gaussian ReLU
-//! tails use continued fractions to avoid cancellation; linear tail limits
-//! apply at eight standard deviations.
+//! and valid positive-semidefinite covariance matrices. All operands in a
+//! propagation operation must have the same floating-point dtype. Constructors
+//! check shapes and dtypes, but do not inspect tensor contents or synchronize
+//! devices to validate values. Public fields carry the same requirements.
+//! Negative Gaussian ReLU tails use continued fractions to avoid cancellation;
+//! linear tail limits apply at eight standard deviations.
 //! At zero variance, masks select deterministic outputs and finite gradients.
 //! These boundary conventions are not limits of every positive-variance
 //! derivative: at zero mean, the mean's variance derivative diverges as
@@ -76,12 +77,17 @@ impl<B: Backend> Moments<B> {
     /// ```
     ///
     /// # Panics
-    /// Panics if the tensor shapes differ.
+    /// Panics if the tensor shapes or dtypes differ.
     pub fn new(mean: Tensor<B, 2>, var: Tensor<B, 2>) -> Self {
         assert_eq!(
             mean.dims(),
             var.dims(),
             "mean and variance shapes must match"
+        );
+        assert_eq!(
+            mean.dtype(),
+            var.dtype(),
+            "mean and variance must have the same dtype"
         );
         Self { mean, var }
     }
@@ -490,20 +496,33 @@ impl<B: Backend> MomentsFull<B> {
     /// The module's value requirements apply; contents are not inspected.
     ///
     /// # Panics
-    /// Panics if the covariance shape does not match the mean shape.
+    /// Panics if the covariance shape or dtype does not match the mean.
     pub fn new(mean: Tensor<B, 2>, cov: Tensor<B, 3>) -> Self {
         let [n, d] = mean.dims();
         assert_eq!(cov.dims(), [n, d, d], "covariance shape must be [n, d, d]");
+        assert_eq!(
+            mean.dtype(),
+            cov.dtype(),
+            "mean and covariance must have the same dtype"
+        );
         Self { mean, cov }
     }
 
     /// Build from a diagonal variance `[n, d]` (independent input features):
     /// `cov = diag(var)` per row.
+    ///
+    /// # Panics
+    /// Panics if the mean and variance shapes or dtypes differ.
     pub fn from_diagonal(mean: Tensor<B, 2>, var: Tensor<B, 2>) -> Self {
         assert_eq!(
             mean.dims(),
             var.dims(),
             "mean and variance shapes must match"
+        );
+        assert_eq!(
+            mean.dtype(),
+            var.dtype(),
+            "mean and variance must have the same dtype"
         );
         let [n, d] = var.dims();
         let eye_d = eye::<B>(d, &var.device(), var.dtype());
@@ -766,12 +785,17 @@ impl<B: Backend> Cauchy<B> {
     /// nonnegative; tensor contents are not checked.
     ///
     /// # Panics
-    /// Panics if the tensor shapes differ.
+    /// Panics if the tensor shapes or dtypes differ.
     pub fn new(location: Tensor<B, 2>, scale: Tensor<B, 2>) -> Self {
         assert_eq!(
             location.dims(),
             scale.dims(),
             "location and scale shapes must match"
+        );
+        assert_eq!(
+            location.dtype(),
+            scale.dtype(),
+            "location and scale must have the same dtype"
         );
         Self { location, scale }
     }

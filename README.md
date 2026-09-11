@@ -82,7 +82,8 @@ transpose of the vector API's layout.
 
 Burn selects tensor precision at creation. For `f64`, pass
 `(&device, DType::F64)` to tensor constructors; a backend type alone does not
-select double precision. Propagation preserves the input tensor dtype.
+select double precision. Use the same floating dtype for moments, weights and
+biases. Propagation preserves that dtype.
 
 | Representation | What it tracks | Main approximation |
 | --- | --- | --- |
