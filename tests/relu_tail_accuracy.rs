@@ -315,8 +315,8 @@ mod burn {
                 let sigma = variance.sqrt();
                 let mean = tail.alpha as f32 * sigma;
                 let input = Moments::new(
-                    Tensor::from_data([[mean]], &device),
-                    Tensor::from_data([[variance]], &device),
+                    Tensor::from_data([[mean]], (&device, DType::F32)),
+                    Tensor::from_data([[variance]], (&device, DType::F32)),
                 );
                 let diagonal = propagate_relu(&input);
                 let leaky = propagate_leaky_relu(&input, 0.0);
@@ -339,7 +339,7 @@ mod burn {
                     assert_relative(mean_value as f64, expect_mean, 2e-4, name);
                     assert_relative(var_value as f64, expect_var, 2e-4, name);
                 }
-                let cross = Tensor::<Nd, 3>::from_data([[[variance]]], &device);
+                let cross = Tensor::<Nd, 3>::from_data([[[variance]]], (&device, DType::F32));
                 let gated = propagate_relu_cross_covariance(cross, &input)
                     .into_data()
                     .to_vec::<f32>()
@@ -351,8 +351,8 @@ mod burn {
 
     fn gradients(mode: &str, mean: f32, variance: f32, mean_loss: bool) -> (f32, f32) {
         let device = Default::default();
-        let mean = Tensor::<Ad, 2>::from_data([[mean]], &device).require_grad();
-        let var = Tensor::<Ad, 2>::from_data([[variance]], &device).require_grad();
+        let mean = Tensor::<Ad, 2>::from_data([[mean]], (&device, DType::F32)).require_grad();
+        let var = Tensor::<Ad, 2>::from_data([[variance]], (&device, DType::F32)).require_grad();
         let loss = match mode {
             "diagonal" => {
                 let out = propagate_relu(&Moments::new(mean.clone(), var.clone()));
@@ -399,8 +399,8 @@ mod burn {
     fn f32_outputs(mode: &str, mean: f32, variance: f32) -> (f32, f32) {
         let device = Default::default();
         let input = Moments::new(
-            Tensor::<Nd, 2>::from_data([[mean]], &device),
-            Tensor::<Nd, 2>::from_data([[variance]], &device),
+            Tensor::<Nd, 2>::from_data([[mean]], (&device, DType::F32)),
+            Tensor::<Nd, 2>::from_data([[variance]], (&device, DType::F32)),
         );
         match mode {
             "diagonal" => {
@@ -422,8 +422,9 @@ mod burn {
 
     fn scaled_variance_gradients(mode: &str, mean_value: f32, variance_value: f32) -> (f64, f64) {
         let device = Default::default();
-        let mean = Tensor::<Ad, 2>::from_data([[mean_value]], &device).require_grad();
-        let variance = Tensor::<Ad, 2>::from_data([[variance_value]], &device).require_grad();
+        let mean = Tensor::<Ad, 2>::from_data([[mean_value]], (&device, DType::F32)).require_grad();
+        let variance =
+            Tensor::<Ad, 2>::from_data([[variance_value]], (&device, DType::F32)).require_grad();
         let loss_scale = 4_294_967_296.0f64;
         let loss = match mode {
             "diagonal" => propagate_relu(&Moments::new(mean.clone(), variance.clone()))

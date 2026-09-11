@@ -301,8 +301,11 @@ fn centered_relu_covariance_stays_within_series_remainder() {
     let max_remainder = (pi - 3.0) / (4.0 * pi);
     for rho in [-1.0f64, -0.99, -0.9, -0.5, 0.0, 0.5, 0.9, 0.99, 1.0] {
         let input = MomentsFull::new(
-            Tensor::<NdArray<f32>, 2>::zeros([1, 2], &device),
-            Tensor::from_data([[[1.0, rho as f32], [rho as f32, 1.0]]], &device),
+            Tensor::<NdArray<f32>, 2>::zeros([1, 2], (&device, DType::F32)),
+            Tensor::from_data(
+                [[[1.0, rho as f32], [rho as f32, 1.0]]],
+                (&device, DType::F32),
+            ),
         );
         let cov = propagate_relu_full(&input)
             .cov

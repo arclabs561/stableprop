@@ -37,6 +37,8 @@ Carlo regression tests; a shared backend RNG can couple parallel tests.
 Materialize Burn parameters before cloning a shared experimental baseline or
 changing the RNG seed. Cloning uninitialized parameters leaves each clone to
 draw its own weights on first use.
+Specify tensor dtypes explicitly in tests that mix precisions. Burn's default
+float dtype is shared by device, independently of the NdArray backend alias.
 `just property-test` runs propagation, calibration-rank and simulator-oracle
 properties with 4,096 cases each; supply a count to override it.
 When changing the reference generator or its frozen fixtures, run

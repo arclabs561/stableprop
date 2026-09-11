@@ -13,6 +13,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Make mixed-precision Burn reference tests independent of the shared device
+  default dtype.
 - Reject mismatched floating dtypes in Burn distribution constructors, before
   they reach backend arithmetic.
 - Preserve unbounded conformal intervals when a calibration set is too small
