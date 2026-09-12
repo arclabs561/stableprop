@@ -10,6 +10,9 @@
 //! common-logit shifts that do not change a classifier decision.  They describe
 //! the same fixed-model perturbation quantity, approximately in the analytic
 //! path.
+//! Input-space farthest-first is a separate geometric coverage control: each
+//! new pick accounts for earlier picks in the same batch. Its pool covering
+//! radius describes raw feature-space coverage, not expected label value.
 //!
 //! Each budget is evaluated after retraining from the seed's original model
 //! weights.  There is no variance penalty or consistency loss.  The printed
@@ -81,14 +84,16 @@ enum Policy {
     Entropy,
     Analytic,
     MonteCarlo,
+    Diversity,
 }
 
 impl Policy {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Random,
         Self::Entropy,
         Self::Analytic,
         Self::MonteCarlo,
+        Self::Diversity,
     ];
     fn name(self) -> &'static str {
         match self {
@@ -96,6 +101,7 @@ impl Policy {
             Self::Entropy => "entropy",
             Self::Analytic => "analytic 2trPCP",
             Self::MonteCarlo => "MC disagreement",
+            Self::Diversity => "input farthest-first",
         }
     }
 }
@@ -106,6 +112,7 @@ struct Row {
     clean: f64,
     noisy: f64,
     selected_classes: [usize; N_CLASS],
+    pool_cover_radius: f64,
     acquisition: Duration,
     pearson: Option<f64>,
     spearman: Option<f64>,
@@ -384,6 +391,122 @@ fn select_top(indices: &[usize], scores: &[f64], count: usize, tie_rng: &mut Rng
     order.into_iter().take(count).map(|i| indices[i]).collect()
 }
 
+/// Greedily cover raw two-dimensional input space without using labels or a
+/// learned representation. Each pick maximizes its nearest squared distance to
+/// already chosen pool points and earlier picks in this acquisition chunk.
+fn farthest_first(
+    features: &[f32],
+    chosen: &[usize],
+    count: usize,
+    tie_rng: &mut Rng,
+) -> Vec<usize> {
+    assert_eq!(
+        features.len() % D_IN,
+        0,
+        "features must contain complete rows"
+    );
+    let n = features.len() / D_IN;
+    assert!(
+        !chosen.is_empty(),
+        "farthest-first requires an initial chosen set"
+    );
+    assert!(
+        chosen.iter().all(|&index| index < n),
+        "chosen index is outside the pool"
+    );
+    assert!(
+        chosen
+            .iter()
+            .enumerate()
+            .all(|(i, index)| chosen[..i].iter().all(|earlier| earlier != index)),
+        "chosen indices must be distinct"
+    );
+    assert!(
+        count <= n - chosen.len(),
+        "acquisition exceeds remaining pool"
+    );
+
+    let mut used = vec![false; n];
+    for &index in chosen {
+        used[index] = true;
+    }
+    let mut nearest: Vec<f64> = (0..n)
+        .map(|point| {
+            chosen
+                .iter()
+                .map(|&center| squared_distance(features, point, center))
+                .fold(f64::INFINITY, f64::min)
+        })
+        .collect();
+    let mut selected = Vec::with_capacity(count);
+    for _ in 0..count {
+        let mut best_distance = f64::NEG_INFINITY;
+        let mut ties = Vec::new();
+        for candidate in 0..n {
+            if used[candidate] {
+                continue;
+            }
+            let distance = nearest[candidate];
+            if distance > best_distance {
+                best_distance = distance;
+                ties.clear();
+                ties.push(candidate);
+            } else if distance == best_distance {
+                ties.push(candidate);
+            }
+        }
+        assert!(
+            !ties.is_empty(),
+            "farthest-first had no remaining candidate"
+        );
+        let next = ties[tie_rng.index(ties.len())];
+        used[next] = true;
+        selected.push(next);
+        for candidate in 0..n {
+            if !used[candidate] {
+                nearest[candidate] =
+                    nearest[candidate].min(squared_distance(features, candidate, next));
+            }
+        }
+    }
+    selected
+}
+
+fn squared_distance(features: &[f32], left: usize, right: usize) -> f64 {
+    let dx = features[left * D_IN] as f64 - features[right * D_IN] as f64;
+    let dy = features[left * D_IN + 1] as f64 - features[right * D_IN + 1] as f64;
+    dx * dx + dy * dy
+}
+
+/// Largest nearest-neighbor distance from a pool point to the selected set.
+/// This post-hoc geometry diagnostic is independent of labels and acquisition
+/// scores.
+fn pool_cover_radius(features: &[f32], chosen: &[usize]) -> f64 {
+    assert!(
+        !chosen.is_empty(),
+        "coverage requires at least one chosen point"
+    );
+    let n = features.len() / D_IN;
+    assert_eq!(
+        features.len() % D_IN,
+        0,
+        "features must contain complete rows"
+    );
+    assert!(
+        chosen.iter().all(|&index| index < n),
+        "chosen index is outside the pool"
+    );
+    (0..n)
+        .map(|point| {
+            chosen
+                .iter()
+                .map(|&center| squared_distance(features, point, center))
+                .fold(f64::INFINITY, f64::min)
+                .sqrt()
+        })
+        .fold(0.0, f64::max)
+}
+
 fn acquire(
     policy: Policy,
     model: &Net,
@@ -407,6 +530,13 @@ fn acquire(
             None,
         );
     }
+    if matches!(policy, Policy::Diversity) {
+        return (
+            farthest_first(pool_features, chosen, count, &mut tie_rng),
+            started.elapsed(),
+            None,
+        );
+    }
     let mut x = Vec::with_capacity(candidates.len() * D_IN);
     for &i in &candidates {
         x.extend_from_slice(&pool_features[i * D_IN..(i + 1) * D_IN]);
@@ -420,7 +550,7 @@ fn acquire(
         }
         Policy::Analytic => analytic_scores(model, &x, candidates.len(), nd_device),
         Policy::MonteCarlo => mc_scores(model, &x, candidates.len(), &mut score_rng, nd_device),
-        Policy::Random => unreachable!(),
+        Policy::Random | Policy::Diversity => unreachable!(),
     };
     assert!(
         scores.iter().all(|score| score.is_finite()),
@@ -544,6 +674,7 @@ fn main() {
                     clean: accuracy(&w, &test),
                     noisy: noisy_accuracy(&w, &test, &mut noise_rng),
                     selected_classes: selected_class_counts(&chosen, &pool.y),
+                    pool_cover_radius: pool_cover_radius(&pool.x, &chosen),
                     acquisition,
                     pearson: agreement.and_then(|x| x.0),
                     spearman: agreement.and_then(|x| x.1),
@@ -562,7 +693,7 @@ fn main() {
     println!("each row averages over seeds; acquisition excludes retraining and uses {MC_DRAWS} iid MC views.");
     println!("\nlearning curve (accuracy; higher is better):");
     println!(
-        "  {:<18} {:>6} {:>9} {:>9}",
+        "  {:<22} {:>6} {:>9} {:>9}",
         "policy", "labels", "clean", "noisy"
     );
     for policy in Policy::ALL {
@@ -574,7 +705,7 @@ fn main() {
             let mean =
                 |f: fn(&Row) -> f64| group.iter().map(|r| f(r)).sum::<f64>() / group.len() as f64;
             println!(
-                "  {:<18} {:>6} {:>9.3} {:>9.3}",
+                "  {:<22} {:>6} {:>9.3} {:>9.3}",
                 policy.name(),
                 budget,
                 mean(|r| r.clean),
@@ -582,10 +713,10 @@ fn main() {
             );
         }
     }
-    println!("\nselected-label composition (mean per seed; labels read after acquisition):");
+    println!("\nselected-set diagnostics (mean per seed; labels read after acquisition):");
     println!(
-        "  {:<18} {:>6} {:>10} {:>10}",
-        "policy", "labels", "class 0", "class 1"
+        "  {:<22} {:>6} {:>10} {:>10} {:>11}",
+        "policy", "labels", "class 0", "class 1", "pool radius"
     );
     for policy in Policy::ALL {
         for &budget in &BUDGETS {
@@ -601,16 +732,18 @@ fn main() {
                     / group.len() as f64
             };
             println!(
-                "  {:<18} {:>6} {:>10.1} {:>10.1}",
+                "  {:<22} {:>6} {:>10.1} {:>10.1} {:>11.3}",
                 policy.name(),
                 budget,
                 mean_count(0),
                 mean_count(1),
+                group.iter().map(|r| r.pool_cover_radius).sum::<f64>() / group.len() as f64,
             );
         }
     }
+    println!("pool radius: largest Euclidean distance from a pool point to the selected set; lower is better coverage.");
     println!("\nacquisition time only (mean milliseconds; lower is cheaper):");
-    println!("  {:<18} {:>6} {:>10}", "policy", "labels", "ms");
+    println!("  {:<22} {:>6} {:>10}", "policy", "labels", "ms");
     for policy in Policy::ALL {
         for &budget in &BUDGETS {
             let group: Vec<&Row> = rows
@@ -622,7 +755,7 @@ fn main() {
                 .map(|r| r.acquisition.as_secs_f64() * 1e3)
                 .sum::<f64>()
                 / group.len() as f64;
-            println!("  {:<18} {:>6} {:>10.1}", policy.name(), budget, ms);
+            println!("  {:<22} {:>6} {:>10.3}", policy.name(), budget, ms);
         }
     }
     println!("\nanalytic versus MC score agreement during acquisition (Pearson / Spearman):");
@@ -654,7 +787,29 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{centered_disagreement, correlation, ranks, Device, Net, Tensor, TensorData, D_IN};
+    use super::{
+        centered_disagreement, correlation, farthest_first, pool_cover_radius, ranks, Device, Net,
+        Rng, Tensor, TensorData, D_IN,
+    };
+    use proptest::prelude::*;
+
+    fn squared_cover_radius(points: &[(i16, i16)], chosen: &[usize]) -> i64 {
+        points
+            .iter()
+            .map(|&(x, y)| {
+                chosen
+                    .iter()
+                    .map(|&center| {
+                        let dx = i64::from(x) - i64::from(points[center].0);
+                        let dy = i64::from(y) - i64::from(points[center].1);
+                        dx * dx + dy * dy
+                    })
+                    .min()
+                    .unwrap()
+            })
+            .max()
+            .unwrap()
+    }
 
     #[test]
     fn centered_disagreement_ignores_common_logit_shift_covariance() {
@@ -679,6 +834,73 @@ mod tests {
         assert_eq!(tied, vec![1.0, 1.0, 1.0]);
         assert_eq!(correlation(&tied, &[0.0, 1.0, 2.0]), None);
         assert_eq!(correlation(&[1.0, 1.0], &[2.0, 3.0]), None);
+    }
+
+    #[test]
+    fn farthest_first_improves_raw_pool_coverage_over_static_top_scores() {
+        let points = vec![0.0, 0.0, 2.0, 0.0, 3.0, 0.0, 9.0, 0.0, 10.0, 0.0];
+        let mut tie_rng = Rng::new(0xD1FE_0001);
+        let selected = farthest_first(&points, &[0], 2, &mut tie_rng);
+        assert_eq!(selected, vec![4, 2]);
+
+        let mut greedy_chosen = vec![0];
+        greedy_chosen.extend(&selected);
+        assert!((pool_cover_radius(&points, &greedy_chosen) - 1.0).abs() < 1e-12);
+
+        let static_selected = [4, 3];
+        let mut static_chosen = vec![0];
+        static_chosen.extend(static_selected);
+        assert!((pool_cover_radius(&points, &static_chosen) - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn farthest_first_uses_seeded_ties_without_reselecting_points() {
+        let points = vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let mut first_rng = Rng::new(0xD1FE_0002);
+        let mut second_rng = Rng::new(0xD1FE_0002);
+        let first = farthest_first(&points, &[0], 3, &mut first_rng);
+        let second = farthest_first(&points, &[0], 3, &mut second_rng);
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 3);
+        assert!(first.iter().all(|&index| index != 0));
+        assert!(first
+            .iter()
+            .enumerate()
+            .all(|(i, index)| { first[..i].iter().all(|earlier| earlier != index) }));
+    }
+
+    proptest! {
+        #[test]
+        fn farthest_first_is_a_two_approximation_on_tiny_integer_pools(
+            points in prop::collection::vec((-8i16..9, -8i16..9), 4..9),
+            initial_count in 1usize..4,
+            seed in any::<u64>(),
+        ) {
+            let features: Vec<f32> = points
+                .iter()
+                .flat_map(|&(x, y)| [x as f32, y as f32])
+                .collect();
+            let mut tie_rng = Rng::new(seed);
+            let chosen: Vec<usize> = (0..initial_count.min(points.len() - 2)).collect();
+            let selected = farthest_first(&features, &chosen, 2, &mut tie_rng);
+            prop_assert_eq!(selected.len(), 2);
+            prop_assert!(selected.iter().all(|&index| index >= chosen.len() && index < points.len()));
+            prop_assert_ne!(selected[0], selected[1]);
+
+            let mut greedy_chosen = chosen.clone();
+            greedy_chosen.extend(&selected);
+            let greedy_radius_squared = squared_cover_radius(&points, &greedy_chosen);
+            let mut optimal_radius_squared = i64::MAX;
+            for left in chosen.len()..points.len() {
+                for right in left + 1..points.len() {
+                    let mut candidate = chosen.clone();
+                    candidate.extend([left, right]);
+                    optimal_radius_squared = optimal_radius_squared
+                        .min(squared_cover_radius(&points, &candidate));
+                }
+            }
+            prop_assert!(greedy_radius_squared <= 4 * optimal_radius_squared);
+        }
     }
 
     #[test]

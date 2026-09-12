@@ -27,9 +27,9 @@ test:
     cargo test --all-features
     cargo test --all-features --examples
 
-# Sample propagation, calibration-rank and simulator-oracle properties.
+# Sample propagation, calibration, selection and simulator-oracle properties.
 property-test cases="4096":
-    PROPTEST_CASES="$1" cargo test --features burn --test properties --test burn_properties --test relu_covariance_reference --example grouped_intervals --example robust_selection --example kalman_sensor_intervals
+    PROPTEST_CASES="$1" cargo test --features burn --test properties --test burn_properties --test relu_covariance_reference --example grouped_intervals --example robust_selection --example kalman_sensor_intervals --example active_selection
 
 # Regenerate independent values and compare them with frozen Rust fixtures.
 # Requires uv; kept separate from the Python-free Rust checks.

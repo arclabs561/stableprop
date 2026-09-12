@@ -11,6 +11,7 @@ but it does not by itself measure what a new label would teach the model.
 | [Input-noise variance](../README.md#what-uncertainty-means-here) | Inputs, with model parameters fixed | How much does this prediction change under the chosen perturbations? |
 | [Parameter-posterior variance](methods.md#uncertainty-sources-and-downstream-methods) | Parameters drawn from a fitted posterior | How uncertain is the model about this prediction under that posterior? |
 | [Predictive label entropy](../examples/active_selection.rs) | Labels under the predictive model | How diffuse is the predicted label distribution? |
+| [Pool covering radius](../examples/README.md#active-selection) | Selected points in a fixed feature space | How far is the least-covered pool point from the selected set? |
 | [Per-example parameter gradient](https://arxiv.org/abs/1906.03671) | Parameters in a specified loss | Which update would this labeled or pseudo-labeled example induce? |
 | [Acquisition utility](#from-ranking-uncertainty-to-exploration) | Possible observations followed by an update | Which observation is expected to improve the chosen learning objective? |
 
@@ -222,19 +223,26 @@ selection.[^noise] A consistency or relevance filter is another hypothesis to
 ablate; agreement with the model's original prediction is not proof that a
 transformation preserves the true label.
 
-The [`active_selection`](../examples/active_selection.rs) example implements
-the four basic policies on a fixed two-class synthetic pool. It holds the
-training recipe and evaluation noise fixed, refits from shared initial weights,
+The [`active_selection`](../examples/active_selection.rs) example compares
+random selection, entropy, analytic and Monte Carlo disagreement, and input-space
+farthest-first on a fixed two-class synthetic pool. The latter targets geometric
+coverage, using distances to both
+previously selected points and earlier picks in the same batch.[^coreset]
+It uses the raw two-dimensional inputs as a transparent coverage control;
+learned-feature and gradient-embedding geometry are different experiments.
+It holds the training recipe and evaluation noise fixed, refits from shared initial weights,
 and reports learning curves over three seeds without a variance penalty.
-In an archived Burn 0.21 NdArray run at 96 labels, mean unperturbed accuracy was 0.992 for entropy,
-0.965 for random, 0.944 for analytic disagreement, and 0.964 for sampled
-disagreement. Agreement between the two disagreement scores did not make them
-better selectors. The [example guide](../examples/README.md#active-selection)
-describes the controls and timing limits.
+In a three-seed CPU Flex run at 96 labels, analytic disagreement reached mean
+unperturbed accuracy 0.945 versus 0.983 for random selection. Farthest-first
+also demonstrates that improved geometric coverage can accompany worse
+accuracy at an intermediate budget. The
+[example guide](../examples/README.md#active-selection) gives the measured
+values, controls and timing limits.
 
 This is a small acquisition study, not a validation on noisy pools, retrieval
-tasks, or real labeling costs. Diversity baselines and the failure cases above
-remain necessary before recommending the score for a new application.
+tasks, or real labeling costs. A low covering radius need not imply an informative
+batch: raw distance depends on feature scaling and can favor outliers. The
+failure cases above remain necessary before recommending a score for a new application.
 
 ## Extensions worth testing
 
@@ -269,4 +277,5 @@ requires a projection policy.
 [^uacl]: Luyao Chang, Leiting Chen and Chuan Zhou, 2025. [Uncertainty-Aware Contrastive Learning for deep clustering](https://www.sciencedirect.com/science/article/pii/S0925231225012408).
 [^hardneg]: Joshua Robinson et al., ICLR 2021. [Contrastive Learning with Hard Negative Samples](https://arxiv.org/abs/2010.04592).
 [^badge]: Jordan Ash et al., ICLR 2020. [Deep Batch Active Learning by Diverse, Uncertain Gradient Lower Bounds](https://arxiv.org/abs/1906.03671).
+[^coreset]: Ozan Sener and Silvio Savarese, ICLR 2018. [Active Learning for Convolutional Neural Networks: A Core-Set Approach](https://arxiv.org/abs/1708.00489), Algorithm 1 and Sections 4.3–4.4.
 [^noise]: Savya Khosla et al., 2023 revision. [Understanding and Improving Neural Active Learning on Heteroskedastic Distributions](https://arxiv.org/abs/2211.00928).

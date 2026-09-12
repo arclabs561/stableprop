@@ -522,14 +522,24 @@ single seed do not establish a general improvement in representation learning.
 cargo run --release --features burn --example active_selection
 ```
 
-Compare random selection, predictive entropy, analytic disagreement, and
-Monte Carlo disagreement on a synthetic two-moons pool. Each of three seeds
-uses the same 256 pool points, 512 held-out points, 16 initial labels, and
+Compare random selection, predictive entropy, input-space farthest-first,
+analytic disagreement, and Monte Carlo disagreement on a synthetic two-moons
+pool. Each of three seeds uses the same 256 pool points, 512 held-out points,
+16 initial labels, and
 2–16–2 ReLU network for all policies. The designed initial set is class-balanced;
 subsequent acquisition does not read labels. Each budget refits from the same
 initial weights for 250 epochs, without a variance penalty.
 Class counts are printed after acquisition, so the composition can help explain
 the learning curves without supplying labels to the selection policy.
+
+Farthest-first adds the point farthest from its nearest selected point, updating
+distances after every addition to the batch. It uses Euclidean distance in the
+two raw input coordinates, whose scales are comparable in this generator.
+This is a geometric coverage control using the greedy step from
+[core-set selection](https://arxiv.org/abs/1708.00489), without the paper's
+learned representation or robust integer optimization. The reported pool
+radius is the largest distance to the selected set; smaller means better
+geometric coverage, without implying better accuracy or label value.
 
 Entropy uses the model's softmax probabilities at the unperturbed input.
 The disagreement policies use independent Gaussian feature noise with standard
@@ -539,14 +549,16 @@ and `1` is the length-`K` all-ones column vector. The sampled score estimates
 the same quantity from 64 views. For two classes,
 this is the variance of the logit margin.
 
-Read the learning curves separately from score agreement. In an archived
-Burn 0.21 CPU NdArray run, entropy reached the highest mean accuracy at 96 labels;
-analytic disagreement fell below random selection. The analytic score also
-took slightly longer than batched Monte Carlo on this small network. Reported
-acquisition times exclude retraining and agreement diagnostics, so they are not
-end-to-end training costs or a general backend comparison.
+Read learning curves separately from score agreement and geometric coverage.
+In a three-seed CPU Flex run, farthest-first reduced mean pool radius from 0.299
+at 32 labels to 0.173 at 64 labels while mean clean accuracy fell from 0.985 to
+0.955. Analytic disagreement also trailed random selection at 96 labels
+(0.945 versus 0.983). Reported acquisition times exclude retraining and
+post-selection diagnostics, so they are not end-to-end training costs or a
+general backend comparison.
 
 This experiment isolates selection under one noise model. It does not include
-noisy labels, irrelevant pool points, or a diversity baseline. The
+noisy labels, irrelevant pool points, or learned-representation diversity. Raw
+distance depends on feature scaling and can over-select outliers. The
 [selection note](../docs/sensitivity-and-selection.md) explains why accurate
 sensitivity estimates can still select unhelpful labels.

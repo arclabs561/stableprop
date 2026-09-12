@@ -41,7 +41,7 @@ Specify tensor dtypes explicitly in tests that mix precisions. Burn selects the
 default float dtype through the device; pass `DType::F64` explicitly when needed.
 The optional Burn development API requires Rust 1.95; the vector API remains at
 Rust 1.80.
-`just property-test` runs propagation, calibration-rank and simulator-oracle
+`just property-test` runs propagation, calibration, selection and simulator-oracle
 properties with 4,096 cases each; supply a count to override it.
 When changing the reference generator or its frozen fixtures, run
 `just reference-check` to regenerate the independent values and check agreement.
