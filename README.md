@@ -2,51 +2,36 @@
 
 Propagate uncertainty through neural networks analytically.
 
-Propagate Gaussian moments through supported neural-network layers. The
-optional Burn backend also propagates Cauchy locations and scales. Compose
-the layer functions to match your model's forward pass.
-
-Inspired by [distprop](https://github.com/Felix-Petersen/distprop) and
-[Petersen et al. (ICLR 2024)](https://arxiv.org/abs/2402.08324). The Gaussian
-implementation here uses moment matching; distprop uses local linearization.
-The [method guide](docs/methods.md) explains that distinction, the research
-history, and which applications each approach supports.
-The [derivations](docs/derivations.md) give the moment formulas, covariance-series
-proofs, and numerical assumptions.
+Supply input means and uncertainty, then propagate them through supported
+layers using your model's weights. stableprop estimates the resulting output
+means and variances without repeatedly sampling the noisy inputs. The Burn
+API is differentiable, so these estimates can also be used in a training loss.
 
 ## What uncertainty means here
 
-You supply Gaussian means with variances or covariance, or locations and scales
-for independent Cauchy inputs. You can also supply independent weight variances
-from another model. stableprop estimates the resulting output moments or scales;
-it does not infer those distributions from data.
+You choose the input distribution: for example, Gaussian measurement noise,
+an upstream state estimate, or a perturbation scale for sensitivity analysis.
+stableprop propagates that distribution; it does not learn it from data.
+Weight uncertainty can also be supplied by an external model.
 
-| Related method | Its job | Where stableprop fits |
-| --- | --- | --- |
-| [Gaussian embeddings](docs/methods.md#uncertainty-sources-and-downstream-methods) | Learn a distribution for each representation | Propagate supplied embedding moments through supported layers |
-| [Bayesian models](docs/methods.md#how-the-methods-developed) | Learn parameter uncertainty from observations | Propagate supplied moments; posterior fitting and updating are external |
-| Contrastive learning | Train representations using pair relationships | Add a differentiable sensitivity penalty, as in [`tuplet_contrastive`](examples/tuplet_contrastive.rs) |
-| [Conformal prediction](docs/methods.md#calibration-of-prediction-intervals) | Calibrate prediction sets using held-out observations | Supply an input-dependent scale for [`conformal_intervals`](examples/conformal_intervals.rs), with calibration ranks from [statskit](https://github.com/arclabs561/statskit) |
-
-Input sensitivity and parameter uncertainty arise from different random
-quantities. A stable score can still be poorly learned; a well-learned model
-can still be sensitive to noisy measurements. See the
-[method guide](docs/methods.md#uncertainty-sources-and-downstream-methods) for the distinction.
-The [selection note](docs/sensitivity-and-selection.md) connects score covariance
-to exploration value and augmentation disagreement to training-data selection.
+The output describes variation under those assumptions. Input sensitivity,
+uncertainty about learned parameters, and confidence in an observed target
+are different quantities. The [method guide](docs/methods.md#uncertainty-sources-and-downstream-methods)
+explains how they relate.
 
 ## Start with a small network
 
-The published default API uses `f64` vectors, has no runtime dependencies, and
-supports Rust 1.80.
+For an application using Rust 1.80 or newer, add the published vector API to
+`Cargo.toml`. It uses `f64` and has no runtime dependencies.
 
 ```toml
 [dependencies]
 stableprop = "0.5.2"
 ```
 
-The input standard deviations describe independent Gaussian features. Affine
-layers retain covariance; this API drops off-diagonal covariance at each ReLU.
+This computes `ReLU(x₁ − x₂)` for two independent, zero-mean Gaussian inputs
+with standard deviations 0.3 and 0.4. Put the following inside `fn main()` in
+your application and run `cargo run --release`:
 
 ```rust
 use stableprop::{propagate_sequential, Layer};
@@ -68,7 +53,11 @@ println!("mean = {:.4}, variance = {:.4}", output.mean[0], output.cov[0][0]);
 mean = 0.1995, variance = 0.0852
 ```
 
-Run this example from the checkout:
+The output mean is positive because ReLU clips negative values to zero. The
+variance describes variation in the model output under the supplied input
+noise; it does not establish prediction-interval coverage for observed targets.
+
+From a repository checkout, use Rust 1.95 or newer and run the same example:
 
 ```sh
 cargo run --release --example basic
@@ -76,14 +65,13 @@ cargo run --release --example basic
 
 ## Burn models
 
-The Burn tensor integration is development API, not a published crate release.
-It requires Rust 1.95 or newer. Use stableprop's `main` branch with the same
-Burn revision when importing `burn::tensor::Tensor`:
+The current tensor API uses an unreleased Burn revision and requires Rust 1.95
+or newer. These Git revisions are tested together; update them together:
 
 ```toml
 [dependencies.stableprop]
 git = "https://github.com/arclabs561/stableprop"
-branch = "main"
+rev = "9c64e3d3b97536022e195eff3dd66de4cf6f784f"
 features = ["burn"]
 
 [dependencies.burn]
@@ -93,94 +81,85 @@ default-features = false
 features = ["std", "flex", "autodiff"]
 ```
 
-Burn weights use `[input, output]`, the transpose of the vector API's layout.
-CPU examples use `Device::flex()`; call `.autodiff()` when differentiating.
-On macOS, `Device::metal(DeviceKind::DefaultDevice)` selects Metal. Burn selects
-tensor precision at creation. For `f64`, pass `(&device, DType::F64)` to tensor
-constructors. Keep moments, weights and biases on the same runtime device
-and use the same floating dtype. Propagation preserves that dtype.
+Follow the [short integration recipe](examples/README.md#use-your-own-burn-model)
+to reuse a Burn layer's weights. Propagation is a separate sequence of calls
+matching the supported operations in your forward pass; it does not convert
+an arbitrary model automatically.
 
-| Representation | What it tracks | Main approximation |
+| Representation | Supplied uncertainty | What it retains |
 | --- | --- | --- |
-| [`burn_sdp::Moments`](src/burn_sdp.rs) | Mean and variance, each `[batch, features]` | Drops feature and row correlations |
-| [`burn_sdp::MomentsFull`](src/burn_sdp.rs) | Mean `[batch, features]`; covariance `[batch, features, features]` | No cross-row covariance; Gaussian layer inputs; [third-order ReLU covariance series](docs/derivations.md#relu-coefficients-and-the-implemented-order) |
-| [`burn_sdp::Cauchy`](src/burn_sdp.rs) | Location and scale, each `[batch, features]` | Drops dependence; local ReLU gate |
+| [`Moments`](src/burn_sdp.rs) | Gaussian means and **variances**, each `[batch, features]` | Marginal moments; discards feature covariance |
+| [`MomentsFull`](src/burn_sdp.rs) | Means `[batch, features]` and covariance `[batch, features, features]` | Feature covariance, with a [third-order ReLU approximation](docs/derivations.md#relu-coefficients-and-the-implemented-order) |
+| [`Cauchy`](src/burn_sdp.rs) | Locations and scales, each `[batch, features]` | Heavy-tailed marginals; discards dependence and uses local ReLU gating |
 
-The tensor API also includes leaky ReLU, diagonal convolution, fixed left
-matrix multiplication, residual addition, and affine propagation with supplied
-weight variances. Cross-covariance helpers propagate supplied within-row
-covariance through affine and Gaussian ReLU steps. Pass the resulting diagonal
-to `propagate_residual_add_correlated` for the residual cross term. The
-[source documentation](src/burn_sdp.rs) describes the development API.
+Each batch row represents a separate distribution; none of these types stores
+cross-row covariance. Burn weights use `[input, output]`, the transpose of the
+vector API's layout. Keep operands on the same device and in the same floating
+dtype. For explicit `f64`, pass `(&device, DType::F64)` to tensor constructors.
 
-On macOS, `features = ["metal"]` enables Burn's WGPU Metal backend with
-operation fusion. Run `just metal-train` for the training example or
-`just metal-test` for CPU/GPU value and gradient comparisons and synchronized
-timings. These checks use `f32`; small workloads can be faster on CPU.
+CPU examples use `Device::flex()`; call `.autodiff()` for gradients. On macOS,
+`features = ["metal"]` enables WGPU Metal with operation fusion. Use `just metal-test` for GPU value and gradient checks, or `just metal-train`
+for a training example.
+The [API source](src/burn_sdp.rs) documents supported operations and their assumptions.
 
 ## Try an application
 
+These examples use `--features burn`. The linked guide sections give commands,
+data requirements, and help interpreting the results.
+
 | I want to… | Start here |
 | --- | --- |
-| Separate input noise from supplied weight uncertainty | [uncertainty_sources](examples/uncertainty_sources.rs) |
-| Estimate whether noisy query features change a ranking | [pairwise_ranking_risk](examples/pairwise_ranking_risk.rs) |
-| Compare output uncertainty with sampled noisy inputs | [regression_intervals](examples/regression_intervals.rs) |
-| Propagate an external state posterior through a learned surrogate | [kalman_sensor_intervals](examples/README.md#state-posteriors-and-derived-targets) |
-| Calibrate prediction intervals against held-out labels | [conformal_intervals](examples/conformal_intervals.rs) |
-| Evaluate intervals on grouped real measurements | [grouped_intervals](examples/README.md#grouped-measurements) |
-| Choose settings under execution noise | [robust_selection](examples/README.md#candidate-choice-under-execution-noise) |
-| Train with an output-variance penalty | [robust_training](examples/robust_training.rs) |
-| Measure the effect of retaining covariance | [full_covariance](examples/full_covariance.rs) |
-| Derive a residual branch's covariance with its input | [correlated_residual](examples/correlated_residual.rs) |
-| Test sensitivity as a data-selection score | [active_selection](examples/active_selection.rs) |
-| Regularize contrastive embeddings | [tuplet_contrastive](examples/tuplet_contrastive.rs), using [tuplet](https://github.com/arclabs561/tuplet)'s Burn loss |
-| Propagate node-feature noise through a GCN | [gcn_uncertainty](examples/gcn_uncertainty.rs), using [ricci](https://github.com/arclabs561/ricci) |
-
-The [example guide](examples/README.md) has commands, output interpretation,
-and the remaining classification and heavy-tail comparisons.
+| Distinguish input noise from parameter uncertainty, or estimate ranking flips | [Uncertainty sources and ranking decisions](examples/README.md#uncertainty-sources-and-ranking-decisions) |
+| Compare propagated moments with samples, calibrate intervals, or train with a variance penalty | [Regression and training](examples/README.md#regression-and-training) |
+| Propagate an external state posterior through a learned model | [State posteriors and derived targets](examples/README.md#state-posteriors-and-derived-targets) |
+| Evaluate calibrated intervals on grouped real measurements | [Grouped measurements](examples/README.md#grouped-measurements), using [statskit](https://github.com/arclabs561/statskit) for calibration ranks |
+| Choose settings under execution noise | [Candidate selection](examples/README.md#candidate-choice-under-execution-noise) |
+| Compare covariance representations or heavy-tailed noise | [Covariance and heavy tails](examples/README.md#covariance-and-heavy-tails) |
+| Propagate node-feature noise through a graph model | [Classification and graphs](examples/README.md#classification-and-graphs), using [ricci](https://github.com/arclabs561/ricci) |
+| Regularize contrastive embeddings | [Contrastive embeddings](examples/README.md#contrastive-embeddings), using [tuplet](https://github.com/arclabs561/tuplet) |
+| Test whether sensitivity or diversity helps choose training data | [Active selection](examples/README.md#active-selection) |
 
 ## Limits
 
-Affine moments are exact for the represented covariance. ReLU uses closed-form
-Gaussian marginal moments with numerical tail handling, but the output
-distribution is not Gaussian. Repeating moment matching through a network is an approximation.
-Full covariance reduces information loss at quadratic memory cost; its ReLU
-off-diagonal terms are truncated to third order.
+With fixed weights, affine moments are exact for the represented input
+covariance. ReLU evaluates Gaussian marginal moments with numerical tail
+handling, but its output is not Gaussian. Repeated Gaussian moment matching
+across layers is an approximation. The vector API drops off-diagonal covariance
+at each ReLU; Burn's `Moments` drops it at every layer. `MomentsFull` retains
+approximate feature covariance at quadratic memory cost.
 
-Propagated input noise does not account for label noise, model bias, or an
-unknown weight posterior. Supplying weight variances does not fit that
-posterior. Neither a variance penalty nor a misclassification-risk estimate is
-an adversarial robustness certificate. Validate interval coverage separately;
-split conformal gives marginal coverage under exchangeability, not a guarantee
-for every input or a shifted deployment distribution.
+Supplied weight variances assume independent input and weight entries and
+retain only marginal output variances. Cauchy distributions have no finite mean
+or variance; their locations and scales must be interpreted separately.
 
-Cauchy distributions have no finite mean or variance. Layerwise Cauchy scales
-discard dependence, and ReLU gating can collapse a marginal to zero. A Cauchy
-output interval is an approximation after nonlinear propagation.
+Input-noise propagation does not account for label noise, model bias, or an
+unknown weight posterior. Validate target coverage separately: the conformal
+examples add calibration using held-out observations. A variance penalty or a
+risk estimate is not an adversarial robustness certificate.
+
+Inspired by [distprop](https://github.com/Felix-Petersen/distprop) and
+[Petersen et al. (ICLR 2024)](https://arxiv.org/abs/2402.08324).
+The Gaussian implementation here uses moment matching; distprop uses local
+linearization. Read the [method guide](docs/methods.md) for that distinction and
+the research history, the [derivations](docs/derivations.md) for proofs and
+numerical assumptions, and the [selection note](docs/sensitivity-and-selection.md)
+for the connection to learning and exploration.
 
 ## Checks
 
-Use Rust 1.95 or newer for repository development. The Rust 1.80 floor applies
-to consumers of the default library; checking this checkout also resolves
-Burn's Git workspace. CI checks the default API through an isolated consumer.
+Repository development requires Rust 1.95 or newer because Cargo also resolves
+Burn's Git workspace. The published default library supports Rust 1.80.
 Install [just](https://github.com/casey/just#installation), then run:
 
 ```sh
 just check
 ```
 
-This runs formatting, lints, tests, strict documentation builds, example builds
-and smoke runs, and benchmark correctness checks. Run `just` to list individual
-recipes, or read the [justfile](justfile)
-for the Cargo commands used by CI.
-
-The API docs include executable recipes for propagation, tensor precision,
-autodiff, and correlated residuals. The [reference generator](scripts/README.md)
-uses independent numerical integration; `just reference-check` regenerates its
-Gaussian pair values and marginal derivatives, then checks the frozen fixtures.
-
-Use `just bench` or `just bench-burn` for repeatable CPU measurements; the
-[benchmark guide](benches/README.md) explains fixtures and timing boundaries.
+This runs formatting, lints, tests, documentation and example builds, smoke
+examples, and benchmark correctness checks. The [justfile](justfile) also
+provides extended property tests, independent numerical references, and Metal
+value/gradient checks. See the [benchmark guide](benches/README.md) for timing
+methods and the [reference guide](scripts/README.md) for numerical oracles.
 
 ## License
 

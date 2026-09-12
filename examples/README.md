@@ -56,9 +56,43 @@ to `MomentsFull::new`. These tensor constructors take variances, unlike the
 standard deviations passed to the vector example above. Each batch row is a
 separate input; dependence between rows is not represented.
 
+Use the dependencies in the [Burn setup](../README.md#burn-models). This
+standalone `main.rs` reuses a Burn linear layer's parameters:
+
+```rust
+use burn::nn::LinearConfig;
+use burn::tensor::{Device, Tensor};
+use stableprop::burn_sdp::{propagate_linear, propagate_relu, Moments};
+
+fn main() {
+    let device = Device::flex();
+    let linear = LinearConfig::new(2, 1).init(&device);
+    let input = Moments::new(
+        Tensor::<2>::from_data([[0.0_f32, 0.0]], &device),
+        Tensor::<2>::from_data([[0.09_f32, 0.16]], &device),
+    );
+    let affine = propagate_linear(
+        &input,
+        linear.weight.val(),
+        linear.bias.as_ref().map(|bias| bias.val()),
+    );
+    let output = propagate_relu(&affine);
+    assert_eq!(output.mean.dims(), [1, 1]);
+    assert_eq!(output.var.dims(), [1, 1]);
+}
+```
+
+Run it with `cargo run --release`. This layer is randomly initialized; in an
+application, use your trained layer in its place. The input variances are
+`0.3²` and `0.4²`, matching the vector example's standard deviations.
+For training, create the model and tensors on `Device::flex().autodiff()` and
+include the propagated moments in the loss.
+
 Mirror your model's supported operations in their forward order, using the
-same weights and biases. See `forward_with_var` in [robust_training](robust_training.rs)
-or `embedding_var` in [tuplet_contrastive](tuplet_contrastive.rs).
+same weights and biases. Unsupported operations need their own propagation
+rule; this is not an automatic model converter. See `forward_with_var` in
+[robust_training](robust_training.rs) or `embedding_var` in
+[tuplet_contrastive](tuplet_contrastive.rs).
 Compare propagated moments with samples under the same noise model before
 using them in a loss or decision. Coverage of noisy model outputs and coverage
 of observed targets are different checks.

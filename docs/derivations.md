@@ -260,7 +260,8 @@ standard deviations. This also proves convergence at $R_{ij}=\pm1$ without
 assuming a nonsingular bivariate density.
 
 For the Gaussian-smoothed mean $F_{i}(\mu)=\mathbb{E}[g_{i}(\mu+\sigma_iZ)]$,
-differentiating the Gaussian density gives, for polynomially bounded activations
+differentiate with respect to the mean while holding $\sigma_{i}$ fixed.
+Differentiating the Gaussian density gives, for polynomially bounded activations
 such as ReLU,
 
 $$
