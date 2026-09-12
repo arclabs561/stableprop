@@ -492,7 +492,10 @@ proptest! {
         );
         let weight = Tensor::from_data(TensorData::new(case.weight.clone(), [case.d_in, case.d_out]), &device);
         let bias = Tensor::from_data(TensorData::new(case.bias.clone(), [case.d_out]), &device);
-        let combined = propagate_linear_full(&propagate_relu_full(&input), weight.clone(), Some(bias.clone()));
+        let relu = propagate_relu_full(&input);
+        let relu_mean = relu.mean.to_data().to_vec::<f32>().unwrap();
+        let relu_cov = relu.cov.to_data().to_vec::<f32>().unwrap();
+        let combined = propagate_linear_full(&relu, weight.clone(), Some(bias.clone()));
         let combined_mean = combined.mean.into_data().to_vec::<f32>().unwrap();
         let combined_cov = combined.cov.into_data().to_vec::<f32>().unwrap();
         for batch in 0..BATCH {
@@ -509,15 +512,33 @@ proptest! {
             let separate = propagate_linear_full(&propagate_relu_full(&row), weight.clone(), Some(bias.clone()));
             let mean = separate.mean.into_data().to_vec::<f32>().unwrap();
             let cov = separate.cov.into_data().to_vec::<f32>().unwrap();
+            // Batch shape can change kernel rounding. Bound the affine sum
+            // by its absolute terms, including when its result nearly cancels.
             for (i, actual) in mean.iter().enumerate() {
                 let expected = combined_mean[batch * case.d_out + i] as f64;
+                let scale = case.bias[i].abs() as f64 + (0..case.d_in)
+                    .map(|j| (relu_mean[batch * case.d_in + j] as f64
+                        * case.weight[j * case.d_out + i] as f64).abs())
+                    .sum::<f64>();
                 prop_assert!((*actual as f64 - expected).abs()
-                    <= f32_roundoff_bound(actual.abs() as f64 + expected.abs()));
+                    <= f32_roundoff_bound(scale),
+                    "batch {batch}, mean {i}: {actual} vs {expected}");
             }
             for (i, actual) in cov.iter().enumerate() {
                 let expected = combined_cov[batch * case.d_out * case.d_out + i] as f64;
+                let o = i / case.d_out;
+                let p = i % case.d_out;
+                let mut scale = 0.0;
+                for j in 0..case.d_in {
+                    for k in 0..case.d_in {
+                        scale += (case.weight[j * case.d_out + o] as f64
+                            * relu_cov[(batch * case.d_in + j) * case.d_in + k] as f64
+                            * case.weight[k * case.d_out + p] as f64).abs();
+                    }
+                }
                 prop_assert!((*actual as f64 - expected).abs()
-                    <= f32_roundoff_bound(actual.abs() as f64 + expected.abs()));
+                    <= f32_roundoff_bound(scale),
+                    "batch {batch}, covariance {i}: {actual} vs {expected}");
             }
         }
     }

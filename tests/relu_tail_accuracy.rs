@@ -308,6 +308,89 @@ mod burn {
     }
 
     #[test]
+    fn ndarray_batched_tail_moments_and_gradients_match_independent_references() {
+        let device = Default::default();
+        // 128 elements exercise SIMD kernels that a scalar fixture never enters.
+        // These alphas and standard deviations are exactly representable in f32.
+        for tail in TAILS
+            .into_iter()
+            .filter(|t| [-3.0, -5.0, -7.0, -7.5].contains(&t.alpha))
+        {
+            for variance_value in [2.0f32.powi(-64), 0.0625, 1.0, 2.0f32.powi(64)] {
+                let sigma = variance_value.sqrt() as f64;
+                for full in [false, true] {
+                    for variance_loss in [false, true] {
+                        let mean = Tensor::<Ad, 2>::full(
+                            [8, 16],
+                            tail.alpha * sigma,
+                            (&device, DType::F32),
+                        )
+                        .require_grad();
+                        let variance =
+                            Tensor::<Ad, 2>::full([8, 16], variance_value, (&device, DType::F32))
+                                .require_grad();
+                        let (output_mean, output_variance) = if full {
+                            let output = propagate_relu_full(&MomentsFull::from_diagonal(
+                                mean.clone(),
+                                variance.clone(),
+                            ));
+                            let variance = output.variance();
+                            (output.mean, variance)
+                        } else {
+                            let output =
+                                propagate_relu(&Moments::new(mean.clone(), variance.clone()));
+                            (output.mean, output.var)
+                        };
+                        for actual in output_mean.to_data().to_vec::<f32>().unwrap() {
+                            assert_relative(actual as f64, sigma * tail.mean, 3e-5, "batched mean");
+                        }
+                        for actual in output_variance.to_data().to_vec::<f32>().unwrap() {
+                            assert_relative(
+                                actual as f64,
+                                variance_value as f64 * tail.var,
+                                3e-5,
+                                "batched variance",
+                            );
+                        }
+                        let gradients = if variance_loss {
+                            output_variance.sum()
+                        } else {
+                            output_mean.sum()
+                        }
+                        .backward();
+                        let (dm, dv) = if variance_loss {
+                            (
+                                2.0 * sigma * tail.mean * (1.0 - tail.p),
+                                tail.p - tail.mean * tail.phi,
+                            )
+                        } else {
+                            (tail.p, tail.phi / (2.0 * sigma))
+                        };
+                        for actual in mean
+                            .grad(&gradients)
+                            .unwrap()
+                            .to_data()
+                            .to_vec::<f32>()
+                            .unwrap()
+                        {
+                            assert_relative(actual as f64, dm, 3e-4, "batched mean derivative");
+                        }
+                        for actual in variance
+                            .grad(&gradients)
+                            .unwrap()
+                            .to_data()
+                            .to_vec::<f32>()
+                            .unwrap()
+                        {
+                            assert_relative(actual as f64, dv, 3e-4, "batched variance derivative");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn ndarray_f32_tail_values_match_references_for_diagonal_full_leaky_and_cross_gate() {
         let device = Default::default();
         for tail in TAILS {

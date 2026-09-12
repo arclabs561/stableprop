@@ -143,11 +143,32 @@ $$
 This is the connection between the
 [Laplace continued fraction](https://dlmf.nist.gov/7.9) and
 [repeated Gaussian tail integrals](https://dlmf.nist.gov/7.18#v).
-The implementation evaluates a finite continued fraction below $\alpha=-2$;
-it selects zero and linear limits at $\alpha\leq-8$ and $\alpha\geq8$.
+The implementation evaluates a finite continued fraction below $\alpha=-2$.
+Its recurrence uses tensor division because some CPU vector backends implement
+reciprocal as a lower-precision estimate. This affects Burn 0.21's NdArray
+backend; an [upstream fix](https://github.com/tracel-ai/burn/pull/5553) postdates
+that release. The
+[batched tail tests](../tests/relu_tail_accuracy.rs) check moments and derivatives
+against independent references at sizes that exercise vector kernels.
+The implementation selects zero and linear limits at $\alpha\leq-8$ and $\alpha\geq8$.
 Thus the mathematical identities and their floating-point evaluation have
 different exactness claims. The [method guide](methods.md#efficiency-and-accuracy)
 describes precision and autodiff safeguards.
+
+Burn's division backward can also use an approximate reciprocal. For ratios
+with a positive standard deviation or tail denominator, the implementation
+computes an untracked scale $s=1/b$, then evaluates $q=bs$ and $y=(as)/q$.
+Holding the numerical scale fixed during differentiation gives
+
+$$
+\frac{\partial y}{\partial a}=\frac{s}{q}=\frac{1}{b},\qquad
+\frac{\partial y}{\partial b}=-\frac{as^2}{q^2}=-\frac{a}{b^2}.
+$$
+
+The tracked inverse uses a denominator near one. This avoids both an
+approximate reciprocal adjoint and an intermediate inverse square of a tiny
+standard deviation. The final derivative is still subject to the chosen
+floating-point range.
 
 ## One-sided nonlinear covariance and residuals
 

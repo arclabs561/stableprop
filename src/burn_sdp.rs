@@ -204,12 +204,32 @@ struct GaussianReluTerms<B: Backend> {
 /// without subtracting nearly equal tail terms (DLMF 7.9 and 7.18).
 fn normal_tail_ratios<B: Backend>(t: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 2>) {
     let depth = if t.dtype() == DType::F64 { 96 } else { 32 };
-    let mut r = t.clone().recip().mul_scalar(depth as f64);
+    // Some CPU SIMD backends implement recip() as a low-precision estimate.
+    // Division retains the accuracy needed by repeated tail recurrences.
+    let ones = t.ones_like();
+    let mut r = (ones.clone() / t.clone()).mul_scalar(depth as f64);
     for n in (2..depth).rev() {
-        r = (t.clone() + r).recip().mul_scalar(n as f64);
+        r = (ones.clone() / (t.clone() + r)).mul_scalar(n as f64);
     }
-    let r1 = (t + r.clone()).recip();
+    let r1 = ones / (t + r.clone());
     (r1, r)
+}
+
+// Ratios with a positive Gaussian standard deviation (or bounded tail
+// denominator). Burn's division backward can use an approximate reciprocal
+// for the numerator gradient. Normalize the denominator near one, then
+// materialize its inverse through division. An untracked scale cancels from
+// the ratio and its derivatives without a reciprocal-square adjoint at extreme
+// standard deviations. Division also avoids approximate SIMD reciprocals.
+fn gaussian_ratio<B: Backend, const D: usize>(
+    numerator: Tensor<B, D>,
+    denominator: Tensor<B, D>,
+) -> Tensor<B, D> {
+    let untracked = denominator.clone().set_require_grad(false);
+    let scale = untracked.ones_like() / untracked;
+    let denominator = denominator * scale.clone();
+    let inverse = denominator.ones_like() / denominator;
+    (numerator * scale) * inverse
 }
 
 // Bound the numerator before dividing: clamping mu/sigma afterward leaves
@@ -220,7 +240,7 @@ fn bounded_relu_alpha<B: Backend>(mu: Tensor<B, 2>, sigma: Tensor<B, 2>) -> Tens
         .clone()
         .mask_where(mu.clone().greater(limit.clone()), limit.clone())
         .mask_where(mu.lower(limit.clone().neg()), limit.neg());
-    bounded / sigma
+    gaussian_ratio(bounded, sigma)
 }
 
 /// Gaussian ReLU terms, with zero variance made safe only for
@@ -253,7 +273,7 @@ fn gaussian_relu_terms<B: Backend>(
     // argument too, so deterministic and positive-tail gradients stay finite.
     let t = alpha.clone().neg().clamp_min(2.0);
     let (r1, r2) = normal_tail_ratios(t.clone());
-    let tail_p = phi.clone() / (t + r1.clone());
+    let tail_p = gaussian_ratio(phi.clone(), t + r1.clone());
     let tail_mean = tail_p.clone() * r1;
     let tail_var = tail_mean.clone() * r2 - tail_mean.clone() * tail_mean.clone();
     let tail = alpha.clone().lower_elem(-2.0);
@@ -656,7 +676,8 @@ pub fn propagate_relu_full<B: Backend>(m: &MomentsFull<B>) -> MomentsFull<B> {
         .clone()
         .mask_where(i_smaller.clone(), sigma_j.clone());
     let smaller = sigma_j.mask_where(i_smaller, sigma_i);
-    let rho = ((m.cov.clone() * off_mask / larger) / smaller).clamp(-1.0, 1.0);
+    let rho =
+        gaussian_ratio(gaussian_ratio(m.cov.clone() * off_mask, larger), smaller).clamp(-1.0, 1.0);
     let outer = |t: Tensor<B, 2>| t.clone().unsqueeze_dim::<3>(2) * t.unsqueeze_dim::<3>(1);
     // Apply the same linear tail limits to covariance as to marginal moments.
     // An inactive output cannot covary; an active output is the input itself.
@@ -750,11 +771,11 @@ pub fn propagate_relu_cross_covariance<B: Backend>(
     let alpha = bounded_relu_alpha(right.mean.clone(), sigma);
     let t = alpha.clone().neg().clamp_min(2.0);
     let (r1, _) = normal_tail_ratios(t.clone());
-    let tail_p = (alpha.clone() * alpha.clone())
+    let tail_phi = (alpha.clone() * alpha.clone())
         .mul_scalar(-0.5)
         .exp()
-        .mul_scalar(1.0 / (2.0 * PI).sqrt())
-        / (t + r1);
+        .mul_scalar(1.0 / (2.0 * PI).sqrt());
+    let tail_p = gaussian_ratio(tail_phi, t + r1);
     let gate = alpha
         .clone()
         .mul_scalar(FRAC_1_SQRT_2)
