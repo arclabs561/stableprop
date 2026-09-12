@@ -13,6 +13,7 @@ still differ across backend or dependency versions.
 | Separate input noise from parameter uncertainty | [`uncertainty_sources`](uncertainty_sources.rs) |
 | Estimate ranking flips under noisy query features | [`pairwise_ranking_risk`](pairwise_ranking_risk.rs) |
 | Compare propagated uncertainty with Monte Carlo | [`regression_intervals`](regression_intervals.rs) |
+| Propagate an external state posterior | [`kalman_sensor_intervals`](kalman_sensor_intervals.rs) |
 | Calibrate intervals against observed targets | [`conformal_intervals`](conformal_intervals.rs) |
 | Evaluate intervals on grouped real measurements | [`grouped_intervals`](grouped_intervals.rs) |
 | Add a differentiable variance penalty to training | [`robust_training`](robust_training.rs) |
@@ -207,6 +208,48 @@ and autotuning. Backend RNG streams differ, so compare the two objectives
 within each run. For warmed CPU/GPU timings on fixed inputs, use
 `just metal-test`; those timings include tensor allocation and report the
 batch size, width, and number of iterations.
+
+## State posteriors and derived targets
+
+```sh
+cargo run --release --features burn --example kalman_sensor_intervals -- --quick
+cargo run --release --features burn --example kalman_sensor_intervals -- --study
+```
+
+[`kalman_sensor_intervals`](kalman_sensor_intervals.rs) propagates an externally
+computed state posterior through a learned nonlinear surrogate. The simulator
+has two state coordinates, linear Gaussian dynamics, and correlated sensor
+noise from a common per-reading error plus independent channel errors. Noise
+draws are independent across time. All model covariances are specified in the
+source; this is a controlled example, not an estimated sensor-noise model.
+
+The example performs six Kalman updates and forecasts two steps ahead. A frozen
+ReLU network, trained on clean states, predicts a quadratic terminal quantity.
+Stableprop receives the forecast mean and covariance; filtering and conditioning
+remain outside the library. Full propagation, with a third-order (K3)
+off-diagonal covariance series, and diagonal-hidden propagation are compared
+with samples through the same network. Two independent Monte Carlo streams show
+sampling variability. Separately, exact quadratic Gaussian moments provide a
+simulator reference, including known independent target noise. The sampled
+surrogate's discrepancy from that reference still includes Monte Carlo error.
+
+Each calibration or test trajectory contributes one terminal target. Constant
+and propagated-scale split-conformal intervals share the propagated mean; an
+oracle-center-and-scale row is a separate simulator diagnostic. Raw Gaussian
+bands are uncalibrated because the quadratic target is not Gaussian. Read
+coverage and width together.
+
+The quick mode uses three fits, 80 epochs, and 512 draws per Monte Carlo stream.
+The study uses 20 fits, 300 epochs, and 1,024 draws per stream. Its paired
+coverage and width differences use independent fits and data splits as the
+units for standard errors. The [method guide](../docs/methods.md#uncertainty-sources-and-downstream-methods)
+distinguishes a supplied posterior from supplied measurement noise.
+
+In the 20-fit CPU run at 90% nominal coverage, propagated-scale and constant
+intervals covered 89.5% and 89.6% of test targets. Propagated-scale mean width
+was 0.182 lower (paired standard error 0.034): 2.770 versus 2.952. This result depends
+on the specified simulator and noise law; it does not establish performance
+with estimated sensor covariances or a misspecified state model.
 
 ## Grouped measurements
 

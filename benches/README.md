@@ -53,3 +53,32 @@ then differentiates the sum of output means and covariances. CPU and Metal
 start from the same host values. Input upload is outside timing; each of three
 synchronized repeats includes graph construction and intermediate allocation.
 Mean, covariance, and weight gradients are compared after measurement.
+
+For a matched deterministic affine–ReLU comparison, run `just metal-profile`.
+This uses identical input means, independent variances, weights and biases for
+diagonal and full propagation. Biases place the ReLU inputs at standardized
+means of -1, 0 and 1, or -7 for the tail workload. Forward checks compare both
+moments; backward checks compare input, weight and bias gradients of the sum of
+output means and marginal variances. The full path still computes its dense
+covariance. It alternates CPU-first and Metal-first execution over three warmed,
+synchronized repeats at batch/width 8/16 and 64/64.
+
+The ignored test accepts these environment filters; each defaults to `both`:
+
+| Variable | Values besides `both` |
+| --- | --- |
+| `STABLEPROP_PROFILE_BACKEND` | `cpu`, `metal` |
+| `STABLEPROP_PROFILE_SHAPE` | `8x16`, `64x64` |
+| `STABLEPROP_PROFILE_REPRESENTATION` | `diagonal`, `full` |
+| `STABLEPROP_PROFILE_PASS` | `forward`, `backward` |
+| `STABLEPROP_PROFILE_REGIME` | `central`, `tail` |
+
+For peak process memory, build first, then wrap the printed test executable in
+`/usr/bin/time -l`, selecting one backend and workload per fresh process. Pass
+`metal_matched_diagonal_full_forward_backward_timings --ignored --nocapture
+--test-threads=1` to that executable. A CPU-only run never initializes Metal;
+a diagonal-only run never allocates the full covariance fixture. Repeat fresh
+processes and report the range. Peak RSS includes initialization, fixtures,
+warmup and validation; it is not a measurement of GPU device memory or the
+propagation buffers alone. Timing excludes host uploads and result readback,
+but includes intermediate allocation and synchronization.

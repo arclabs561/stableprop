@@ -13,6 +13,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Avoid approximate SIMD reciprocals in Gaussian tail moments and ratio
+  derivatives, preserving accuracy in batched CPU propagation and gradients.
 - Make mixed-precision Burn reference tests independent of the shared device
   default dtype.
 - Reject mismatched floating dtypes in Burn distribution constructors, before
@@ -22,6 +24,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A controlled sensor-posterior example with exact quadratic target moments,
+  independent Monte Carlo checks, and trajectory-disjoint interval calibration.
+- Matched deterministic CPU/Metal forward and backward timings, with separate
+  central/tail workloads and filters for process memory measurements.
 - Candidate selection under Gaussian execution noise, comparing a trained
   surrogate's predicted losses with exact quadratic-simulator losses.
 - Grouped real-data interval comparisons on Airfoil and Parkinsons Telemonitoring,

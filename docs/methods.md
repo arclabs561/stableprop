@@ -319,6 +319,16 @@ embedding supplies representation moments; a Bayesian model supplies a
 parameter posterior; a sensor model supplies measurement noise. Similar
 Gaussian arithmetic does not make these uncertainty sources interchangeable.
 
+A state posterior supplied by an external filter is already conditioned on
+measurements. Propagating it through a frozen network estimates uncertainty in
+a derived quantity; stableprop does not perform the filter's prediction or
+measurement update. In a linear Gaussian state model, the
+[Kalman recursion](https://doi.org/10.1115/1.3662552) supplies exact conditional
+moments. A nonlinear network applied afterward introduces the propagation
+approximation, even when the state posterior is exact.
+[`kalman_sensor_intervals`](../examples/kalman_sensor_intervals.rs) demonstrates
+this composition with a separate exact reference for the derived target.
+
 A neural-linear bandit models reward with learned features `phi` and uncertain
 linear weights `beta`. For a supplied posterior `beta ~ N(m, S)`, its latent
 score has mean `phi^T m` and variance `phi^T S phi`. Affine moment propagation

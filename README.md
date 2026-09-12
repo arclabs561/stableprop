@@ -110,6 +110,7 @@ timings. These checks use `f32`; small workloads can be faster on CPU.
 | Separate input noise from supplied weight uncertainty | [uncertainty_sources](examples/uncertainty_sources.rs) |
 | Estimate whether noisy query features change a ranking | [pairwise_ranking_risk](examples/pairwise_ranking_risk.rs) |
 | Compare output uncertainty with sampled noisy inputs | [regression_intervals](examples/regression_intervals.rs) |
+| Propagate an external state posterior through a learned surrogate | [kalman_sensor_intervals](examples/README.md#state-posteriors-and-derived-targets) |
 | Calibrate prediction intervals against held-out labels | [conformal_intervals](examples/conformal_intervals.rs) |
 | Evaluate intervals on grouped real measurements | [grouped_intervals](examples/README.md#grouped-measurements) |
 | Choose settings under execution noise | [robust_selection](examples/README.md#candidate-choice-under-execution-noise) |

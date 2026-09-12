@@ -4,7 +4,7 @@
 //! Local Apple-GPU parity and timing checks. They are deliberately ignored:
 //! the runtime checks require an Apple GPU, while CI only compiles this harness.
 
-use std::{hint::black_box, sync::OnceLock, time::Instant};
+use std::{env, hint::black_box, sync::OnceLock, time::Instant};
 
 use burn::{
     backend::wgpu::{
@@ -12,14 +12,14 @@ use burn::{
         init_setup, CubeBackend, RuntimeOptions, WgpuDevice, WgpuRuntime,
     },
     backend::{Autodiff, Metal as MetalBackend, Wgpu},
-    tensor::{backend::Backend, Tensor, TensorData},
+    tensor::{backend::Backend, Device, Tensor, TensorData},
 };
 use burn_ndarray::NdArray;
 use stableprop::burn_sdp::{
-    propagate_conv2d, propagate_leaky_relu, propagate_linear_bayes, propagate_linear_cauchy,
-    propagate_linear_cross_covariance, propagate_linear_full, propagate_matmul_left,
-    propagate_relu, propagate_relu_cauchy, propagate_relu_cross_covariance, propagate_relu_full,
-    propagate_residual_add_correlated, Cauchy, Moments, MomentsFull,
+    propagate_conv2d, propagate_leaky_relu, propagate_linear, propagate_linear_bayes,
+    propagate_linear_cauchy, propagate_linear_cross_covariance, propagate_linear_full,
+    propagate_matmul_left, propagate_relu, propagate_relu_cauchy, propagate_relu_cross_covariance,
+    propagate_relu_full, propagate_residual_add_correlated, Cauchy, Moments, MomentsFull,
 };
 
 type Cpu = NdArray<f32>;
@@ -1041,5 +1041,638 @@ fn metal_synchronized_diagonal_and_full_timings() {
             },
         );
         close(&data(gpu), &data(cpu), "timed input gradient");
+    }
+}
+
+struct MatchedHostFixture {
+    mean: Vec<f32>,
+    variance: Vec<f32>,
+    weight: Vec<f32>,
+    bias: Vec<f32>,
+    output_std: Vec<f32>,
+    batch: usize,
+    width: usize,
+}
+
+fn matched_host_fixture(batch: usize, width: usize, regime: &str) -> MatchedHostFixture {
+    let mean = vec![0.0; batch * width];
+    let variance = vec![0.3; batch * width];
+    let weight: Vec<f32> = (0..width * width)
+        .map(|index| 0.025 * ((index * 5 + index / width * 3) % 11) as f32 - 0.125)
+        .collect();
+    let output_std: Vec<f32> = (0..width)
+        .map(|output| {
+            (0..width)
+                .map(|input| {
+                    let weight = weight[input * width + output];
+                    0.3 * weight * weight
+                })
+                .sum::<f32>()
+                .sqrt()
+        })
+        .collect();
+    let bias: Vec<f32> = output_std
+        .iter()
+        .enumerate()
+        .map(|(output, std)| {
+            let z = match regime {
+                "central" => [-1.0, 0.0, 1.0][output % 3],
+                "tail" => -7.0,
+                _ => unreachable!("validated profile regime"),
+            };
+            z * std
+        })
+        .collect();
+    let z: Vec<f32> = bias
+        .iter()
+        .zip(&output_std)
+        .map(|(bias, std)| bias / std)
+        .collect();
+    match regime {
+        "central" => assert!(z.iter().all(|z| (-1.0..=1.0).contains(z))),
+        "tail" => assert!(z.iter().all(|z| (*z + 7.0).abs() < 1e-6)),
+        _ => unreachable!("validated profile regime"),
+    }
+    MatchedHostFixture {
+        mean,
+        variance,
+        weight,
+        bias,
+        output_std,
+        batch,
+        width,
+    }
+}
+
+fn full_diagonal_covariance(host: &MatchedHostFixture) -> Vec<f32> {
+    (0..host.batch)
+        .flat_map(|batch| {
+            (0..host.width).flat_map(move |row| {
+                (0..host.width).map(move |column| {
+                    if row == column {
+                        host.variance[batch * host.width + row]
+                    } else {
+                        0.0
+                    }
+                })
+            })
+        })
+        .collect()
+}
+
+struct MatchedDiagonalForwardFixture<B: Backend> {
+    mean: Tensor<B, 2>,
+    variance: Tensor<B, 2>,
+    weight: Tensor<B, 2>,
+    bias: Tensor<B, 1>,
+}
+
+fn matched_diagonal_forward_fixture<B: Backend>(
+    device: &B::Device,
+    host: &MatchedHostFixture,
+) -> MatchedDiagonalForwardFixture<B> {
+    MatchedDiagonalForwardFixture {
+        mean: Tensor::from_data(
+            TensorData::new(host.mean.clone(), [host.batch, host.width]),
+            device,
+        ),
+        variance: Tensor::from_data(
+            TensorData::new(host.variance.clone(), [host.batch, host.width]),
+            device,
+        ),
+        weight: Tensor::from_data(
+            TensorData::new(host.weight.clone(), [host.width, host.width]),
+            device,
+        ),
+        bias: Tensor::from_data(TensorData::new(host.bias.clone(), [host.width]), device),
+    }
+}
+
+fn matched_diagonal_forward<B: Backend>(fixture: &MatchedDiagonalForwardFixture<B>) -> Moments<B> {
+    let input = Moments::new(fixture.mean.clone(), fixture.variance.clone());
+    propagate_relu(&propagate_linear(
+        &input,
+        fixture.weight.clone(),
+        Some(fixture.bias.clone()),
+    ))
+}
+
+struct MatchedFullForwardFixture<B: Backend> {
+    mean: Tensor<B, 2>,
+    covariance: Tensor<B, 3>,
+    weight: Tensor<B, 2>,
+    bias: Tensor<B, 1>,
+}
+
+fn matched_full_forward_fixture<B: Backend>(
+    device: &B::Device,
+    host: &MatchedHostFixture,
+) -> MatchedFullForwardFixture<B> {
+    MatchedFullForwardFixture {
+        mean: Tensor::from_data(
+            TensorData::new(host.mean.clone(), [host.batch, host.width]),
+            device,
+        ),
+        covariance: Tensor::from_data(
+            TensorData::new(
+                full_diagonal_covariance(host),
+                [host.batch, host.width, host.width],
+            ),
+            device,
+        ),
+        weight: Tensor::from_data(
+            TensorData::new(host.weight.clone(), [host.width, host.width]),
+            device,
+        ),
+        bias: Tensor::from_data(TensorData::new(host.bias.clone(), [host.width]), device),
+    }
+}
+
+fn matched_full_forward<B: Backend>(fixture: &MatchedFullForwardFixture<B>) -> MomentsFull<B> {
+    let input = MomentsFull::new(fixture.mean.clone(), fixture.covariance.clone());
+    propagate_relu_full(&propagate_linear_full(
+        &input,
+        fixture.weight.clone(),
+        Some(fixture.bias.clone()),
+    ))
+}
+
+struct MatchedDiagonalBackwardFixture<B: Backend> {
+    mean: Tensor<Autodiff<B>, 2>,
+    variance: Tensor<Autodiff<B>, 2>,
+    weight: Tensor<Autodiff<B>, 2>,
+    bias: Tensor<Autodiff<B>, 1>,
+}
+
+fn matched_diagonal_backward_fixture<B: Backend>(
+    device: &B::Device,
+    host: &MatchedHostFixture,
+) -> MatchedDiagonalBackwardFixture<B> {
+    MatchedDiagonalBackwardFixture {
+        mean: Tensor::from_data(
+            TensorData::new(host.mean.clone(), [host.batch, host.width]),
+            device,
+        ),
+        variance: Tensor::from_data(
+            TensorData::new(host.variance.clone(), [host.batch, host.width]),
+            device,
+        ),
+        weight: Tensor::from_data(
+            TensorData::new(host.weight.clone(), [host.width, host.width]),
+            device,
+        ),
+        bias: Tensor::from_data(TensorData::new(host.bias.clone(), [host.width]), device),
+    }
+}
+
+struct MatchedDiagonalGradients<B: Backend> {
+    mean: Tensor<B, 2>,
+    variance: Tensor<B, 2>,
+    weight: Tensor<B, 2>,
+    bias: Tensor<B, 1>,
+}
+
+fn matched_diagonal_backward<B: Backend>(
+    fixture: &MatchedDiagonalBackwardFixture<B>,
+) -> MatchedDiagonalGradients<B> {
+    let mean = fixture.mean.clone().require_grad();
+    let variance = fixture.variance.clone().require_grad();
+    let weight = fixture.weight.clone().require_grad();
+    let bias = fixture.bias.clone().require_grad();
+    let output = propagate_relu(&propagate_linear(
+        &Moments::new(mean.clone(), variance.clone()),
+        weight.clone(),
+        Some(bias.clone()),
+    ));
+    let gradients = (output.mean.sum() + output.var.sum()).backward();
+    MatchedDiagonalGradients {
+        mean: mean.grad(&gradients).unwrap(),
+        variance: variance.grad(&gradients).unwrap(),
+        weight: weight.grad(&gradients).unwrap(),
+        bias: bias.grad(&gradients).unwrap(),
+    }
+}
+
+struct MatchedFullBackwardFixture<B: Backend> {
+    mean: Tensor<Autodiff<B>, 2>,
+    covariance: Tensor<Autodiff<B>, 3>,
+    weight: Tensor<Autodiff<B>, 2>,
+    bias: Tensor<Autodiff<B>, 1>,
+}
+
+fn matched_full_backward_fixture<B: Backend>(
+    device: &B::Device,
+    host: &MatchedHostFixture,
+) -> MatchedFullBackwardFixture<B> {
+    MatchedFullBackwardFixture {
+        mean: Tensor::from_data(
+            TensorData::new(host.mean.clone(), [host.batch, host.width]),
+            device,
+        ),
+        covariance: Tensor::from_data(
+            TensorData::new(
+                full_diagonal_covariance(host),
+                [host.batch, host.width, host.width],
+            ),
+            device,
+        ),
+        weight: Tensor::from_data(
+            TensorData::new(host.weight.clone(), [host.width, host.width]),
+            device,
+        ),
+        bias: Tensor::from_data(TensorData::new(host.bias.clone(), [host.width]), device),
+    }
+}
+
+struct MatchedFullGradients<B: Backend> {
+    mean: Tensor<B, 2>,
+    covariance: Tensor<B, 3>,
+    weight: Tensor<B, 2>,
+    bias: Tensor<B, 1>,
+}
+
+fn matched_full_backward<B: Backend>(
+    fixture: &MatchedFullBackwardFixture<B>,
+) -> MatchedFullGradients<B> {
+    let mean = fixture.mean.clone().require_grad();
+    let covariance = fixture.covariance.clone().require_grad();
+    let weight = fixture.weight.clone().require_grad();
+    let bias = fixture.bias.clone().require_grad();
+    let output = propagate_relu_full(&propagate_linear_full(
+        &MomentsFull::new(mean.clone(), covariance.clone()),
+        weight.clone(),
+        Some(bias.clone()),
+    ));
+    let variance = output.variance();
+    let gradients = (output.mean.sum() + variance.sum()).backward();
+    MatchedFullGradients {
+        mean: mean.grad(&gradients).unwrap(),
+        covariance: covariance.grad(&gradients).unwrap(),
+        weight: weight.grad(&gradients).unwrap(),
+        bias: bias.grad(&gradients).unwrap(),
+    }
+}
+
+fn warm<B: Backend, T>(device: &B::Device, work: &mut impl FnMut() -> T) {
+    let warmup = work();
+    B::sync(device).unwrap();
+    black_box(warmup);
+}
+
+fn timed_once<B: Backend, T>(
+    label: &str,
+    repeat: usize,
+    device: &B::Device,
+    work: &mut impl FnMut() -> T,
+) -> T {
+    let start = Instant::now();
+    let result = work();
+    B::sync(device).unwrap();
+    eprintln!("{label} repeat={repeat}: {:?}", start.elapsed());
+    result
+}
+
+fn timed_interleaved<C, G>(
+    label: &str,
+    cpu_device: &Device<Cpu>,
+    gpu_device: &Device<GpuMsl>,
+    mut cpu_work: impl FnMut() -> C,
+    mut gpu_work: impl FnMut() -> G,
+) -> (C, G) {
+    warm::<Cpu, _>(cpu_device, &mut cpu_work);
+    warm::<GpuMsl, _>(gpu_device, &mut gpu_work);
+    let mut cpu_last = None;
+    let mut gpu_last = None;
+    for repeat in 1..=3 {
+        if repeat % 2 == 1 {
+            cpu_last = Some(timed_once::<Cpu, _>(
+                &format!("CPU {label}"),
+                repeat,
+                cpu_device,
+                &mut cpu_work,
+            ));
+            gpu_last = Some(timed_once::<GpuMsl, _>(
+                &format!("Metal {label}"),
+                repeat,
+                gpu_device,
+                &mut gpu_work,
+            ));
+        } else {
+            gpu_last = Some(timed_once::<GpuMsl, _>(
+                &format!("Metal {label}"),
+                repeat,
+                gpu_device,
+                &mut gpu_work,
+            ));
+            cpu_last = Some(timed_once::<Cpu, _>(
+                &format!("CPU {label}"),
+                repeat,
+                cpu_device,
+                &mut cpu_work,
+            ));
+        }
+    }
+    (black_box(cpu_last.unwrap()), black_box(gpu_last.unwrap()))
+}
+
+fn profile_setting(name: &str, default: &str, accepted: &[&str]) -> String {
+    let setting = env::var(name).unwrap_or_else(|_| default.to_owned());
+    assert!(
+        accepted.contains(&setting.as_str()),
+        "{name} must be one of {}; got {setting:?}",
+        accepted.join(", ")
+    );
+    setting
+}
+
+fn profile_includes(setting: &str, value: &str) -> bool {
+    setting == "both" || setting == value
+}
+
+fn assert_finite(values: &[f32], label: &str) {
+    assert!(
+        values.iter().all(|value| value.is_finite()),
+        "{label} is not finite"
+    );
+}
+
+fn validate_values(values: &[Vec<f32>], label: &str) {
+    for (index, values) in values.iter().enumerate() {
+        assert_finite(values, &format!("{label} result {index}"));
+    }
+}
+
+fn close_matched_values(
+    gpu: &[Vec<f32>],
+    cpu: &[Vec<f32>],
+    label: &str,
+    _host: &MatchedHostFixture,
+) {
+    assert_eq!(gpu.len(), cpu.len(), "{label} result count");
+    for (result, (gpu, cpu)) in gpu.iter().zip(cpu).enumerate() {
+        assert_eq!(gpu.len(), cpu.len(), "{label} result {result} length");
+        let max_abs = cpu.iter().map(|value| value.abs()).fold(0.0, f32::max);
+        assert!(
+            max_abs > 0.0,
+            "{label} result {result} unexpectedly has no nonzero reference"
+        );
+        let max_error = gpu
+            .iter()
+            .zip(cpu)
+            .map(|(gpu, cpu)| (gpu - cpu).abs())
+            .fold(0.0, f32::max);
+        eprintln!(
+            "{label} result {result}: relative max error={:e}",
+            max_error / max_abs
+        );
+        for (index, (&gpu, &cpu)) in gpu.iter().zip(cpu).enumerate() {
+            // Affine gradient reductions can cancel. Scale the absolute term
+            // by this tensor, so cancellation is allowed without accepting an
+            // all-zero tail tensor under a fixed absolute tolerance.
+            let tolerance = 1e-3 * cpu.abs() + 1e-5 * max_abs;
+            assert!(
+                (gpu - cpu).abs() <= tolerance,
+                "{label} result {result}[{index}]: GPU={gpu:e}, CPU={cpu:e}, \
+                 tolerance={tolerance:e}, scale={max_abs:e}"
+            );
+        }
+    }
+}
+
+fn close_matched_tail_backward_values(
+    gpu: &[Vec<f32>],
+    cpu: &[Vec<f32>],
+    label: &str,
+    host: &MatchedHostFixture,
+) {
+    if !label.contains("tail") {
+        close_matched_values(gpu, cpu, label, host);
+        return;
+    }
+
+    assert_eq!(gpu.len(), 4, "{label} result count");
+    assert_eq!(cpu.len(), 4, "{label} result count");
+    assert_eq!(gpu[0].len(), host.batch * host.width, "{label} mean length");
+    assert_eq!(cpu[0].len(), host.batch * host.width, "{label} mean length");
+
+    let tail = TAILS
+        .iter()
+        .find(|tail| tail.alpha == -7.0)
+        .expect("matched tail fixture has an alpha=-7 reference");
+    // For L = sum_j (M_j + V_j), dL/dy_j is p + 2 sigma_j m (1-p).
+    // dL/dmu_i is its signed W column sum. Its absolute-sum chain scale is
+    // independent of that cancellation and uses the frozen erfc reference.
+    let output_slopes: Vec<f32> = host
+        .output_std
+        .iter()
+        .map(|&std| tail.p + 2.0 * std * tail.mean * (1.0 - tail.p))
+        .collect();
+    for batch in 0..host.batch {
+        for input in 0..host.width {
+            let index = batch * host.width + input;
+            let chain_scale = (0..host.width)
+                .map(|output| {
+                    host.weight[input * host.width + output].abs() * output_slopes[output].abs()
+                })
+                .sum::<f32>();
+            assert!(
+                chain_scale > 0.0,
+                "{label} mean[{index}] has zero chain scale"
+            );
+            // The direct scalar tail check above is strict to 3e-4. Apply the
+            // same bound to the non-cancelling affine chain, not to the signed
+            // reduction result, then retain a relative check for large values.
+            let tolerance = 1e-3 * cpu[0][index].abs() + 3e-4 * chain_scale;
+            assert!(
+                (gpu[0][index] - cpu[0][index]).abs() <= tolerance,
+                "{label} mean[{index}]: GPU={:e}, CPU={:e}, tolerance={tolerance:e}, \
+                 chain_scale={chain_scale:e}",
+                gpu[0][index],
+                cpu[0][index],
+            );
+        }
+    }
+    close_matched_values(&gpu[1..], &cpu[1..], label, host);
+}
+
+fn diagonal_forward_values<B: Backend>(output: Moments<B>) -> Vec<Vec<f32>> {
+    vec![data(output.mean), data(output.var)]
+}
+
+fn full_forward_values<B: Backend>(output: MomentsFull<B>) -> Vec<Vec<f32>> {
+    vec![data(output.mean), data(output.cov)]
+}
+
+fn diagonal_backward_values<B: Backend>(output: MatchedDiagonalGradients<B>) -> Vec<Vec<f32>> {
+    vec![
+        data(output.mean),
+        data(output.variance),
+        data(output.weight),
+        data(output.bias),
+    ]
+}
+
+fn full_backward_values<B: Backend>(output: MatchedFullGradients<B>) -> Vec<Vec<f32>> {
+    vec![
+        data(output.mean),
+        data(output.covariance),
+        data(output.weight),
+        data(output.bias),
+    ]
+}
+
+macro_rules! profile_matched_case {
+    ($backend:expr, $label:expr, $host:expr, $fixture:ident, $work:ident, $values:ident, $compare:ident) => {{
+        match $backend {
+            "cpu" => {
+                let device = Default::default();
+                let fixture = $fixture::<Cpu>(&device, $host);
+                let values = ($values)(timed_repeated::<Cpu, _>($label, &device, || {
+                    $work(&fixture)
+                }));
+                validate_values(&values, $label);
+            }
+            "metal" => {
+                let device = metal_device();
+                let fixture = $fixture::<GpuMsl>(&device, $host);
+                let values = ($values)(timed_repeated::<GpuMsl, _>($label, &device, || {
+                    $work(&fixture)
+                }));
+                validate_values(&values, $label);
+            }
+            "both" => {
+                let cpu_device = Default::default();
+                let gpu_device = metal_device();
+                let cpu_fixture = $fixture::<Cpu>(&cpu_device, $host);
+                let gpu_fixture = $fixture::<GpuMsl>(&gpu_device, $host);
+                let (cpu, gpu) = timed_interleaved(
+                    $label,
+                    &cpu_device,
+                    &gpu_device,
+                    || $work(&cpu_fixture),
+                    || $work(&gpu_fixture),
+                );
+                let cpu = ($values)(cpu);
+                let gpu = ($values)(gpu);
+                validate_values(&cpu, &format!("CPU {}", $label));
+                validate_values(&gpu, &format!("Metal {}", $label));
+                $compare(&gpu, &cpu, $label, $host);
+            }
+            _ => unreachable!("validated profile backend"),
+        }
+    }};
+}
+
+/// Matched CPU/Metal timing with host uploads and validation outside the timer.
+///
+/// The default checks both backends, representations, passes, central/tail
+/// regimes, and 8x16/64x64 shapes. For process-isolated peak-RSS measurement,
+/// choose one backend; that path never constructs the other backend or device:
+///
+/// ```text
+/// STABLEPROP_PROFILE_BACKEND=cpu|metal|both       (default both)
+/// STABLEPROP_PROFILE_SHAPE=8x16|64x64|both       (default both)
+/// STABLEPROP_PROFILE_PASS=forward|backward|both   (default both)
+/// STABLEPROP_PROFILE_REPRESENTATION=diagonal|full|both (default both)
+/// STABLEPROP_PROFILE_REGIME=central|tail|both     (default both)
+/// ```
+#[test]
+#[ignore = "requires a Metal GPU and is an informational matched timing benchmark"]
+fn metal_matched_diagonal_full_forward_backward_timings() {
+    let backend = profile_setting(
+        "STABLEPROP_PROFILE_BACKEND",
+        "both",
+        &["cpu", "metal", "both"],
+    );
+    let shape = profile_setting(
+        "STABLEPROP_PROFILE_SHAPE",
+        "both",
+        &["8x16", "64x64", "both"],
+    );
+    let pass = profile_setting(
+        "STABLEPROP_PROFILE_PASS",
+        "both",
+        &["forward", "backward", "both"],
+    );
+    let representation = profile_setting(
+        "STABLEPROP_PROFILE_REPRESENTATION",
+        "both",
+        &["diagonal", "full", "both"],
+    );
+    let regime = profile_setting(
+        "STABLEPROP_PROFILE_REGIME",
+        "both",
+        &["central", "tail", "both"],
+    );
+
+    eprintln!(
+        "Matched f32 timings: host uploads and readback validation are outside the timer; \
+         each timed work creates fresh autodiff leaves for backward. backend={backend}, \
+         shape={shape}, pass={pass}, representation={representation}, regime={regime}"
+    );
+    for (shape_name, batch, width) in [("8x16", 8, 16), ("64x64", 64, 64)] {
+        if !profile_includes(&shape, shape_name) {
+            continue;
+        }
+        for regime_name in ["central", "tail"] {
+            if !profile_includes(&regime, regime_name) {
+                continue;
+            }
+            let host = matched_host_fixture(batch, width, regime_name);
+            for representation_name in ["diagonal", "full"] {
+                if !profile_includes(&representation, representation_name) {
+                    continue;
+                }
+                let label = format!("{representation_name} {regime_name} b={batch} w={width}");
+                if profile_includes(&pass, "forward") {
+                    let timing_label = format!("{label} forward");
+                    match representation_name {
+                        "diagonal" => profile_matched_case!(
+                            backend.as_str(),
+                            &timing_label,
+                            &host,
+                            matched_diagonal_forward_fixture,
+                            matched_diagonal_forward,
+                            diagonal_forward_values,
+                            close_matched_values
+                        ),
+                        "full" => profile_matched_case!(
+                            backend.as_str(),
+                            &timing_label,
+                            &host,
+                            matched_full_forward_fixture,
+                            matched_full_forward,
+                            full_forward_values,
+                            close_matched_values
+                        ),
+                        _ => unreachable!("validated representation"),
+                    }
+                }
+                if profile_includes(&pass, "backward") {
+                    let timing_label = format!("{label} backward");
+                    match representation_name {
+                        "diagonal" => profile_matched_case!(
+                            backend.as_str(),
+                            &timing_label,
+                            &host,
+                            matched_diagonal_backward_fixture,
+                            matched_diagonal_backward,
+                            diagonal_backward_values,
+                            close_matched_tail_backward_values
+                        ),
+                        "full" => profile_matched_case!(
+                            backend.as_str(),
+                            &timing_label,
+                            &host,
+                            matched_full_backward_fixture,
+                            matched_full_backward,
+                            full_backward_values,
+                            close_matched_tail_backward_values
+                        ),
+                        _ => unreachable!("validated representation"),
+                    }
+                }
+            }
+        }
     }
 }
