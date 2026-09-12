@@ -20,6 +20,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Reject leaky-ReLU and Cauchy interval coefficients that round to zero in the
+  tensor dtype before multiplication. Respect staged half-precision conversion
+  and Flex32's f32 scalar range.
+- Use both stored covariance orientations in the full-covariance example's
+  margin diagnostic; report undefined Cora rank correlations explicitly.
+- Pin Metal test fixtures to f32 independently of the device's default dtype.
 - Avoid approximate SIMD reciprocals in Gaussian tail moments and ratio
   derivatives, preserving accuracy in batched CPU propagation and gradients.
 - Make mixed-precision Burn reference tests independent of the shared device

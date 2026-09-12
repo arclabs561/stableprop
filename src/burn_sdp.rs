@@ -30,8 +30,44 @@
 //! when the final derivative is representable. Loss scaling can help, provided
 //! scaled gradients stay finite and are unscaled before an optimizer update.
 
-use burn::tensor::{Bool, DType, Device, Tensor, TensorData};
+use burn::tensor::{bf16, f16, Bool, DType, Device, Tensor, TensorData};
 use core::f64::consts::{FRAC_1_SQRT_2, PI};
+
+/// Whether a scalar stays in range and preserves nonzero values in `dtype`.
+///
+/// Scalar tensor operations take an `f64`, then narrow it to the tensor dtype.
+/// This must use the narrowing operation itself: halfway between zero and the
+/// minimum subnormal rounds to zero by ties-to-even.
+fn scalar_is_representable(value: f64, dtype: DType) -> bool {
+    let Some(info) = dtype.finfo() else {
+        return false;
+    };
+    let max = match dtype {
+        // CubeCL's Flex32 scalar representation wraps f32. `DType::finfo`
+        // reports conservative reduced-precision limits for numerical policy,
+        // not the scalar storage range used by elementwise operations.
+        DType::Flex32 => f32::MAX as f64,
+        _ => info.max,
+    };
+    if !value.is_finite() || value.abs() > max {
+        return false;
+    }
+    match dtype {
+        DType::F64 => true,
+        DType::F32 => value == 0.0 || (value as f32) != 0.0,
+        // Burn Flex converts its f64 scalar to f32 before narrowing it to a
+        // half type, so the staged conversion determines ties-to-even.
+        DType::F16 => value == 0.0 || f16::from_f32(value as f32) != f16::from_f32(0.0),
+        DType::BF16 => value == 0.0 || bf16::from_f32(value as f32) != bf16::from_f32(0.0),
+        DType::Flex32 => value == 0.0 || (value as f32) != 0.0,
+        _ => false,
+    }
+}
+
+/// A nonzero `f64` square must not round to zero before dtype validation.
+fn square_is_representable_in_f64(value: f64) -> bool {
+    value == 0.0 || value * value != 0.0
+}
 
 /// Mean and per-feature variance of batched Gaussian marginals.
 /// Covariance between features or batch rows is not stored.
@@ -313,28 +349,20 @@ pub fn propagate_relu(m: &Moments) -> Moments {
 /// and rectified-Gaussian moments. Reduces to [`propagate_relu`] at `alpha = 0`.
 ///
 /// # Panics
-/// Panics if `alpha` is not finite or the moment coefficients are not finite
-/// and representable in the tensors' element types. Large input values
-/// can still overflow the resulting moments.
+/// Panics if `alpha` is not finite, a nonzero slope square underflows `f64`,
+/// or a nonzero moment coefficient exceeds the range or rounds to zero in the
+/// tensors' element types. Large input values can still overflow the resulting
+/// moments.
 pub fn propagate_leaky_relu(m: &Moments, alpha: f64) -> Moments {
     assert!(alpha.is_finite(), "leaky-ReLU slope must be finite");
+    assert!(
+        square_is_representable_in_f64(alpha),
+        "leaky-ReLU moment coefficients must be finite and representable by the backend"
+    );
     let one_minus_alpha = 1.0 - alpha;
     let alpha_sq = alpha * alpha;
     let complement_sq = one_minus_alpha * one_minus_alpha;
     let cross_coefficient = 2.0 * alpha * one_minus_alpha;
-    let max_scalar = m
-        .mean
-        .dtype()
-        .finfo()
-        .expect("floating-point backend scalar required")
-        .max
-        .min(
-            m.var
-                .dtype()
-                .finfo()
-                .expect("floating-point variance required")
-                .max,
-        );
     assert!(
         [
             alpha,
@@ -344,7 +372,9 @@ pub fn propagate_leaky_relu(m: &Moments, alpha: f64) -> Moments {
             cross_coefficient
         ]
         .iter()
-        .all(|x| x.is_finite() && x.abs() <= max_scalar),
+        .all(|&x| {
+            scalar_is_representable(x, m.mean.dtype()) && scalar_is_representable(x, m.var.dtype())
+        }),
         "leaky-ReLU moment coefficients must be finite and representable by the backend"
     );
     let mu = m.mean.clone();
@@ -808,12 +838,21 @@ impl Cauchy {
     /// This interval has mass `p` for a nondegenerate Cauchy marginal.
     /// After [`propagate_relu_cauchy`], it describes the local approximation;
     /// the transformed distribution need not give it that coverage.
+    ///
+    /// # Panics
+    /// Panics if `p` is outside `[0, 1)`, or its nonzero interval coefficient
+    /// cannot be represented in the scale tensor's dtype.
     pub fn interval_halfwidth(&self, p: f64) -> Tensor<2> {
         assert!(
             p.is_finite() && (0.0..1.0).contains(&p),
             "probability mass must be finite and in [0, 1)"
         );
-        self.scale.clone().mul_scalar((PI * p / 2.0).tan())
+        let coefficient = (PI * p / 2.0).tan();
+        assert!(
+            scalar_is_representable(coefficient, self.scale.dtype()),
+            "Cauchy interval coefficient must be finite and representable by the backend"
+        );
+        self.scale.clone().mul_scalar(coefficient)
     }
 }
 
@@ -874,6 +913,40 @@ mod tests {
             *v /= k - 1.0;
         }
         (mean, var)
+    }
+
+    #[test]
+    fn scalar_representability_respects_f32_subnormal_rounding() {
+        let minimum = f32::from_bits(1) as f64;
+        let halfway = minimum * 0.5;
+        // This is the same cast used by Burn Flex's F32 scalar dispatch.
+        assert_eq!(halfway as f32, 0.0);
+        assert_eq!(minimum as f32, f32::from_bits(1));
+        assert!(!scalar_is_representable(halfway, DType::F32));
+        assert!(scalar_is_representable(minimum, DType::F32));
+    }
+
+    #[test]
+    fn scalar_representability_matches_staged_half_narrowing() {
+        // Burn Flex narrows f64 -> f32 -> half. The additions are visible to
+        // f64 but lost in the intermediate f32, leaving a ties-to-even zero.
+        let f16_tie_above_in_f64 = 2.0_f64.powi(-25) + 2.0_f64.powi(-50);
+        assert_eq!(
+            f16::from_f32(f16_tie_above_in_f64 as f32),
+            f16::from_f32(0.0)
+        );
+        assert!(!scalar_is_representable(f16_tie_above_in_f64, DType::F16));
+        assert!(scalar_is_representable(2.0_f64.powi(-24), DType::F16));
+
+        let bf16_tie_above_in_f64 = 2.0_f64.powi(-134) + 2.0_f64.powi(-160);
+        assert_eq!(
+            bf16::from_f32(bf16_tie_above_in_f64 as f32),
+            bf16::from_f32(0.0)
+        );
+        assert!(!scalar_is_representable(bf16_tie_above_in_f64, DType::BF16));
+        assert!(scalar_is_representable(2.0_f64.powi(-133), DType::BF16));
+
+        assert!(scalar_is_representable(100_000.0, DType::Flex32));
     }
 
     /// Fixed affine moments exercise the `mean @ W + bias` and `var @ W^2`

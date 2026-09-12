@@ -388,7 +388,15 @@ fn accuracy_at_coverage(
     correct as f64 / kept.len() as f64
 }
 
-fn spearman(a: &[f64], b: &[f64]) -> f64 {
+fn spearman(a: &[f64], b: &[f64]) -> Option<f64> {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "Spearman inputs must have matching lengths"
+    );
+    if a.len() < 2 || !a.iter().chain(b).all(|value| value.is_finite()) {
+        return None;
+    }
     let rank = |v: &[f64]| {
         let mut idx: Vec<usize> = (0..v.len()).collect();
         idx.sort_by(|&i, &j| v[i].partial_cmp(&v[j]).unwrap());
@@ -419,7 +427,7 @@ fn spearman(a: &[f64], b: &[f64]) -> f64 {
         va += (x - ma).powi(2);
         vb += (y - mb).powi(2);
     }
-    cov / (va.sqrt() * vb.sqrt())
+    (va > 0.0 && vb > 0.0).then(|| cov / (va.sqrt() * vb.sqrt()))
 }
 
 /// Apply the class-centering projection `P = I - 11^T / C` to each logit row.
@@ -448,7 +456,26 @@ mod tests {
     fn spearman_uses_average_ranks_for_ties() {
         let a = [1.0, 1.0, 2.0, 3.0];
         let b = [1.0, 1.0, 3.0, 2.0];
-        assert!((spearman(&a, &b) - 7.0 / 9.0).abs() < 1e-12);
+        assert!((spearman(&a, &b).unwrap() - 7.0 / 9.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn spearman_is_negative_one_for_reverse_ranks() {
+        let correlation = spearman(&[1.0, 2.0, 3.0], &[3.0, 2.0, 1.0]).unwrap();
+        assert!((correlation + 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn spearman_is_undefined_for_short_constant_or_nonfinite_inputs() {
+        assert_eq!(spearman(&[1.0], &[2.0]), None);
+        assert_eq!(spearman(&[1.0, 1.0], &[2.0, 3.0]), None);
+        assert_eq!(spearman(&[1.0, f64::NAN], &[2.0, 3.0]), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Spearman inputs must have matching lengths")]
+    fn spearman_rejects_mismatched_lengths() {
+        let _ = spearman(&[1.0], &[1.0, 2.0]);
     }
 
     #[test]
@@ -823,8 +850,14 @@ fn run(device: Device, dir: &Path, name: &str, config: RunConfig) -> std::io::Re
         println!("  {cov:>9.2}  {a:>10.4}");
     }
 
-    let rho = spearman(&u_sdp, &u_mc);
-    println!("\nSDP vs MC centered-logit disagreement (test nodes): Spearman rho = {rho:.4}");
+    match spearman(&u_sdp, &u_mc) {
+        Some(rho) => println!(
+            "\nSDP vs MC centered-logit disagreement (test nodes): Spearman rho = {rho:.4}"
+        ),
+        None => println!(
+            "\nSDP vs MC centered-logit disagreement (test nodes): Spearman rho = undefined (fewer than two nodes, non-finite scores, or zero rank spread)"
+        ),
+    }
     Ok(())
 }
 

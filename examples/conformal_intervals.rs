@@ -1,7 +1,7 @@
 //! Conformalize stableprop's analytic error bars.
 //!
 //! The default run is one small illustrative split. `--study` repeats a
-//! heteroscedastic synthetic study. It trains on clean feature centers, then
+//! heteroscedastic synthetic study. The study trains on clean feature centers, then
 //! uses separate calibration/test splits whose targets include one draw of
 //! independent Gaussian noise in each feature, plus label noise. The feature
 //! noise scale varies by input, is supplied to stableprop, and is never fitted

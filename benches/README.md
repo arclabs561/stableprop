@@ -14,7 +14,13 @@ separate central inputs from negative tails (`mean / std = -7`), where
 accurate small moments need different numerical formulas. Their precision and
 input validation differ; these suites are not a direct backend comparison.
 
-Fixtures and affine scalar reference calculations run outside the timed loop.
+Fixtures, affine scalar reference calculations, and untimed ReLU forward checks
+run outside the timed loop. The vector benchmark checks that every ReLU output
+marginal is finite and nonnegative, that its centered fixture component matches
+the analytic Gaussian-ReLU mean and variance, and that ReLU drops off-diagonal
+covariance. The Burn benchmark checks diagonal and full ReLU mean and marginal
+variance at unit-variance standardized means -1, 0, 1, and -7 against
+90-digit reference calculations; its host readback is outside Criterion timing.
 Measurements include the public propagation call, its output allocation and
 destruction, and any tensor clones needed by that call. Full-covariance
 fixtures include signed correlations; the diagonal oracle uses only their

@@ -84,6 +84,34 @@ fn assert_moments_close(actual: &Moments, expected: &Moments) {
     }
 }
 
+fn assert_relu_fixture(moments: &Moments) {
+    let output = propagate_relu(moments);
+    for (&mean, covariance) in output.mean.iter().zip(&output.cov) {
+        assert!(mean.is_finite(), "ReLU mean must be finite");
+        assert!(mean >= 0.0, "ReLU mean must be nonnegative");
+        assert!(covariance.iter().all(|value| value.is_finite()));
+    }
+    for (index, covariance) in output.cov.iter().enumerate() {
+        assert!(
+            covariance[index] >= 0.0,
+            "ReLU variance must be nonnegative"
+        );
+        for (other, &value) in covariance.iter().enumerate() {
+            if index != other {
+                assert_eq!(value, 0.0, "ReLU drops off-diagonal covariance");
+            }
+        }
+    }
+
+    // The benchmark fixture's fourth component is zero up to f64 roundoff.
+    // These are the exact Gaussian-ReLU marginal identities at mu = 0.
+    let variance = moments.cov[3][3];
+    let expected_mean = variance.sqrt() / (2.0 * std::f64::consts::PI).sqrt();
+    let expected_variance = variance * (0.5 - 1.0 / (2.0 * std::f64::consts::PI));
+    assert!((output.mean[3] - expected_mean).abs() <= 1e-12);
+    assert!((output.cov[3][3] - expected_variance).abs() <= 1e-12);
+}
+
 fn reference_benches(c: &mut Criterion) {
     let mut affine = c.benchmark_group("reference_affine");
     for (input, output) in [(8, 8), (32, 8), (8, 32), (64, 64), (128, 128)] {
@@ -106,6 +134,7 @@ fn reference_benches(c: &mut Criterion) {
             mean: (0..width).map(|i| 0.1 * (i % 7) as f64 - 0.3).collect(),
             cov: covariance(width),
         };
+        assert_relu_fixture(&moments);
         relu.bench_with_input(
             BenchmarkId::new("features", width),
             &moments,

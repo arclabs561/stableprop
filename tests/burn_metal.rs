@@ -8,7 +8,7 @@
 
 use std::{env, hint::black_box, time::Instant};
 
-use burn::tensor::{Device, DeviceKind, Tensor, TensorData};
+use burn::tensor::{DType, Device, DeviceKind, Tensor, TensorData};
 use stableprop::burn_sdp::{
     propagate_conv2d, propagate_leaky_relu, propagate_linear, propagate_linear_bayes,
     propagate_linear_cauchy, propagate_linear_cross_covariance, propagate_linear_full,
@@ -33,6 +33,44 @@ fn close(actual: &[f32], expected: &[f32], label: &str) {
 
 fn data<const D: usize>(tensor: Tensor<D>) -> Vec<f32> {
     tensor.into_data().try_to_vec::<f32>().unwrap()
+}
+
+fn assert_large_cauchy_interval(device: &Device, dtype: DType, label: &str) {
+    let cauchy = Cauchy::new(
+        Tensor::<2>::zeros([1, 1], (device, dtype)),
+        Tensor::<2>::ones([1, 1], (device, dtype)),
+    );
+    assert_eq!(
+        cauchy.scale.dtype(),
+        dtype,
+        "{label} must preserve the requested factory dtype"
+    );
+
+    // tan(pi * p / 2) = 100_000 by construction. This is representable in
+    // f32, although it exceeds the legacy Flex32 finfo maximum.
+    let p = 2.0 * 100_000.0_f64.atan() / std::f64::consts::PI;
+    let halfwidth = cauchy.interval_halfwidth(p);
+    assert_eq!(halfwidth.dtype(), dtype, "{label} result dtype");
+    let actual = halfwidth
+        .into_data()
+        .convert::<f32>()
+        .try_to_vec::<f32>()
+        .unwrap()[0];
+    let relative_error = (actual - 100_000.0).abs() / 100_000.0;
+    assert!(
+        relative_error <= 2e-5,
+        "{label} Cauchy interval half-width: {actual} vs 100000, relative error {relative_error}"
+    );
+}
+
+#[test]
+#[ignore = "requires a Metal GPU"]
+fn metal_cauchy_interval_uses_f32_range_beyond_legacy_finfo() {
+    let flex = Device::flex();
+    let metal = metal_device();
+    assert_large_cauchy_interval(&flex, DType::F32, "Flex F32 control");
+    assert_large_cauchy_interval(&metal, DType::Flex32, "Metal Flex32 target");
+    metal.sync().unwrap();
 }
 
 #[derive(Clone, Copy)]
@@ -88,8 +126,8 @@ fn relative(actual: f32, expected: f32, label: &str) {
 fn tail_values(device: &Device, alpha: f32, variance: f32) -> [f32; 5] {
     let mean = alpha * variance.sqrt();
     let moments = Moments::new(
-        Tensor::<2>::from_data([[mean]], device),
-        Tensor::<2>::from_data([[variance]], device),
+        Tensor::<2>::from_data([[mean]], (device, DType::F32)),
+        Tensor::<2>::from_data([[variance]], (device, DType::F32)),
     );
     let diagonal = propagate_relu(&moments);
     let full = propagate_relu_full(&MomentsFull::from_diagonal(
@@ -98,8 +136,10 @@ fn tail_values(device: &Device, alpha: f32, variance: f32) -> [f32; 5] {
     ));
     let full_var = data(full.variance())[0];
     let full_mean = data(full.mean)[0];
-    let cross =
-        propagate_relu_cross_covariance(Tensor::<3>::from_data([[[variance]]], device), &moments);
+    let cross = propagate_relu_cross_covariance(
+        Tensor::<3>::from_data([[[variance]]], (device, DType::F32)),
+        &moments,
+    );
     [
         data(diagonal.mean)[0],
         data(diagonal.var)[0],
@@ -111,8 +151,9 @@ fn tail_values(device: &Device, alpha: f32, variance: f32) -> [f32; 5] {
 
 fn tail_gradients(device: &Device, alpha: f32, variance: f32, mean_loss: bool) -> (f32, f32) {
     let device = device.clone().autodiff();
-    let mean = Tensor::<2>::from_data([[alpha * variance.sqrt()]], &device).require_grad();
-    let var = Tensor::<2>::from_data([[variance]], &device).require_grad();
+    let mean =
+        Tensor::<2>::from_data([[alpha * variance.sqrt()]], (&device, DType::F32)).require_grad();
+    let var = Tensor::<2>::from_data([[variance]], (&device, DType::F32)).require_grad();
     let out = propagate_relu(&Moments::new(mean.clone(), var.clone()));
     let loss = if mean_loss {
         out.mean.sum()
@@ -180,8 +221,8 @@ fn assert_distant_tail_gradients(device: &Device) {
     // All inputs are normal f32 values. The old division backward still
     // overflows: mean / variance is 1e50 even though the selected slope is 0 or 1.
     for mode in ["relu", "leaky", "full", "cross"] {
-        let mean = Tensor::<2>::from_data([[1e20, -1e20]], &device).require_grad();
-        let var = Tensor::<2>::from_data([[1e-30; 2]], &device).require_grad();
+        let mean = Tensor::<2>::from_data([[1e20, -1e20]], (&device, DType::F32)).require_grad();
+        let var = Tensor::<2>::from_data([[1e-30; 2]], (&device, DType::F32)).require_grad();
         let moments = Moments::new(mean.clone(), var.clone());
         let (output_mean, output_var) = match mode {
             "relu" => {
@@ -199,7 +240,7 @@ fn assert_distant_tail_gradients(device: &Device) {
                 (out.mean, variance)
             }
             "cross" => {
-                let cross = Tensor::<3>::from_data([[[5e-31; 2]]], &device);
+                let cross = Tensor::<3>::from_data([[[5e-31; 2]]], (&device, DType::F32));
                 let out = propagate_relu_cross_covariance(cross, &moments).reshape([1, 2]);
                 (out.clone(), out)
             }
@@ -244,9 +285,10 @@ fn assert_mixed_scale_covariance_gradients(device: &Device) {
     let v0 = 1e-30f32;
     let v1 = 1e30f32;
     let cross = 0.25f32;
-    let cov = Tensor::<3>::from_data([[[v0, cross], [cross, v1]]], &device).require_grad();
+    let cov =
+        Tensor::<3>::from_data([[[v0, cross], [cross, v1]]], (&device, DType::F32)).require_grad();
     let out = propagate_relu_full(&MomentsFull::new(
-        Tensor::<2>::zeros([1, 2], &device),
+        Tensor::<2>::zeros([1, 2], (&device, DType::F32)),
         cov.clone(),
     ));
     let gradients = out.cov.sum().backward();
@@ -276,8 +318,8 @@ fn metal_mixed_scale_covariance_gradients_match_centered_series() {
 
 fn fixture(device: &Device) -> Vec<Vec<f32>> {
     // Includes zero variance, a central input, tiny scale, and linear tails.
-    let mean = Tensor::<2>::from_data([[0.0, 1e-12, 9.0, -9.0]], device);
-    let var = Tensor::<2>::from_data([[0.0, 1e-24, 0.49, 1.0]], device);
+    let mean = Tensor::<2>::from_data([[0.0, 1e-12, 9.0, -9.0]], (device, DType::F32));
+    let var = Tensor::<2>::from_data([[0.0, 1e-24, 0.49, 1.0]], (device, DType::F32));
     let moments = Moments::new(mean.clone(), var.clone());
     let leaky = propagate_leaky_relu(&moments, 0.1);
     let weight = Tensor::<2>::from_data(
@@ -287,7 +329,7 @@ fn fixture(device: &Device) -> Vec<Vec<f32>> {
             [-0.25, 0.75, 1.0],
             [0.5, -0.25, 0.5],
         ],
-        device,
+        (device, DType::F32),
     );
     let w_var = Tensor::<2>::from_data(
         [
@@ -296,18 +338,21 @@ fn fixture(device: &Device) -> Vec<Vec<f32>> {
             [0.02, 0.03, 0.01],
             [0.01, 0.02, 0.04],
         ],
-        device,
+        (device, DType::F32),
     );
     let bayes = propagate_linear_bayes(
         &moments,
         weight.clone(),
         w_var,
         Some((
-            Tensor::from_data([0.1, -0.2, 0.3], device),
-            Tensor::from_data([0.01, 0.02, 0.03], device),
+            Tensor::from_data([0.1, -0.2, 0.3], (device, DType::F32)),
+            Tensor::from_data([0.01, 0.02, 0.03], (device, DType::F32)),
         )),
     );
-    let left = propagate_matmul_left(Tensor::from_data([[1.0], [-0.25]], device), &bayes);
+    let left = propagate_matmul_left(
+        Tensor::from_data([[1.0], [-0.25]], (device, DType::F32)),
+        &bayes,
+    );
     let residual =
         propagate_residual_add_correlated(&left, &left, left.var.clone().mul_scalar(0.25));
     let full = MomentsFull::new(
@@ -319,14 +364,14 @@ fn fixture(device: &Device) -> Vec<Vec<f32>> {
                 [0.0, 0.0, 0.49, 0.21],
                 [0.0, 0.0, 0.21, 1.0],
             ]],
-            device,
+            (device, DType::F32),
         ),
     );
     let full = propagate_relu_full(&propagate_linear_full(&full, weight, None));
     let cross = propagate_relu_cross_covariance(
         propagate_linear_cross_covariance(
             // The deterministic first margin has a zero covariance column.
-            Tensor::from_data([[[0.0, 1e-24, 0.2, -0.2]]], device),
+            Tensor::from_data([[[0.0, 1e-24, 0.2, -0.2]]], (device, DType::F32)),
             Tensor::from_data(
                 [
                     [0.5, -1.0, 0.25],
@@ -334,25 +379,25 @@ fn fixture(device: &Device) -> Vec<Vec<f32>> {
                     [-0.25, 0.75, 1.0],
                     [0.5, -0.25, 0.5],
                 ],
-                device,
+                (device, DType::F32),
             ),
         ),
         &bayes,
     );
     let (conv_mean, conv_var) = propagate_conv2d(
-        Tensor::<4>::from_data([[[[0.0, 1.0], [2.0, -1.0]]]], device),
-        Tensor::<4>::from_data([[[[1e-24, 0.25], [0.5, 1.0]]]], device),
-        Tensor::<4>::from_data([[[[0.5, -1.0], [0.25, 0.75]]]], device),
-        Some(Tensor::<1>::from_data([0.1], device)),
+        Tensor::<4>::from_data([[[[0.0, 1.0], [2.0, -1.0]]]], (device, DType::F32)),
+        Tensor::<4>::from_data([[[[1e-24, 0.25], [0.5, 1.0]]]], (device, DType::F32)),
+        Tensor::<4>::from_data([[[[0.5, -1.0], [0.25, 0.75]]]], (device, DType::F32)),
+        Some(Tensor::<1>::from_data([0.1], (device, DType::F32))),
         burn::tensor::ops::ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
     );
     let cauchy = propagate_relu_cauchy(&propagate_linear_cauchy(
         &Cauchy::new(mean, var.sqrt()),
         Tensor::from_data(
             [[1.0, -0.5], [-0.25, 0.75], [0.5, 1.0], [-1.0, 0.25]],
-            device,
+            (device, DType::F32),
         ),
-        Some(Tensor::from_data([0.2, -0.1], device)),
+        Some(Tensor::from_data([0.2, -0.1], (device, DType::F32))),
     ));
     vec![
         data(propagate_relu(&moments).mean),
@@ -390,14 +435,17 @@ fn gradient_fixture(device: &Device, contribution: GradientContribution) -> Vec<
     let device = device.clone().autodiff();
     // CPU/GPU gradient parity stays off exact kinks; tiny correlated boundary
     // gradients have their own finite-value check below.
-    let mean = Tensor::<2>::from_data([[0.1, 1e-4, 9.0, -9.0]], &device).require_grad();
-    let var = Tensor::<2>::from_data([[1e-6, 1e-8, 0.49, 1.0]], &device).require_grad();
-    let cross = Tensor::<3>::from_data([[[1e-5, 1e-6, 0.2, -0.2]]], &device).require_grad();
+    let mean =
+        Tensor::<2>::from_data([[0.1, 1e-4, 9.0, -9.0]], (&device, DType::F32)).require_grad();
+    let var =
+        Tensor::<2>::from_data([[1e-6, 1e-8, 0.49, 1.0]], (&device, DType::F32)).require_grad();
+    let cross =
+        Tensor::<3>::from_data([[[1e-5, 1e-6, 0.2, -0.2]]], (&device, DType::F32)).require_grad();
     let moments = Moments::new(mean.clone(), var.clone());
     let leaky = propagate_leaky_relu(&moments, 0.1);
     let weight = Tensor::<2>::from_data(
         [[0.5, -1.0], [1.0, 0.5], [-0.25, 0.75], [0.5, -0.25]],
-        &device,
+        (&device, DType::F32),
     )
     .require_grad();
     let bayes = propagate_linear_bayes(
@@ -406,7 +454,10 @@ fn gradient_fixture(device: &Device, contribution: GradientContribution) -> Vec<
         weight.clone() * weight.clone().mul_scalar(0.02),
         None,
     );
-    let left = propagate_matmul_left(Tensor::from_data([[1.0], [0.5]], &device), &bayes);
+    let left = propagate_matmul_left(
+        Tensor::from_data([[1.0], [0.5]], (&device, DType::F32)),
+        &bayes,
+    );
     let residual =
         propagate_residual_add_correlated(&left, &left, left.var.clone().mul_scalar(0.2));
     let full_cov = Tensor::<3>::from_data(
@@ -416,7 +467,7 @@ fn gradient_fixture(device: &Device, contribution: GradientContribution) -> Vec<
             [0.0, 0.0, 0.49, 0.21],
             [0.0, 0.0, 0.21, 1.0],
         ]],
-        &device,
+        (&device, DType::F32),
     )
     .require_grad();
     let full = propagate_relu_full(&propagate_linear_full(
@@ -431,7 +482,7 @@ fn gradient_fixture(device: &Device, contribution: GradientContribution) -> Vec<
     let (conv_mean, conv_var) = propagate_conv2d(
         mean.clone().reshape([1, 1, 2, 2]),
         var.clone().reshape([1, 1, 2, 2]),
-        Tensor::from_data([[[[0.5, -1.0], [0.25, 0.75]]]], &device),
+        Tensor::from_data([[[[0.5, -1.0], [0.25, 0.75]]]], (&device, DType::F32)),
         None,
         burn::tensor::ops::ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
     );
@@ -598,8 +649,10 @@ fn metal_extended_fixture_matches_flex_forward_and_autodiff() {
 
 fn direct_conv_gradients(device: &Device) -> (Vec<f32>, Vec<f32>) {
     let device = device.clone().autodiff();
-    let input = Tensor::<4>::from_data([[[[0.0, 1.0], [2.0, -1.0]]]], &device).require_grad();
-    let weight = Tensor::<4>::from_data([[[[0.5, -1.0], [0.25, 0.75]]]], &device).require_grad();
+    let input =
+        Tensor::<4>::from_data([[[[0.0, 1.0], [2.0, -1.0]]]], (&device, DType::F32)).require_grad();
+    let weight = Tensor::<4>::from_data([[[[0.5, -1.0], [0.25, 0.75]]]], (&device, DType::F32))
+        .require_grad();
     let output = burn::tensor::module::conv2d(
         input.clone(),
         weight.clone(),
@@ -615,8 +668,10 @@ fn direct_conv_gradients(device: &Device) -> (Vec<f32>, Vec<f32>) {
 
 fn shared_weight_conv_gradients(device: &Device) -> (Vec<f32>, Vec<f32>) {
     let device = device.clone().autodiff();
-    let input = Tensor::<4>::from_data([[[[0.0, 1.0], [2.0, -1.0]]]], &device).require_grad();
-    let weight = Tensor::<4>::from_data([[[[0.5, -1.0], [0.25, 0.75]]]], &device).require_grad();
+    let input =
+        Tensor::<4>::from_data([[[[0.0, 1.0], [2.0, -1.0]]]], (&device, DType::F32)).require_grad();
+    let weight = Tensor::<4>::from_data([[[[0.5, -1.0], [0.25, 0.75]]]], (&device, DType::F32))
+        .require_grad();
     let options = burn::tensor::ops::ConvOptions::new([1, 1], [0, 0], [1, 1], 1);
     let output = burn::tensor::module::conv2d(input.clone(), weight.clone(), None, options.clone())
         + burn::tensor::module::conv2d(input.clone(), weight.clone(), None, options);
@@ -686,9 +741,9 @@ fn metal_shared_weight_conv2d_gradients_match_flex() {
 }
 
 fn diagonal_work(device: &Device, batch: usize, width: usize) -> Moments {
-    let mean = Tensor::<2>::full([batch, width], 0.2, device);
-    let var = Tensor::<2>::full([batch, width], 0.3, device);
-    let weight = Tensor::<2>::full([width, width], 0.01, device);
+    let mean = Tensor::<2>::full([batch, width], 0.2, (device, DType::F32));
+    let var = Tensor::<2>::full([batch, width], 0.3, (device, DType::F32));
+    let weight = Tensor::<2>::full([width, width], 0.01, (device, DType::F32));
     propagate_relu(&propagate_linear_bayes(
         &Moments::new(mean, var),
         weight.clone(),
@@ -698,9 +753,9 @@ fn diagonal_work(device: &Device, batch: usize, width: usize) -> Moments {
 }
 
 fn full_work(device: &Device, batch: usize, width: usize) -> MomentsFull {
-    let mean = Tensor::<2>::full([batch, width], 0.2, device);
-    let var = Tensor::<2>::full([batch, width], 0.3, device);
-    let weight = Tensor::<2>::full([width, width], 0.01, device);
+    let mean = Tensor::<2>::full([batch, width], 0.2, (device, DType::F32));
+    let var = Tensor::<2>::full([batch, width], 0.3, (device, DType::F32));
+    let weight = Tensor::<2>::full([width, width], 0.01, (device, DType::F32));
     propagate_relu_full(&propagate_linear_full(
         &MomentsFull::from_diagonal(mean, var),
         weight,
@@ -710,9 +765,9 @@ fn full_work(device: &Device, batch: usize, width: usize) -> MomentsFull {
 
 fn diagonal_training_work(device: &Device, batch: usize, width: usize) -> Tensor<2> {
     let device = device.clone().autodiff();
-    let mean = Tensor::<2>::full([batch, width], 0.2, &device).require_grad();
-    let var = Tensor::<2>::full([batch, width], 0.3, &device).require_grad();
-    let weight = Tensor::<2>::full([width, width], 0.01, &device).require_grad();
+    let mean = Tensor::<2>::full([batch, width], 0.2, (&device, DType::F32)).require_grad();
+    let var = Tensor::<2>::full([batch, width], 0.3, (&device, DType::F32)).require_grad();
+    let weight = Tensor::<2>::full([width, width], 0.01, (&device, DType::F32)).require_grad();
     let output = propagate_relu(&propagate_linear_bayes(
         &Moments::new(mean.clone(), var),
         weight.clone(),
@@ -744,12 +799,15 @@ fn full_backward_fixture(device: &Device, batch: usize, width: usize) -> FullBac
     FullBackwardFixture {
         mean: Tensor::<2>::from_data(
             TensorData::new(vec![0.2; batch * width], [batch, width]),
-            &device,
+            (&device, DType::F32),
         ),
-        cov: Tensor::<3>::from_data(TensorData::new(cov, [batch, width, width]), &device),
+        cov: Tensor::<3>::from_data(
+            TensorData::new(cov, [batch, width, width]),
+            (&device, DType::F32),
+        ),
         weight: Tensor::<2>::from_data(
             TensorData::new(vec![0.01; width * width], [width, width]),
-            &device,
+            (&device, DType::F32),
         ),
     }
 }
@@ -1054,17 +1112,20 @@ fn matched_diagonal_forward_fixture(
     MatchedDiagonalForwardFixture {
         mean: Tensor::from_data(
             TensorData::new(host.mean.clone(), [host.batch, host.width]),
-            device,
+            (device, DType::F32),
         ),
         variance: Tensor::from_data(
             TensorData::new(host.variance.clone(), [host.batch, host.width]),
-            device,
+            (device, DType::F32),
         ),
         weight: Tensor::from_data(
             TensorData::new(host.weight.clone(), [host.width, host.width]),
-            device,
+            (device, DType::F32),
         ),
-        bias: Tensor::from_data(TensorData::new(host.bias.clone(), [host.width]), device),
+        bias: Tensor::from_data(
+            TensorData::new(host.bias.clone(), [host.width]),
+            (device, DType::F32),
+        ),
     }
 }
 
@@ -1091,20 +1152,23 @@ fn matched_full_forward_fixture(
     MatchedFullForwardFixture {
         mean: Tensor::from_data(
             TensorData::new(host.mean.clone(), [host.batch, host.width]),
-            device,
+            (device, DType::F32),
         ),
         covariance: Tensor::from_data(
             TensorData::new(
                 full_diagonal_covariance(host),
                 [host.batch, host.width, host.width],
             ),
-            device,
+            (device, DType::F32),
         ),
         weight: Tensor::from_data(
             TensorData::new(host.weight.clone(), [host.width, host.width]),
-            device,
+            (device, DType::F32),
         ),
-        bias: Tensor::from_data(TensorData::new(host.bias.clone(), [host.width]), device),
+        bias: Tensor::from_data(
+            TensorData::new(host.bias.clone(), [host.width]),
+            (device, DType::F32),
+        ),
     }
 }
 
@@ -1132,17 +1196,20 @@ fn matched_diagonal_backward_fixture(
     MatchedDiagonalBackwardFixture {
         mean: Tensor::from_data(
             TensorData::new(host.mean.clone(), [host.batch, host.width]),
-            &device,
+            (&device, DType::F32),
         ),
         variance: Tensor::from_data(
             TensorData::new(host.variance.clone(), [host.batch, host.width]),
-            &device,
+            (&device, DType::F32),
         ),
         weight: Tensor::from_data(
             TensorData::new(host.weight.clone(), [host.width, host.width]),
-            &device,
+            (&device, DType::F32),
         ),
-        bias: Tensor::from_data(TensorData::new(host.bias.clone(), [host.width]), &device),
+        bias: Tensor::from_data(
+            TensorData::new(host.bias.clone(), [host.width]),
+            (&device, DType::F32),
+        ),
     }
 }
 
@@ -1187,20 +1254,23 @@ fn matched_full_backward_fixture(
     MatchedFullBackwardFixture {
         mean: Tensor::from_data(
             TensorData::new(host.mean.clone(), [host.batch, host.width]),
-            &device,
+            (&device, DType::F32),
         ),
         covariance: Tensor::from_data(
             TensorData::new(
                 full_diagonal_covariance(host),
                 [host.batch, host.width, host.width],
             ),
-            &device,
+            (&device, DType::F32),
         ),
         weight: Tensor::from_data(
             TensorData::new(host.weight.clone(), [host.width, host.width]),
-            &device,
+            (&device, DType::F32),
         ),
-        bias: Tensor::from_data(TensorData::new(host.bias.clone(), [host.width]), &device),
+        bias: Tensor::from_data(
+            TensorData::new(host.bias.clone(), [host.width]),
+            (&device, DType::F32),
+        ),
     }
 }
 

@@ -105,6 +105,61 @@ fn assert_close(actual: &[f32], expected: &[f32]) {
     }
 }
 
+// 90-digit Gaussian-ReLU reference calculations at exact f32 unit-variance inputs. The -7
+// values are also frozen in tests/relu_tail_accuracy.rs. Regenerate with:
+// `uv run --script scripts/reference_relu.py --marginal-bits 0xbf800000 0x3f800000 --marginal-bits 0x00000000 0x3f800000 --marginal-bits 0x3f800000 0x3f800000 --marginal-bits 0xc0e00000 0x3f800000`.
+fn unit_relu_reference(mean: f32) -> (f64, f64) {
+    match mean {
+        -1.0 => (0.083_315_470_587_686_3, 0.068_398_315_704_523_13),
+        0.0 => (0.398_942_280_401_432_7, 0.340_845_056_908_104_7),
+        1.0 => (1.083_315_470_587_686_4, 0.751_087_807_841_609),
+        -7.0 => (1.760_326_011_637_483e-13, 4.758_433_573_956_583e-14),
+        _ => unreachable!("benchmark ReLU fixture has a checked mean"),
+    }
+}
+
+fn assert_relu_reference(actual: f32, expected: f64, label: &str) {
+    assert!(actual.is_finite(), "{label} must be finite");
+    let relative_error = ((actual as f64 - expected) / expected).abs();
+    assert!(
+        relative_error <= 3e-4,
+        "{label}: {actual:e} vs {expected:e}, relative error {relative_error:e}"
+    );
+}
+
+fn assert_relu_forward_fixture(
+    diagonal: &Moments,
+    full: &MomentsFull,
+    input_mean: &[f32],
+    batch: usize,
+    width: usize,
+) {
+    let diagonal = propagate_relu(diagonal);
+    let diagonal_mean = diagonal.mean.into_data().try_to_vec::<f32>().unwrap();
+    let diagonal_var = diagonal.var.into_data().try_to_vec::<f32>().unwrap();
+    let full = propagate_relu_full(full);
+    let full_mean = full.mean.into_data().try_to_vec::<f32>().unwrap();
+    let full_cov = full.cov.into_data().try_to_vec::<f32>().unwrap();
+
+    for index in 0..batch * width {
+        let (expected_mean, expected_variance) = unit_relu_reference(input_mean[index]);
+        let row = index / width;
+        let feature = index % width;
+        assert_relu_reference(diagonal_mean[index], expected_mean, "diagonal ReLU mean");
+        assert_relu_reference(
+            diagonal_var[index],
+            expected_variance,
+            "diagonal ReLU variance",
+        );
+        assert_relu_reference(full_mean[index], expected_mean, "full ReLU mean");
+        assert_relu_reference(
+            full_cov[row * width * width + feature * width + feature],
+            expected_variance,
+            "full ReLU marginal variance",
+        );
+    }
+}
+
 fn assert_full_relu_backward_reference(device: &Device) {
     let covariance =
         Tensor::<3>::from_data([[[1.0, 0.5], [0.5, 1.0]]], (device, DType::F32)).require_grad();
@@ -247,6 +302,7 @@ fn burn_benches(c: &mut Criterion) {
             ),
             ("negative_tail", vec![-7.0; batch * width]),
         ] {
+            let oracle_mean = mean.clone();
             let mean_tensor = Tensor::<2>::from_data(
                 TensorData::new(mean, [batch, width]),
                 (&device, DType::F32),
@@ -265,6 +321,8 @@ fn burn_benches(c: &mut Criterion) {
                     (&device, DType::F32),
                 ),
             );
+            // Host readback is deliberately outside Criterion's timed closure.
+            assert_relu_forward_fixture(&diagonal_input, &full_input, &oracle_mean, batch, width);
             let id = format!("{case}_b{batch}w{width}");
             relu.bench_with_input(
                 BenchmarkId::new("diagonal", &id),

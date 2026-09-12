@@ -263,7 +263,11 @@ fn margin_standard_deviations(cov: &[f64]) -> Vec<f64> {
     (0..N)
         .map(|row| {
             let base = row * D_OUT * D_OUT;
-            let variance = cov[base] + cov[base + D_OUT + 1] - 2.0 * cov[base + 1];
+            // Compute w^T Sigma w for w = [1, -1] from both stored
+            // off-diagonal entries. Their low-bit difference is representational
+            // roundoff, but choosing only Sigma_01 would make the diagnostic
+            // depend on matrix orientation.
+            let variance = cov[base] + cov[base + D_OUT + 1] - cov[base + 1] - cov[base + D_OUT];
             assert!(
                 variance >= 0.0,
                 "output margin variance is negative: {variance:e}"
@@ -449,6 +453,43 @@ mod tests {
             })
         });
         assert_eq!(predictions[0], predictions[1]);
+    }
+
+    #[test]
+    fn margin_uses_the_full_quadratic_form_under_roundoff_asymmetry() {
+        // A symmetric positive-semidefinite covariance with off-diagonal
+        // correlation just below one can acquire different low bits in its two
+        // stored entries after f32 transport. The quadratic form must use both
+        // entries, and must be invariant to transposition.
+        let epsilon = f64::from(f32::EPSILON);
+        let mut covariance = vec![0.0; N * D_OUT * D_OUT];
+        for row in 0..N {
+            let base = row * D_OUT * D_OUT;
+            covariance[base] = 1.0;
+            covariance[base + D_OUT + 1] = 1.0;
+            covariance[base + 1] = 1.0 - 4.0 * epsilon;
+            covariance[base + D_OUT] = 1.0 - 2.0 * epsilon;
+        }
+        let expected_variance = 6.0 * epsilon;
+        let standard_deviation = margin_standard_deviations(&covariance)[0];
+        assert_eq!(standard_deviation, expected_variance.sqrt());
+
+        let mut transpose = covariance.clone();
+        for row in 0..N {
+            let base = row * D_OUT * D_OUT;
+            transpose.swap(base + 1, base + D_OUT);
+        }
+        assert_eq!(
+            margin_standard_deviations(&transpose)[0],
+            standard_deviation
+        );
+
+        let w = [1.0, -1.0];
+        let direct = w[0] * covariance[0] * w[0]
+            + w[0] * covariance[1] * w[1]
+            + w[1] * covariance[D_OUT] * w[0]
+            + w[1] * covariance[D_OUT + 1] * w[1];
+        assert_eq!(direct, expected_variance);
     }
 
     #[test]

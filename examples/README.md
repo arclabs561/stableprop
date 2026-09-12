@@ -539,8 +539,8 @@ and `1` is the length-`K` all-ones column vector. The sampled score estimates
 the same quantity from 64 views. For two classes,
 this is the variance of the logit margin.
 
-Read the learning curves separately from score agreement. In the reference
-CPU NdArray run, entropy reached the highest mean accuracy at 96 labels;
+Read the learning curves separately from score agreement. In an archived
+Burn 0.21 CPU NdArray run, entropy reached the highest mean accuracy at 96 labels;
 analytic disagreement fell below random selection. The analytic score also
 took slightly longer than batched Monte Carlo on this small network. Reported
 acquisition times exclude retraining and agreement diagnostics, so they are not
