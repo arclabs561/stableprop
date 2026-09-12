@@ -2,22 +2,15 @@
 
 Propagate uncertainty through neural networks analytically.
 
-Supply input means and uncertainty, then propagate them through supported
-layers using your model's weights. stableprop estimates the resulting output
-means and variances without repeatedly sampling the noisy inputs. The Burn
-API is differentiable, so these estimates can also be used in a training loss.
+Given your model's weights and Gaussian input uncertainty, stableprop estimates
+output means and variances through supported layers without repeatedly sampling
+the noisy inputs. The Burn API is differentiable, so those estimates can also
+be used in a training loss.
 
-## What uncertainty means here
-
-You choose the input distribution: for example, Gaussian measurement noise,
-an upstream state estimate, or a perturbation scale for sensitivity analysis.
-stableprop propagates that distribution; it does not learn it from data.
-Weight uncertainty can also be supplied by an external model.
-
-The output describes variation under those assumptions. Input sensitivity,
-uncertainty about learned parameters, and confidence in an observed target
-are different quantities. The [method guide](docs/methods.md#uncertainty-sources-and-downstream-methods)
-explains how they relate.
+You supply the uncertainty: measurement noise, an upstream state estimate, or
+a perturbation scale for sensitivity analysis. The library propagates that
+distribution; it does not learn it from data. It also supports externally
+supplied weight variances and a separate Cauchy location/scale representation.
 
 ## Start with a small network
 
@@ -30,32 +23,35 @@ stableprop = "0.5.2"
 ```
 
 This computes `ReLU(x₁ − x₂)` for two independent, zero-mean Gaussian inputs
-with standard deviations 0.3 and 0.4. Put the following inside `fn main()` in
-your application and run `cargo run --release`:
+with standard deviations 0.3 and 0.4. Put this in `src/main.rs` and run
+`cargo run --release`:
 
 ```rust
 use stableprop::{propagate_sequential, Layer};
 
-let layers = [
-    Layer::Linear {
-        weight: vec![vec![1.0, -1.0]], // [output, input]
-        bias: vec![0.0],
-    },
-    Layer::ReLU,
-];
-let input_mean = [0.0, 0.0];
-let input_std = [0.3, 0.4];
-let output = propagate_sequential(&layers, &input_mean, &input_std);
-println!("mean = {:.4}, variance = {:.4}", output.mean[0], output.cov[0][0]);
+fn main() {
+    let layers = [
+        Layer::Linear {
+            weight: vec![vec![1.0, -1.0]], // [output, input]
+            bias: vec![0.0],
+        },
+        Layer::ReLU,
+    ];
+    let input_mean = [0.0, 0.0];
+    let input_std = [0.3, 0.4]; // Standard deviations, not variances.
+    let output = propagate_sequential(&layers, &input_mean, &input_std);
+    println!("mean = {:.4}, variance = {:.4}", output.mean[0], output.cov[0][0]);
+}
 ```
 
 ```text
 mean = 0.1995, variance = 0.0852
 ```
 
-The output mean is positive because ReLU clips negative values to zero. The
-variance describes variation in the model output under the supplied input
-noise; it does not establish prediction-interval coverage for observed targets.
+Evaluating the network at the input mean gives zero. Its noisy output has a
+positive mean because ReLU clips negative values to zero. The variance describes
+variation under the supplied noise, not prediction-interval coverage for observed
+targets.
 
 From a repository checkout, use Rust 1.95 or newer and run the same example:
 
@@ -65,8 +61,9 @@ cargo run --release --example basic
 
 ## Burn models
 
-The current tensor API uses an unreleased Burn revision and requires Rust 1.95
-or newer. These Git revisions are tested together; update them together:
+The development tensor API below differs from the published crate's Burn API.
+It requires Rust 1.95 or newer and an unreleased Burn revision. These Git
+revisions are tested together; update them together:
 
 ```toml
 [dependencies.stableprop]
@@ -89,23 +86,38 @@ an arbitrary model automatically.
 | Representation | Supplied uncertainty | What it retains |
 | --- | --- | --- |
 | [`Moments`](src/burn_sdp.rs) | Gaussian means and **variances**, each `[batch, features]` | Marginal moments; discards feature covariance |
-| [`MomentsFull`](src/burn_sdp.rs) | Means `[batch, features]` and covariance `[batch, features, features]` | Feature covariance, with a [third-order ReLU approximation](docs/derivations.md#relu-coefficients-and-the-implemented-order) |
+| [`MomentsFull`](src/burn_sdp.rs) | Means `[batch, features]` and covariance `[batch, features, features]` | Feature covariance through affine/ReLU layers, with a [third-order ReLU approximation](docs/derivations.md#relu-coefficients-and-the-implemented-order) |
 | [`Cauchy`](src/burn_sdp.rs) | Locations and scales, each `[batch, features]` | Heavy-tailed marginals; discards dependence and uses local ReLU gating |
 
 Each batch row represents a separate distribution; none of these types stores
-cross-row covariance. Burn weights use `[input, output]`, the transpose of the
-vector API's layout. Keep operands on the same device and in the same floating
-dtype. For explicit `f64`, pass `(&device, DType::F64)` to tensor constructors.
+cross-row covariance. `MomentsFull` requires symmetric positive semidefinite
+covariance matrices; shape checks do not establish that condition. Burn weights
+use `[input, output]`, the transpose of the vector API's layout. Keep operands
+on the same device and in the same floating dtype. For explicit `f64`, pass
+`(&device, DType::F64)` to tensor constructors.
 
 CPU examples use `Device::flex()`; call `.autodiff()` for gradients. On macOS,
-`features = ["metal"]` enables WGPU Metal with operation fusion. Use `just metal-test` for GPU value and gradient checks, or `just metal-train`
-for a training example.
+`features = ["metal"]` enables WGPU Metal with operation fusion. Use
+`just metal-test` for GPU value and gradient checks, or `just metal-train` for
+a training example.
 The [API source](src/burn_sdp.rs) documents supported operations and their assumptions.
 
 ## Try an application
 
-These examples use `--features burn`. The linked guide sections give commands,
-data requirements, and help interpreting the results.
+For a self-contained decision example, compare ways to choose a setting under
+Gaussian execution noise:
+
+```sh
+cargo run --release --features burn --example robust_selection -- --quick
+```
+
+It compares propagated expected squared losses with sampled model outputs and
+an exact simulator oracle, separating propagation error from model error. For
+a fixed target, expected squared loss depends only on output mean and variance;
+ranking-flip probabilities generally need more than those two moments.
+
+The guide covers further applications, their data requirements, and how to
+interpret the results. These examples use `--features burn`.
 
 | I want to… | Start here |
 | --- | --- |
@@ -135,7 +147,9 @@ or variance; their locations and scales must be interpreted separately.
 Input-noise propagation does not account for label noise, model bias, or an
 unknown weight posterior. Validate target coverage separately: the conformal
 examples add calibration using held-out observations. A variance penalty or a
-risk estimate is not an adversarial robustness certificate.
+risk estimate is not an adversarial robustness certificate. The
+[method guide](docs/methods.md#uncertainty-sources-and-downstream-methods)
+distinguishes input sensitivity, parameter uncertainty, and target coverage.
 
 Inspired by [distprop](https://github.com/Felix-Petersen/distprop) and
 [Petersen et al. (ICLR 2024)](https://arxiv.org/abs/2402.08324).
@@ -153,13 +167,15 @@ Install [just](https://github.com/casey/just#installation), then run:
 
 ```sh
 just check
+just property-test
 ```
 
-This runs formatting, lints, tests, documentation and example builds, smoke
-examples, and benchmark correctness checks. The [justfile](justfile) also
-provides extended property tests, independent numerical references, and Metal
-value/gradient checks. See the [benchmark guide](benches/README.md) for timing
-methods and the [reference guide](scripts/README.md) for numerical oracles.
+`just check` runs formatting, lints, tests, documentation and example builds,
+smoke examples, and benchmark correctness checks. `just property-test` extends
+the propagation, calibration, and selection properties to 4,096 cases each.
+The [justfile](justfile) also provides independent numerical references and
+Metal value/gradient checks. See the [benchmark guide](benches/README.md) for
+timing methods and the [reference guide](scripts/README.md) for numerical oracles.
 
 ## License
 

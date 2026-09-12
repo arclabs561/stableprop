@@ -5,6 +5,10 @@
 //! an assumed covariance, then selects one action for each target.  Selection
 //! is evaluated with the simulator's exact Gaussian quadratic-loss formula,
 //! never with the samples used to rank candidates.
+//! The surrogate-risk objective is `E[(f(X) - target)^2] =
+//! (E[f(X)] - target)^2 + Var(f(X))`; it needs finite second moments, not a
+//! Gaussian surrogate output.  It is therefore distinct from a Gaussian tail
+//! probability or a constraint-violation risk.
 //!
 //! The ratios below multiply a covariance, not a standard deviation.  Thus
 //! `1.25` means 25% more covariance than the true execution law.  A method's

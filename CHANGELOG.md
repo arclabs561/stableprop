@@ -37,6 +37,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Property checks against exhaustive finite-distribution oracles for uncertain
+  affine weights and independent-row aggregation.
 - An input-space farthest-first control and pool-coverage diagnostics in the
   active-selection example, checked against exhaustive small-pool solutions.
 - A matched Gaussian-augmentation training baseline and separate matched/shifted

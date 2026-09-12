@@ -384,6 +384,15 @@ path has no repeated nonlinear Gaussian approximation. The four sigma points
 match the input mean and covariance; this does not make their nonlinear
 loss estimate exact.
 
+For every moment-based selector, the surrogate objective is expected squared
+deviation: `E[(f(X) - target)^2] = (E[f(X)] - target)^2 + Var(f(X))`. This
+identity only requires finite second moments; it does not assume the ReLU
+surrogate output is Gaussian. In this one-hidden-layer model, the Gaussian
+input gives exact affine and marginal ReLU moments. Full K3 still approximates
+off-diagonal hidden covariance, so its output variance and expected loss are
+approximate. This objective is different from a Gaussian tail probability or
+constraint-violation risk, which moments alone do not determine.
+
 Read three different comparisons:
 
 - Method error compares estimated losses with independent Monte Carlo through

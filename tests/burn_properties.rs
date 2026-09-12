@@ -4,11 +4,12 @@
 //! are deliberately evaluated on the host so they do not repeat tensor shapes
 //! or reductions from the implementation under test.
 
-use burn::tensor::{Device, Tensor, TensorData};
+use burn::tensor::{DType, Device, Tensor, TensorData};
 use proptest::prelude::*;
 use stableprop::burn_sdp::{
-    propagate_linear_cross_covariance, propagate_linear_full, propagate_relu_cross_covariance,
-    propagate_relu_full, propagate_residual_add_correlated, Moments, MomentsFull,
+    propagate_linear_bayes, propagate_linear_cross_covariance, propagate_linear_full,
+    propagate_matmul_left, propagate_relu_cross_covariance, propagate_relu_full,
+    propagate_residual_add_correlated, Moments, MomentsFull,
 };
 
 const BATCH: usize = 2;
@@ -186,6 +187,140 @@ fn relu_scale_equivariance_bound(expected: f64, scaled_cross_covariance: f64) ->
 }
 
 proptest! {
+    /// Independent two-point laws suffice as an exact oracle because this
+    /// affine/bilinear output's first two moments depend only on the first two
+    /// input moments. Enumerating input, weight, and bias states checks their
+    /// combined mean and variance without restating the propagation formula.
+    #[test]
+    fn bayesian_affine_matches_independent_two_point_oracle(
+        input_mean in -2.0f32..2.0,
+        input_std in 0.1f32..2.0,
+        weight_mean in -2.0f32..2.0,
+        weight_std in 0.1f32..2.0,
+        bias_mean in -2.0f32..2.0,
+        bias_std in 0.1f32..2.0,
+    ) {
+        let device = Device::flex().autodiff();
+        let input_var = input_std * input_std;
+        let weight_var = weight_std * weight_std;
+        let bias_var = bias_std * bias_std;
+        let output = propagate_linear_bayes(
+            &Moments::new(
+                Tensor::<2>::from_data([[input_mean]], (&device, DType::F32)),
+                Tensor::<2>::from_data([[input_var]], (&device, DType::F32)),
+            ),
+            Tensor::<2>::from_data([[weight_mean]], (&device, DType::F32)),
+            Tensor::<2>::from_data([[weight_var]], (&device, DType::F32)),
+            Some((
+                Tensor::<1>::from_data([bias_mean], (&device, DType::F32)),
+                Tensor::<1>::from_data([bias_var], (&device, DType::F32)),
+            )),
+        );
+        let actual_mean = output.mean.into_data().try_to_vec::<f32>().unwrap()[0] as f64;
+        let actual_var = output.var.into_data().try_to_vec::<f32>().unwrap()[0] as f64;
+
+        let mut samples = Vec::with_capacity(8);
+        for input_sign in [-1.0f64, 1.0] {
+            for weight_sign in [-1.0f64, 1.0] {
+                for bias_sign in [-1.0f64, 1.0] {
+                    samples.push(
+                        (input_mean as f64 + input_sign * input_std as f64)
+                            * (weight_mean as f64 + weight_sign * weight_std as f64)
+                            + bias_mean as f64
+                            + bias_sign * bias_std as f64,
+                    );
+                }
+            }
+        }
+        let expected_mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        let expected_var = samples
+            .iter()
+            .map(|sample| (sample - expected_mean).powi(2))
+            .sum::<f64>()
+            / samples.len() as f64;
+        let mean_scale = samples.iter().map(|sample| sample.abs()).sum::<f64>() / samples.len() as f64;
+        let var_scale = samples
+            .iter()
+            .map(|sample| sample.powi(2))
+            .sum::<f64>()
+            / samples.len() as f64;
+        prop_assert!(
+            (actual_mean - expected_mean).abs() <= f32_roundoff_bound(mean_scale),
+            "mean {actual_mean} vs {expected_mean}",
+        );
+        prop_assert!(
+            (actual_var - expected_var).abs() <= f32_roundoff_bound(var_scale),
+            "variance {actual_var} vs {expected_var}",
+        );
+    }
+
+    /// For independent rows, enumerate all row signs to check that a left
+    /// matrix map uses squared coefficients for each output marginal. Two
+    /// output rows catch orientation and cross-row accumulation errors.
+    #[test]
+    fn left_matmul_matches_independent_row_two_point_oracle(
+        input_mean in prop::collection::vec(-2.0f32..2.0, 3),
+        input_std in prop::collection::vec(0.1f32..2.0, 3),
+        left in prop::collection::vec(-2.0f32..2.0, 6),
+    ) {
+        let device = Device::flex().autodiff();
+        let input_var: Vec<f32> = input_std.iter().map(|std| std * std).collect();
+        let output = propagate_matmul_left(
+            Tensor::<2>::from_data(
+                TensorData::new(left.clone(), [2, 3]),
+                (&device, DType::F32),
+            ),
+            &Moments::new(
+                Tensor::<2>::from_data(
+                    TensorData::new(input_mean.clone(), [3, 1]),
+                    (&device, DType::F32),
+                ),
+                Tensor::<2>::from_data(
+                    TensorData::new(input_var, [3, 1]),
+                    (&device, DType::F32),
+                ),
+            ),
+        );
+        let actual_mean = output.mean.into_data().try_to_vec::<f32>().unwrap();
+        let actual_var = output.var.into_data().try_to_vec::<f32>().unwrap();
+
+        for out in 0..2 {
+            let mut samples = Vec::with_capacity(8);
+            for signs in 0..8 {
+                let sample = (0..3)
+                    .map(|input| {
+                        let sign = if signs & (1 << input) == 0 { -1.0 } else { 1.0 };
+                        left[out * 3 + input] as f64
+                            * (input_mean[input] as f64 + sign * input_std[input] as f64)
+                    })
+                    .sum::<f64>();
+                samples.push(sample);
+            }
+            let expected_mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            let expected_var = samples
+                .iter()
+                .map(|sample| (sample - expected_mean).powi(2))
+                .sum::<f64>()
+                / samples.len() as f64;
+            let mean_scale = samples.iter().map(|sample| sample.abs()).sum::<f64>() / samples.len() as f64;
+            let var_scale = samples
+                .iter()
+                .map(|sample| sample.powi(2))
+                .sum::<f64>()
+                / samples.len() as f64;
+            prop_assert!(
+                (actual_mean[out] as f64 - expected_mean).abs()
+                    <= f32_roundoff_bound(mean_scale),
+                "output {out} mean {} vs {expected_mean}", actual_mean[out],
+            );
+            prop_assert!(
+                (actual_var[out] as f64 - expected_var).abs()
+                    <= f32_roundoff_bound(var_scale),
+                "output {out} variance {} vs {expected_var}", actual_var[out],
+            );
+        }
+    }
+
     /// The full Burn path is an exact affine covariance transport, including
     /// signed off-diagonal terms, for rectangular input/output widths.
     #[test]
