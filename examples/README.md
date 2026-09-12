@@ -5,7 +5,8 @@ also builds the Burn development dependencies for `basic`. That example
 uses the dependency-free vector API; the other examples default to Burn's CPU
 Flex backend. `robust_training` also accepts `--metal` on macOS with the
 `metal` feature. Training and sampling use fixed seeds. Floating-point results may
-still differ across backend or dependency versions.
+still differ across backend or dependency versions. Results labeled Burn 0.21
+NdArray are archived observations, not expected outputs of the current commands.
 
 | I want to… | Start with |
 | --- | --- |
@@ -196,15 +197,26 @@ mode's approximate intervals use fitted-model/data repeats as independent units.
 The known target/noise quantities are diagnostic oracles from this synthetic
 problem, not uncertainty estimates learned by stableprop.
 
-`robust_training` compares plain MSE with MSE plus a propagated-variance penalty,
-using shared initial weights and test noise. It prints RMSE with and without
-input perturbations while holding clean targets fixed. This models
-label-preserving measurement noise; another perturbation may change the target.
-Compare both metrics; the penalty can trade accuracy for lower sensitivity.
+`robust_training` compares clean-input MSE, Gaussian input augmentation, and
+MSE plus a propagated-variance penalty. All three use the same initial weights
+and optimizer steps. Augmentation draws fresh noise at each step; its noise
+standard deviation and the penalty's assumed input standard deviation are 0.2.
+The penalty weight is fixed at 3, without validation-based tuning.
+
+The output reports clean RMSE and noisy RMSE at standard deviations 0.2
+(matched) and 0.3 (shifted), sharing test perturbations across models. Clean
+targets stay fixed: this models label-preserving measurement noise. Read all
+three columns; reduced sensitivity can cost clean accuracy. This single-seed
+comparison does not establish a preferred training method.
+
+Augmentation samples the expected noisy squared loss. The variance penalty
+instead regularizes the point prediction; even at unit weight these objectives
+can differ because noise shifts the mean prediction. See the
+[loss identity and small-noise connection](../docs/derivations.md#when-two-moments-suffice).
 
 On macOS, `just metal-train` runs the same training code on Burn's Metal
 backend. Its synchronized training time includes first-use kernel compilation
-and autotuning. Backend RNG streams differ, so compare the two objectives
+and autotuning. Backend RNG streams differ, so compare the three objectives
 within each run. For warmed CPU/GPU timings on fixed inputs, use
 `just metal-test`; those timings include tensor allocation and report the
 batch size, width, and number of iterations.

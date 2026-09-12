@@ -488,9 +488,19 @@ The mean in this identity is the expectation over perturbed inputs, which can
 differ from the network at the input mean. The
 [`robust_training` example](../examples/robust_training.rs) instead adds a
 weighted variance penalty to point-prediction MSE. Even with unit weight, that
-objective is not generally the expected noisy squared loss. If the target is
-also random and correlated with the output, its variance and cross-covariance
-must enter the expected-loss calculation too.
+objective is not generally the expected noisy squared loss. The example also
+trains with freshly sampled input noise, which estimates that expected loss
+while retaining the clean target. If the target is also random and correlated
+with the output, its variance and cross-covariance must enter the expected-loss
+calculation too.
+
+[Bishop (1995), §2](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/bishop-tikhonov-nc-95.pdf)
+connects noise injection to derivative regularization through a small-noise
+Taylor expansion. The reduction to a first-derivative penalty uses a sufficiently
+flexible model near the conditional-mean solution and an average over targets.
+It is not an equality of the objectives for arbitrary fitted networks or finite
+noise. ReLU activation crossings also require care: within-region linearity
+does not account for probability mass crossing a kink.
 
 ### An exact reference for candidate selection
 

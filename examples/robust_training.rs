@@ -3,11 +3,15 @@
 //! Because stableprop's propagation is differentiable, the analytic output
 //! variance under input noise can go straight into the loss. Penalizing it
 //! `loss = MSE + lambda * mean(output_variance)` changes the training objective.
-//! The example reports clean and noisy test RMSE for that objective and plain MSE.
+//! This controlled comparison includes clean MSE, Gaussian input augmentation,
+//! and the variance penalty. The latter is not generally expected noisy squared
+//! loss: its point-prediction term is evaluated at the clean input.
 //!
-//! Both nets start from the same weights and use the same noisy test draws,
-//! so only the loss differs. Input perturbations retain the clean target: this
+//! All nets start from the same weights and use the same noisy test draws, so
+//! only the loss differs. Input perturbations retain the clean target: this
 //! measures label-preserving measurement noise, not target or label noise.
+//! Augmentation uses `TRAIN_STD`; test RMSE is reported at both that matched
+//! noise level and a separately stated shifted level.
 //! Each backend has its own RNG stream, so metrics from separate backend runs
 //! need not match.
 //!
@@ -27,8 +31,15 @@ const D_IN: usize = 6;
 const HIDDEN: usize = 64;
 const N_TRAIN: usize = 3000;
 const N_TEST: usize = 1000;
+const TRAIN_STEPS: usize = 800;
 const TRAIN_STD: f64 = 0.2;
 const TEST_STD: f64 = 0.3;
+const EVALUATION_DRAWS: usize = 20;
+
+const DATA_SEED: u64 = 0xA0B5_7001;
+const INIT_SEED: u64 = 0xA0B5_7002;
+const AUGMENTATION_SEED: u64 = 0xA0B5_7003;
+const EVALUATION_SEED: u64 = 0xA0B5_7004;
 
 #[derive(Module, Debug)]
 struct Mlp {
@@ -74,8 +85,59 @@ fn target(x: &[f32]) -> f32 {
     (s * 0.6).sin() + 0.5 * x[0] * x[1] - 0.3 * x[2] * x[2]
 }
 
+fn mse(model: &Mlp, inputs: Tensor<2>, targets: Tensor<2>) -> Tensor<1> {
+    MseLoss::new().forward(model.forward(inputs), targets, Reduction::Mean)
+}
+
+fn augmented_mse(
+    model: &Mlp,
+    clean_inputs: Tensor<2>,
+    targets: Tensor<2>,
+    noise: Tensor<2>,
+) -> Tensor<1> {
+    mse(model, clean_inputs + noise, targets)
+}
+
+#[derive(Clone, Copy)]
+enum Objective {
+    CleanMse,
+    GaussianAugmentation,
+    VariancePenalty,
+}
+
+fn train(
+    mut model: Mlp,
+    objective: Objective,
+    inputs: &Tensor<2>,
+    targets: &Tensor<2>,
+    device: &Device,
+) -> Mlp {
+    let mut optimizer = AdamConfig::new().init();
+    for _ in 0..TRAIN_STEPS {
+        let loss = match objective {
+            Objective::CleanMse => mse(&model, inputs.clone(), targets.clone()),
+            Objective::GaussianAugmentation => {
+                let noise = Tensor::<2>::random(
+                    inputs.dims(),
+                    Distribution::Normal(0.0, TRAIN_STD),
+                    device,
+                );
+                augmented_mse(&model, inputs.clone(), targets.clone(), noise)
+            }
+            Objective::VariancePenalty => {
+                let (prediction, variance) = model.forward_with_var(inputs.clone(), TRAIN_STD);
+                MseLoss::new().forward(prediction, targets.clone(), Reduction::Mean)
+                    + variance.mean().mul_scalar(3.0)
+            }
+        };
+        let gradients = GradientsParams::from_grads(loss.backward(), &model);
+        model = optimizer.step(1e-3, model, gradients);
+    }
+    model
+}
+
 fn run(dev: &Device, backend: &str) {
-    dev.seed(0xA0B5_7001);
+    dev.seed(DATA_SEED);
     let make = |n: usize| -> (Tensor<2>, Tensor<2>) {
         let xt = Tensor::<2>::random([n, D_IN], Distribution::Normal(0.0, 1.0), dev);
         let xv = xt.to_data().try_to_vec::<f32>().unwrap();
@@ -87,36 +149,37 @@ fn run(dev: &Device, backend: &str) {
     let (x_tr, y_tr) = make(N_TRAIN);
     let (x_te, y_te) = make(N_TEST);
 
-    // Same starting weights for both nets: only the loss differs.
+    // Materialization in `Mlp::init` makes every clone a shared baseline.
+    dev.seed(INIT_SEED);
     let init = Mlp::init(dev);
-    let train = |mut model: Mlp, lambda: f64| -> Mlp {
-        let mut optim = AdamConfig::new().init();
-        for _ in 0..800 {
-            let (pred, var) = model.forward_with_var(x_tr.clone(), TRAIN_STD);
-            let mut loss = MseLoss::new().forward(pred, y_tr.clone(), Reduction::Mean);
-            if lambda > 0.0 {
-                loss = loss + var.mean().mul_scalar(lambda);
-            }
-            let grads = GradientsParams::from_grads(loss.backward(), &model);
-            model = optim.step(1e-3, model, grads);
-        }
-        model
-    };
     dev.sync().expect("training backend synchronization failed");
     let started = Instant::now();
-    let plain = train(init.clone(), 0.0);
-    let robust = train(init, 3.0);
+    let plain = train(init.clone(), Objective::CleanMse, &x_tr, &y_tr, dev);
+    dev.seed(AUGMENTATION_SEED);
+    let augmented = train(
+        init.clone(),
+        Objective::GaussianAugmentation,
+        &x_tr,
+        &y_tr,
+        dev,
+    );
+    let robust = train(init, Objective::VariancePenalty, &x_tr, &y_tr, dev);
     dev.sync().expect("training backend synchronization failed");
     let elapsed = started.elapsed();
 
-    // Same test-noise draws for both nets.
+    // Evaluation noise does not depend on any random draws used while training.
+    dev.seed(EVALUATION_SEED);
     let clean = vec![x_te.clone()];
-    let noisy: Vec<Tensor<2>> = (0..20)
-        .map(|_| {
-            x_te.clone()
-                + Tensor::<2>::random([N_TEST, D_IN], Distribution::Normal(0.0, TEST_STD), dev)
-        })
-        .collect();
+    let noisy_inputs = |std| {
+        (0..EVALUATION_DRAWS)
+            .map(|_| {
+                x_te.clone()
+                    + Tensor::<2>::random([N_TEST, D_IN], Distribution::Normal(0.0, std), dev)
+            })
+            .collect::<Vec<_>>()
+    };
+    let matched_noise = noisy_inputs(TRAIN_STD);
+    let shifted_noise = noisy_inputs(TEST_STD);
     let y = y_te.into_data().try_to_vec::<f32>().unwrap();
     let rmse = |model: &Mlp, inputs: &[Tensor<2>]| -> f64 {
         let mut total = 0.0;
@@ -136,25 +199,41 @@ fn run(dev: &Device, backend: &str) {
 
     println!("Backend: {backend}");
     println!(
-        "Training elapsed (includes first-use kernel compilation/autotuning): {:.3}s",
+        "Training elapsed for all three objectives (includes first-use kernel compilation/autotuning): {:.3}s",
         elapsed.as_secs_f64()
     );
-    println!("RMSE (lower = better), shared init + shared test noise:");
-    println!("  {:<28} {:>8} {:>8}", "net", "clean", "noisy");
+    println!("RMSE (lower = better); shared initialization and shared evaluation draws:");
     println!(
-        "  {:<28} {:>8.4} {:>8.4}",
+        "  {:<28} {:>8} {:>14} {:>14}",
+        "net",
+        "clean",
+        format!("noise std={TRAIN_STD}"),
+        format!("noise std={TEST_STD}")
+    );
+    println!(
+        "  {:<28} {:>8.4} {:>14.4} {:>14.4}",
         "plain MSE",
         rmse(&plain, &clean),
-        rmse(&plain, &noisy)
+        rmse(&plain, &matched_noise),
+        rmse(&plain, &shifted_noise)
     );
     println!(
-        "  {:<28} {:>8.4} {:>8.4}",
+        "  {:<28} {:>8.4} {:>14.4} {:>14.4}",
+        "Gaussian augmentation",
+        rmse(&augmented, &clean),
+        rmse(&augmented, &matched_noise),
+        rmse(&augmented, &shifted_noise)
+    );
+    println!(
+        "  {:<28} {:>8.4} {:>14.4} {:>14.4}",
         "MSE + variance penalty",
         rmse(&robust, &clean),
-        rmse(&robust, &noisy)
+        rmse(&robust, &matched_noise),
+        rmse(&robust, &shifted_noise)
     );
     println!("\nNoisy inputs retain clean targets: this is label-preserving measurement noise.");
-    println!("Compare clean and noisy RMSE; the variance penalty can change either metric.");
+    println!("Augmentation and the penalty use train noise std={TRAIN_STD}; std={TEST_STD} is a shifted test condition.");
+    println!("Compare all three columns; neither training objective establishes a general robustness result.");
     println!("Different backend RNG streams can produce different trained metrics.");
 }
 
@@ -247,5 +326,38 @@ mod tests {
             left, right,
             "cloned baselines must share initialized weights"
         );
+    }
+
+    #[test]
+    fn augmentation_matches_affine_noisy_risk_and_weight_gradient() {
+        use burn::module::Param;
+        use burn::tensor::DType;
+
+        let device = Device::flex().autodiff();
+        let options = (&device, DType::F32);
+        // Positive inputs keep ReLU linear: f(x) = w*x, with w = 2.
+        let weight = Tensor::<2>::from_data([[2.0]], options).require_grad();
+        let model = Mlp {
+            lin1: Linear {
+                weight: Param::from_tensor(Tensor::from_data([[1.0]], options)),
+                bias: None,
+            },
+            lin2: Linear {
+                weight: Param::from_tensor(weight.clone()),
+                bias: None,
+            },
+        };
+        let inputs = Tensor::<2>::from_data([[2.0], [2.0]], options);
+        let targets = Tensor::<2>::from_data([[3.0], [3.0]], options);
+        // Antithetic draws integrate this quadratic loss exactly for a
+        // zero-mean noise law with variance 1/16, including a Gaussian.
+        let noise = Tensor::<2>::from_data([[0.25], [-0.25]], options);
+        let loss = augmented_mse(&model, inputs, targets, noise);
+        let value = loss.clone().into_scalar::<f32>();
+        let gradients = loss.backward();
+        let derivative = weight.grad(&gradients).unwrap().into_scalar::<f32>();
+        // Risk = (2*w - 3)^2 + w^2/16; derivative at w=2 is 4.25.
+        assert!((value - 1.25).abs() < 1e-6, "risk = {value}");
+        assert!((derivative - 4.25).abs() < 1e-6, "gradient = {derivative}");
     }
 }

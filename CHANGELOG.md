@@ -31,6 +31,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A matched Gaussian-augmentation training baseline and separate matched/shifted
+  noise evaluations alongside the propagated-variance penalty.
+
 - A controlled sensor-posterior example with exact quadratic target moments,
   independent Monte Carlo checks, and trajectory-disjoint interval calibration.
 - Matched deterministic CPU/Metal forward and backward timings, with separate

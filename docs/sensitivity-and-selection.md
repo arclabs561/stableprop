@@ -226,7 +226,7 @@ The [`active_selection`](../examples/active_selection.rs) example implements
 the four basic policies on a fixed two-class synthetic pool. It holds the
 training recipe and evaluation noise fixed, refits from shared initial weights,
 and reports learning curves over three seeds without a variance penalty.
-In a Burn 0.21 NdArray run at 96 labels, mean unperturbed accuracy was 0.992 for entropy,
+In an archived Burn 0.21 NdArray run at 96 labels, mean unperturbed accuracy was 0.992 for entropy,
 0.965 for random, 0.944 for analytic disagreement, and 0.964 for sampled
 disagreement. Agreement between the two disagreement scores did not make them
 better selectors. The [example guide](../examples/README.md#active-selection)
