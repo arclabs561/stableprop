@@ -91,8 +91,11 @@ SDP and moment matching optimize different approximations. The
 [distprop implementation](https://github.com/Felix-Petersen/distprop/blob/e727da2057ef45f18df31cc8b58597505a0b8b03/distprop/sdp.py)
 returns the deterministic output `f(mu)` and `J * J^T * s^2` for isotropic
 Gaussian input with standard deviation `s`, where `J` is the network Jacobian
-at `mu`. Petersen's ReLU argument minimizes a univariate total-variation
-distance. Moment matching instead preserves Gaussian-input expectations. At a
+at `mu`. Petersen's Theorem 1 minimizes total-variation distance from a
+rectified univariate Gaussian among Gaussian approximations, allowing a
+zero-variance point mass; Corollary 2 gives the Cauchy counterpart. This is a
+single-activation result, not a network-wide optimality guarantee.
+Moment matching instead preserves Gaussian-input expectations. At a
 zero-mean ReLU input, the true rectified mean is positive, while local
 linearization returns zero. Neither method contains the other or wins under
 every error metric.
