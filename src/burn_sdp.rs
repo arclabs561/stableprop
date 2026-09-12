@@ -16,9 +16,10 @@
 //!
 //! Callers must supply finite tensor values, nonnegative variances and scales,
 //! and valid positive-semidefinite covariance matrices. All operands in a
-//! propagation operation must have the same floating-point dtype. Constructors
-//! check shapes and dtypes, but do not inspect tensor contents or synchronize
-//! devices to validate values. Public fields carry the same requirements.
+//! propagation operation must be on the same runtime device and have the same
+//! floating-point dtype. Constructors check shapes and dtypes, but do not inspect
+//! tensor contents or synchronize devices to validate values. Public fields carry
+//! the same requirements.
 //! Negative Gaussian ReLU tails use continued fractions to avoid cancellation;
 //! linear tail limits apply at eight standard deviations.
 //! At zero variance, masks select deterministic outputs and finite gradients.

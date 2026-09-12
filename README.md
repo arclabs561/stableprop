@@ -97,8 +97,8 @@ Burn weights use `[input, output]`, the transpose of the vector API's layout.
 CPU examples use `Device::flex()`; call `.autodiff()` when differentiating.
 On macOS, `Device::metal(DeviceKind::DefaultDevice)` selects Metal. Burn selects
 tensor precision at creation. For `f64`, pass `(&device, DType::F64)` to tensor
-constructors. Use the same floating dtype for moments, weights and biases.
-Propagation preserves that dtype.
+constructors. Keep moments, weights and biases on the same runtime device
+and use the same floating dtype. Propagation preserves that dtype.
 
 | Representation | What it tracks | Main approximation |
 | --- | --- | --- |
