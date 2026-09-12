@@ -283,19 +283,14 @@ mod burn {
         assert_f32_reference, assert_relative, F32MarginalReference, Tail, F32_MARGINAL_REFERENCES,
         TAILS,
     };
-    use burn::backend::Autodiff;
-    use burn::tensor::{DType, Tensor};
-    use burn_ndarray::NdArray;
+    use burn::tensor::{DType, Device, Tensor};
     use stableprop::burn_sdp::{
         propagate_leaky_relu, propagate_relu, propagate_relu_cross_covariance, propagate_relu_full,
         Moments, MomentsFull,
     };
 
-    type Nd = NdArray<f32>;
-    type Ad = Autodiff<Nd>;
-
-    fn values(t: Tensor<Nd, 2>) -> Vec<f32> {
-        t.into_data().to_vec::<f32>().unwrap()
+    fn values(t: Tensor<2>) -> Vec<f32> {
+        t.into_data().try_to_vec::<f32>().unwrap()
     }
 
     fn expected(tail: Tail, variance: f32) -> (f64, f64, f64) {
@@ -308,8 +303,8 @@ mod burn {
     }
 
     #[test]
-    fn ndarray_batched_tail_moments_and_gradients_match_independent_references() {
-        let device = Default::default();
+    fn flex_batched_tail_moments_and_gradients_match_independent_references() {
+        let device = Device::flex().autodiff();
         // 128 elements exercise SIMD kernels that a scalar fixture never enters.
         // These alphas and standard deviations are exactly representable in f32.
         for tail in TAILS
@@ -320,14 +315,11 @@ mod burn {
                 let sigma = variance_value.sqrt() as f64;
                 for full in [false, true] {
                     for variance_loss in [false, true] {
-                        let mean = Tensor::<Ad, 2>::full(
-                            [8, 16],
-                            tail.alpha * sigma,
-                            (&device, DType::F32),
-                        )
-                        .require_grad();
+                        let mean =
+                            Tensor::<2>::full([8, 16], tail.alpha * sigma, (&device, DType::F32))
+                                .require_grad();
                         let variance =
-                            Tensor::<Ad, 2>::full([8, 16], variance_value, (&device, DType::F32))
+                            Tensor::<2>::full([8, 16], variance_value, (&device, DType::F32))
                                 .require_grad();
                         let (output_mean, output_variance) = if full {
                             let output = propagate_relu_full(&MomentsFull::from_diagonal(
@@ -341,10 +333,10 @@ mod burn {
                                 propagate_relu(&Moments::new(mean.clone(), variance.clone()));
                             (output.mean, output.var)
                         };
-                        for actual in output_mean.to_data().to_vec::<f32>().unwrap() {
+                        for actual in output_mean.to_data().try_to_vec::<f32>().unwrap() {
                             assert_relative(actual as f64, sigma * tail.mean, 3e-5, "batched mean");
                         }
-                        for actual in output_variance.to_data().to_vec::<f32>().unwrap() {
+                        for actual in output_variance.to_data().try_to_vec::<f32>().unwrap() {
                             assert_relative(
                                 actual as f64,
                                 variance_value as f64 * tail.var,
@@ -370,7 +362,7 @@ mod burn {
                             .grad(&gradients)
                             .unwrap()
                             .to_data()
-                            .to_vec::<f32>()
+                            .try_to_vec::<f32>()
                             .unwrap()
                         {
                             assert_relative(actual as f64, dm, 3e-4, "batched mean derivative");
@@ -379,7 +371,7 @@ mod burn {
                             .grad(&gradients)
                             .unwrap()
                             .to_data()
-                            .to_vec::<f32>()
+                            .try_to_vec::<f32>()
                             .unwrap()
                         {
                             assert_relative(actual as f64, dv, 3e-4, "batched variance derivative");
@@ -391,8 +383,8 @@ mod burn {
     }
 
     #[test]
-    fn ndarray_f32_tail_values_match_references_for_diagonal_full_leaky_and_cross_gate() {
-        let device = Default::default();
+    fn flex_f32_tail_values_match_references_for_diagonal_full_leaky_and_cross_gate() {
+        let device = Device::flex().autodiff();
         for tail in TAILS {
             for variance in [1e-24f32, 1.0, 1e24] {
                 let sigma = variance.sqrt();
@@ -422,10 +414,10 @@ mod burn {
                     assert_relative(mean_value as f64, expect_mean, 2e-4, name);
                     assert_relative(var_value as f64, expect_var, 2e-4, name);
                 }
-                let cross = Tensor::<Nd, 3>::from_data([[[variance]]], (&device, DType::F32));
+                let cross = Tensor::<3>::from_data([[[variance]]], (&device, DType::F32));
                 let gated = propagate_relu_cross_covariance(cross, &input)
                     .into_data()
-                    .to_vec::<f32>()
+                    .try_to_vec::<f32>()
                     .unwrap()[0];
                 assert_relative(gated as f64, expect_gate, 2e-4, "cross gate");
             }
@@ -433,9 +425,9 @@ mod burn {
     }
 
     fn gradients(mode: &str, mean: f32, variance: f32, mean_loss: bool) -> (f32, f32) {
-        let device = Default::default();
-        let mean = Tensor::<Ad, 2>::from_data([[mean]], (&device, DType::F32)).require_grad();
-        let var = Tensor::<Ad, 2>::from_data([[variance]], (&device, DType::F32)).require_grad();
+        let device = Device::flex().autodiff();
+        let mean = Tensor::<2>::from_data([[mean]], (&device, DType::F32)).require_grad();
+        let var = Tensor::<2>::from_data([[variance]], (&device, DType::F32)).require_grad();
         let loss = match mode {
             "diagonal" => {
                 let out = propagate_relu(&Moments::new(mean.clone(), var.clone()));
@@ -469,21 +461,21 @@ mod burn {
             mean.grad(&grads)
                 .unwrap()
                 .into_data()
-                .to_vec::<f32>()
+                .try_to_vec::<f32>()
                 .unwrap()[0],
             var.grad(&grads)
                 .unwrap()
                 .into_data()
-                .to_vec::<f32>()
+                .try_to_vec::<f32>()
                 .unwrap()[0],
         )
     }
 
     fn f32_outputs(mode: &str, mean: f32, variance: f32) -> (f32, f32) {
-        let device = Default::default();
+        let device = Device::flex().autodiff();
         let input = Moments::new(
-            Tensor::<Nd, 2>::from_data([[mean]], (&device, DType::F32)),
-            Tensor::<Nd, 2>::from_data([[variance]], (&device, DType::F32)),
+            Tensor::<2>::from_data([[mean]], (&device, DType::F32)),
+            Tensor::<2>::from_data([[variance]], (&device, DType::F32)),
         );
         match mode {
             "diagonal" => {
@@ -504,10 +496,10 @@ mod burn {
     }
 
     fn scaled_variance_gradients(mode: &str, mean_value: f32, variance_value: f32) -> (f64, f64) {
-        let device = Default::default();
-        let mean = Tensor::<Ad, 2>::from_data([[mean_value]], (&device, DType::F32)).require_grad();
+        let device = Device::flex().autodiff();
+        let mean = Tensor::<2>::from_data([[mean_value]], (&device, DType::F32)).require_grad();
         let variance =
-            Tensor::<Ad, 2>::from_data([[variance_value]], (&device, DType::F32)).require_grad();
+            Tensor::<2>::from_data([[variance_value]], (&device, DType::F32)).require_grad();
         let loss_scale = 4_294_967_296.0f64;
         let loss = match mode {
             "diagonal" => propagate_relu(&Moments::new(mean.clone(), variance.clone()))
@@ -529,14 +521,14 @@ mod burn {
             .grad(&gradients)
             .unwrap()
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap()[0] as f64
             / loss_scale;
         let dvariance_dvariance = variance
             .grad(&gradients)
             .unwrap()
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap()[0] as f64
             / loss_scale;
         (dvariance_dmean, dvariance_dvariance)
@@ -607,7 +599,7 @@ mod burn {
     }
 
     #[test]
-    fn ndarray_f32_tail_gradients_match_gaussian_identities() {
+    fn flex_f32_tail_gradients_match_gaussian_identities() {
         for tail in TAILS {
             for variance in [1e-24f32, 1.0, 1e24] {
                 let sigma = (variance as f64).sqrt();
@@ -632,14 +624,14 @@ mod burn {
     }
 
     #[test]
-    fn ndarray_f32_marginals_match_frozen_references_at_actual_input_bits() {
+    fn flex_f32_marginals_match_frozen_references_at_actual_input_bits() {
         for reference in F32_MARGINAL_REFERENCES {
             assert_f32_marginal_reference(reference);
         }
     }
 
     #[test]
-    fn ndarray_f32_cutoffs_and_deterministic_inputs_follow_documented_conventions() {
+    fn flex_f32_cutoffs_and_deterministic_inputs_follow_documented_conventions() {
         let cutoff_cases = [
             (0xc100_0001, 0.0, 0.0),
             (0xc100_0000, 0.0, 0.0),
@@ -674,7 +666,7 @@ mod burn {
     }
 
     #[test]
-    fn ndarray_f32_scaled_subnormal_variance_adjoints_match_frozen_reference() {
+    fn flex_f32_scaled_subnormal_variance_adjoints_match_frozen_reference() {
         let reference = F32_MARGINAL_REFERENCES
             .into_iter()
             .find(|reference| f32::from_bits(reference.variance_bits).is_subnormal())
@@ -705,21 +697,19 @@ mod burn {
     }
 
     #[test]
-    fn ndarray_f64_tail_values_and_gradients_match_erfc_references() {
-        type Ad64 = Autodiff<NdArray<f64>>;
-        let device = Default::default();
+    fn flex_f64_tail_values_and_gradients_match_erfc_references() {
+        let device = Device::flex().autodiff();
         for tail in TAILS {
             for mean_loss in [true, false] {
-                let mean = Tensor::<Ad64, 2>::from_data([[tail.alpha]], (&device, DType::F64))
-                    .require_grad();
-                let var =
-                    Tensor::<Ad64, 2>::from_data([[1.0]], (&device, DType::F64)).require_grad();
+                let mean =
+                    Tensor::<2>::from_data([[tail.alpha]], (&device, DType::F64)).require_grad();
+                let var = Tensor::<2>::from_data([[1.0]], (&device, DType::F64)).require_grad();
                 let full = MomentsFull::from_diagonal(mean.clone(), var.clone());
                 assert_eq!(full.cov.dtype(), DType::F64);
                 let full_out = propagate_relu_full(&full);
                 let full_var = full_out.variance();
                 let out = propagate_relu(&Moments::new(mean.clone(), var.clone()));
-                let scalar = |t: Tensor<Ad64, 2>| t.into_data().to_vec::<f64>().unwrap()[0];
+                let scalar = |t: Tensor<2>| t.into_data().try_to_vec::<f64>().unwrap()[0];
                 assert_relative(
                     scalar(full_out.mean),
                     tail.mean,
@@ -750,13 +740,13 @@ mod burn {
                     .grad(&gradients)
                     .unwrap()
                     .into_data()
-                    .to_vec::<f64>()
+                    .try_to_vec::<f64>()
                     .unwrap()[0];
                 let dvar = var
                     .grad(&gradients)
                     .unwrap()
                     .into_data()
-                    .to_vec::<f64>()
+                    .try_to_vec::<f64>()
                     .unwrap()[0];
                 assert_relative(dmu, expected[0], 1e-10, "Burn f64 d/dmu");
                 assert_relative(dvar, expected[1], 1e-10, "Burn f64 d/dvar");

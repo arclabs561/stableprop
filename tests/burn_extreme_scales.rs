@@ -1,25 +1,20 @@
 #![cfg(feature = "burn")]
 
-use burn::backend::Autodiff;
-use burn::tensor::Tensor;
-use burn_ndarray::NdArray;
+use burn::tensor::{Device, Tensor};
 use stableprop::burn_sdp::{
     propagate_leaky_relu, propagate_relu, propagate_relu_cross_covariance, propagate_relu_full,
     Moments, MomentsFull,
 };
 
-type Ad = Autodiff<NdArray<f32>>;
-
 #[test]
 fn finite_gradients_for_representable_subnormal_variances() {
-    let device = Default::default();
+    let device = Device::flex().autodiff();
     for variance in [f32::MIN_POSITIVE, 1e-40f32] {
         let sigma = variance.sqrt();
         for mode in ["relu", "leaky", "full", "cross"] {
-            let mean =
-                Tensor::<Ad, 2>::from_data([[0.0, sigma, 9.0 * sigma, -9.0 * sigma]], &device)
-                    .require_grad();
-            let var = Tensor::<Ad, 2>::from_data([[variance; 4]], &device).require_grad();
+            let mean = Tensor::<2>::from_data([[0.0, sigma, 9.0 * sigma, -9.0 * sigma]], &device)
+                .require_grad();
+            let var = Tensor::<2>::from_data([[variance; 4]], &device).require_grad();
             let moments = Moments::new(mean.clone(), var.clone());
             let loss = match mode {
                 "relu" => {
@@ -36,7 +31,7 @@ fn finite_gradients_for_representable_subnormal_variances() {
                     out.mean.sum() + out.cov.sum()
                 }
                 "cross" => {
-                    let cross = Tensor::<Ad, 3>::from_data([[[0.5 * variance; 4]]], &device);
+                    let cross = Tensor::<3>::from_data([[[0.5 * variance; 4]]], &device);
                     propagate_relu_cross_covariance(cross, &moments).sum()
                 }
                 _ => unreachable!(),
@@ -46,7 +41,7 @@ fn finite_gradients_for_representable_subnormal_variances() {
                 mean.grad(&gradients).unwrap(),
                 var.grad(&gradients).unwrap(),
             ] {
-                let values = gradient.into_data().to_vec::<f32>().unwrap();
+                let values = gradient.into_data().try_to_vec::<f32>().unwrap();
                 assert!(
                     values.iter().all(|x| x.is_finite()),
                     "{mode}, var={variance:e}: {values:?}"
@@ -58,12 +53,12 @@ fn finite_gradients_for_representable_subnormal_variances() {
 
 #[test]
 fn distant_means_with_subnormal_variance_have_finite_tail_gradients() {
-    let device = Default::default();
+    let device = Device::flex().autodiff();
     for mode in ["relu", "leaky", "full", "cross"] {
         let mean =
-            Tensor::<Ad, 2>::from_data([[1.0, -1.0, f32::MAX, -f32::MAX]], &device).require_grad();
+            Tensor::<2>::from_data([[1.0, -1.0, f32::MAX, -f32::MAX]], &device).require_grad();
         let variance = 1e-40f32;
-        let var = Tensor::<Ad, 2>::from_data([[variance; 4]], &device).require_grad();
+        let var = Tensor::<2>::from_data([[variance; 4]], &device).require_grad();
         let moments = Moments::new(mean.clone(), var.clone());
         let (output_mean, output_var) = match mode {
             "relu" => {
@@ -81,7 +76,7 @@ fn distant_means_with_subnormal_variance_have_finite_tail_gradients() {
                 (out.mean, variance)
             }
             "cross" => {
-                let cross = Tensor::<Ad, 3>::from_data([[[0.5 * variance; 4]]], &device);
+                let cross = Tensor::<3>::from_data([[[0.5 * variance; 4]]], &device);
                 let out = propagate_relu_cross_covariance(cross, &moments).reshape([1, 4]);
                 (out.clone(), out)
             }
@@ -103,19 +98,19 @@ fn distant_means_with_subnormal_variance_have_finite_tail_gradients() {
             )
         };
         assert_eq!(
-            output_mean.clone().into_data().to_vec::<f32>().unwrap(),
+            output_mean.clone().into_data().try_to_vec::<f32>().unwrap(),
             expected_mean,
             "{mode} mean"
         );
         assert_eq!(
-            output_var.clone().into_data().to_vec::<f32>().unwrap(),
+            output_var.clone().into_data().try_to_vec::<f32>().unwrap(),
             expected_var,
             "{mode} variance"
         );
         // Scale before reduction so even the f32::MAX output gives a finite loss.
         let loss = output_mean.mul_scalar(0.25).sum() + output_var.sum();
         assert!(
-            loss.clone().into_scalar().is_finite(),
+            loss.clone().into_scalar::<f32>().is_finite(),
             "{mode}: loss overflow"
         );
         let gradients = loss.backward();
@@ -133,7 +128,7 @@ fn distant_means_with_subnormal_variance_have_finite_tail_gradients() {
             mean.grad(&gradients)
                 .unwrap()
                 .into_data()
-                .to_vec::<f32>()
+                .try_to_vec::<f32>()
                 .unwrap(),
             expected_mean_grad,
             "{mode} d/dmean"
@@ -142,7 +137,7 @@ fn distant_means_with_subnormal_variance_have_finite_tail_gradients() {
             var.grad(&gradients)
                 .unwrap()
                 .into_data()
-                .to_vec::<f32>()
+                .try_to_vec::<f32>()
                 .unwrap(),
             expected_var_grad,
             "{mode} d/dvariance"
@@ -152,14 +147,14 @@ fn distant_means_with_subnormal_variance_have_finite_tail_gradients() {
 
 #[test]
 fn mixed_scale_relu_covariance_gradients_match_centered_series() {
-    let device = Default::default();
+    let device = Device::flex().autodiff();
     let v0 = f32::from_bits(1);
     let v1 = 1e38f32;
     let cross = 1e-5f32;
     assert!((cross as f64).powi(2) < v0 as f64 * v1 as f64);
-    let cov = Tensor::<Ad, 3>::from_data([[[v0, cross], [cross, v1]]], &device).require_grad();
+    let cov = Tensor::<3>::from_data([[[v0, cross], [cross, v1]]], &device).require_grad();
     let out = propagate_relu_full(&MomentsFull::new(
-        Tensor::<Ad, 2>::zeros([1, 2], &device),
+        Tensor::<2>::zeros([1, 2], &device),
         cov.clone(),
     ));
     let gradients = out.cov.sum().backward();
@@ -167,7 +162,7 @@ fn mixed_scale_relu_covariance_gradients_match_centered_series() {
         .grad(&gradients)
         .unwrap()
         .into_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap();
 
     // At zero means, the implemented series is C/4 + C²/(4*pi*sqrt(v0*v1)).
@@ -194,10 +189,10 @@ fn mixed_scale_relu_covariance_gradients_match_centered_series() {
 
 #[test]
 fn equal_scale_relu_cross_covariance_depends_on_both_variances() {
-    let device = Default::default();
-    let cov = Tensor::<Ad, 3>::from_data([[[1.0, 0.5], [0.5, 1.0]]], &device).require_grad();
+    let device = Device::flex().autodiff();
+    let cov = Tensor::<3>::from_data([[[1.0, 0.5], [0.5, 1.0]]], &device).require_grad();
     let out = propagate_relu_full(&MomentsFull::new(
-        Tensor::<Ad, 2>::zeros([1, 2], &device),
+        Tensor::<2>::zeros([1, 2], &device),
         cov.clone(),
     ));
     // Use one off-diagonal so symmetry of the loss cannot hide an asymmetric
@@ -207,7 +202,7 @@ fn equal_scale_relu_cross_covariance_depends_on_both_variances() {
         .grad(&gradients)
         .unwrap()
         .into_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap();
     let variance_grad = -0.25 / (8.0 * std::f32::consts::PI);
     let expected = [

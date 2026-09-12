@@ -14,16 +14,12 @@
 
 use burn::module::Module;
 use burn::nn::{Linear, LinearConfig};
-use burn::tensor::backend::Backend;
 use burn::tensor::{activation, Device, Distribution, Tensor};
-use burn_ndarray::NdArray;
 
 use stableprop::burn_sdp::{
     propagate_linear, propagate_linear_full, propagate_relu, propagate_relu_full, Moments,
     MomentsFull,
 };
-
-type Nd = NdArray<f32>;
 
 const D_IN: usize = 8;
 const HIDDEN: usize = 24;
@@ -39,15 +35,15 @@ const MC_SEED: u64 = 0x4D43_4E4F;
 const REPEAT_SEED: u64 = 0x5245_5045;
 
 #[derive(Module, Debug)]
-struct Mlp<B: Backend> {
-    input: Linear<B>,
-    hidden1: Linear<B>,
-    hidden2: Linear<B>,
-    output: Linear<B>,
+struct Mlp {
+    input: Linear,
+    hidden1: Linear,
+    hidden2: Linear,
+    output: Linear,
 }
 
-impl<B: Backend> Mlp<B> {
-    fn init(device: &B::Device) -> Self {
+impl Mlp {
+    fn init(device: &Device) -> Self {
         let model = Self {
             input: LinearConfig::new(D_IN, HIDDEN).init(device),
             hidden1: LinearConfig::new(HIDDEN, HIDDEN).init(device),
@@ -62,7 +58,7 @@ impl<B: Backend> Mlp<B> {
         model
     }
 
-    fn hidden_layers(&self, depth: usize) -> impl Iterator<Item = &Linear<B>> {
+    fn hidden_layers(&self, depth: usize) -> impl Iterator<Item = &Linear> {
         assert!(DEPTHS.contains(&depth), "unsupported ReLU depth {depth}");
         [&self.input, &self.hidden1, &self.hidden2]
             .into_iter()
@@ -138,7 +134,7 @@ impl OnlineMoments {
     }
 }
 
-fn weights<B: Backend>(layer: &Linear<B>) -> (Tensor<B, 2>, Tensor<B, 1>) {
+fn weights(layer: &Linear) -> (Tensor<2>, Tensor<1>) {
     (
         layer.weight.val(),
         layer
@@ -149,7 +145,7 @@ fn weights<B: Backend>(layer: &Linear<B>) -> (Tensor<B, 2>, Tensor<B, 1>) {
     )
 }
 
-fn full_estimate(model: &Mlp<Nd>, x: Tensor<Nd, 2>, var: Tensor<Nd, 2>, depth: usize) -> Estimate {
+fn full_estimate(model: &Mlp, x: Tensor<2>, var: Tensor<2>, depth: usize) -> Estimate {
     let mut hidden = MomentsFull::from_diagonal(x, var);
     for layer in model.hidden_layers(depth) {
         let (w, b) = weights(layer);
@@ -161,7 +157,7 @@ fn full_estimate(model: &Mlp<Nd>, x: Tensor<Nd, 2>, var: Tensor<Nd, 2>, depth: u
         mean: output
             .mean
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap()
             .into_iter()
             .map(f64::from)
@@ -169,7 +165,7 @@ fn full_estimate(model: &Mlp<Nd>, x: Tensor<Nd, 2>, var: Tensor<Nd, 2>, depth: u
         cov: output
             .cov
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap()
             .into_iter()
             .map(f64::from)
@@ -177,12 +173,7 @@ fn full_estimate(model: &Mlp<Nd>, x: Tensor<Nd, 2>, var: Tensor<Nd, 2>, depth: u
     }
 }
 
-fn diagonal_estimate(
-    model: &Mlp<Nd>,
-    x: Tensor<Nd, 2>,
-    var: Tensor<Nd, 2>,
-    depth: usize,
-) -> Estimate {
+fn diagonal_estimate(model: &Mlp, x: Tensor<2>, var: Tensor<2>, depth: usize) -> Estimate {
     let mut hidden = Moments::new(x, var);
     for layer in model.hidden_layers(depth) {
         let (w, b) = weights(layer);
@@ -193,7 +184,7 @@ fn diagonal_estimate(
     let mean = output
         .mean
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .into_iter()
         .map(f64::from)
@@ -201,7 +192,7 @@ fn diagonal_estimate(
     let variance: Vec<f64> = output
         .var
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .into_iter()
         .map(f64::from)
@@ -215,7 +206,7 @@ fn diagonal_estimate(
     Estimate { mean, cov }
 }
 
-fn forward(model: &Mlp<Nd>, x: Tensor<Nd, 2>, depth: usize) -> Tensor<Nd, 2> {
+fn forward(model: &Mlp, x: Tensor<2>, depth: usize) -> Tensor<2> {
     let mut hidden = x;
     for layer in model.hidden_layers(depth) {
         hidden = activation::relu(layer.forward(hidden));
@@ -224,13 +215,13 @@ fn forward(model: &Mlp<Nd>, x: Tensor<Nd, 2>, depth: usize) -> Tensor<Nd, 2> {
     hidden.matmul(w_out) + b_out.reshape([1, D_OUT])
 }
 
-fn monte_carlo(model: &Mlp<Nd>, x: &Tensor<Nd, 2>, depth: usize, dev: &Device<Nd>) -> Estimate {
+fn monte_carlo(model: &Mlp, x: &Tensor<2>, depth: usize, dev: &Device) -> Estimate {
     let mut moments = OnlineMoments::new();
     for _ in 0..MC_SAMPLES {
-        let noise = Tensor::<Nd, 2>::random([N, D_IN], Distribution::Normal(0.0, INPUT_STD), dev);
+        let noise = Tensor::<2>::random([N, D_IN], Distribution::Normal(0.0, INPUT_STD), dev);
         let values = forward(model, x.clone() + noise, depth)
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         moments.push(&values);
     }
@@ -318,15 +309,15 @@ fn descriptive_summary(values: &[f64]) -> (f64, f64, f64) {
     (mean, min, max)
 }
 
-fn scalar_closure_control(dev: &Device<Nd>) {
+fn scalar_closure_control(dev: &Device) {
     let expected_mean = 1.0 / (2.0 * std::f64::consts::PI).sqrt();
     let expected_var = 0.5 - 1.0 / (2.0 * std::f64::consts::PI);
-    let mut moments = Moments::<Nd>::new(Tensor::zeros([1, 1], dev), Tensor::ones([1, 1], dev));
+    let mut moments = Moments::new(Tensor::zeros([1, 1], dev), Tensor::ones([1, 1], dev));
     println!("scalar ReLU closure control (exact mean {expected_mean:.6}, var {expected_var:.6}):");
     for step in 1..=3 {
         moments = propagate_relu(&moments);
-        let mean = f64::from(moments.mean.to_data().to_vec::<f32>().unwrap()[0]);
-        let variance = f64::from(moments.var.to_data().to_vec::<f32>().unwrap()[0]);
+        let mean = f64::from(moments.mean.to_data().try_to_vec::<f32>().unwrap()[0]);
+        let variance = f64::from(moments.var.to_data().try_to_vec::<f32>().unwrap()[0]);
         if step == 1 {
             assert!(
                 (mean - expected_mean).abs() < 2e-6,
@@ -342,7 +333,7 @@ fn scalar_closure_control(dev: &Device<Nd>) {
 }
 
 fn main() {
-    let dev = Device::<Nd>::default();
+    let dev = Device::flex();
     scalar_closure_control(&dev);
     println!("\ndepth sweep: {N} centers, {MC_SAMPLES} draws per Monte Carlo estimate");
     println!(
@@ -355,21 +346,21 @@ fn main() {
         .collect::<Vec<_>>();
     for &seed in &SEEDS {
         // All depths receive the same initialized prefix and the same output map.
-        <Nd as Backend>::seed(&dev, seed ^ MODEL_SEED);
-        let model = Mlp::<Nd>::init(&dev);
+        dev.seed(seed ^ MODEL_SEED);
+        let model = Mlp::init(&dev);
         // Input centers are independent of model initialization and shared across depths.
-        <Nd as Backend>::seed(&dev, seed ^ INPUT_SEED);
-        let x = Tensor::<Nd, 2>::random([N, D_IN], Distribution::Normal(0.0, 1.0), &dev);
+        dev.seed(seed ^ INPUT_SEED);
+        let x = Tensor::<2>::random([N, D_IN], Distribution::Normal(0.0, 1.0), &dev);
         for (depth_index, &depth) in DEPTHS.iter().enumerate() {
-            let variance = Tensor::<Nd, 2>::full([N, D_IN], INPUT_STD * INPUT_STD, &dev);
+            let variance = Tensor::<2>::full([N, D_IN], INPUT_STD * INPUT_STD, &dev);
             let full = full_estimate(&model, x.clone(), variance.clone(), depth);
             let diagonal = diagonal_estimate(&model, x.clone(), variance, depth);
             // Re-seeding makes the perturbation sequence identical at every depth.
-            <Nd as Backend>::seed(&dev, seed ^ MC_SEED);
+            dev.seed(seed ^ MC_SEED);
             let reference = monte_carlo(&model, &x, depth, &dev);
             // An independent, equally sized estimate shows sampling variability.
             // This stream is also shared across depths, not across input rows.
-            <Nd as Backend>::seed(&dev, seed ^ REPEAT_SEED);
+            dev.seed(seed ^ REPEAT_SEED);
             let repeat = monte_carlo(&model, &x, depth, &dev);
             let rows = [
                 ("full", error_metrics(&full, &reference)),
@@ -445,15 +436,15 @@ mod tests {
 
     #[test]
     fn sampling_seeds_do_not_change_the_initialized_network() {
-        let dev = Device::<Nd>::default();
+        let dev = Device::flex();
         let predictions = [17, 29].map(|sampling_seed| {
-            <Nd as Backend>::seed(&dev, MODEL_SEED);
-            let model = Mlp::<Nd>::init(&dev);
-            <Nd as Backend>::seed(&dev, sampling_seed);
+            dev.seed(MODEL_SEED);
+            let model = Mlp::init(&dev);
+            dev.seed(sampling_seed);
             DEPTHS.map(|depth| {
                 forward(&model, Tensor::from_data([[0.25; D_IN]], &dev), depth)
                     .into_data()
-                    .to_vec::<f32>()
+                    .try_to_vec::<f32>()
                     .unwrap()
             })
         });

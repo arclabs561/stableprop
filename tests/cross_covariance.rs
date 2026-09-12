@@ -1,38 +1,33 @@
 #![cfg(feature = "burn")]
 
-use burn::backend::Autodiff;
-use burn::tensor::Tensor;
-use burn_ndarray::NdArray;
+use burn::tensor::{Device, Tensor};
 use stableprop::burn_sdp::{
     propagate_linear_cross_covariance, propagate_relu_cross_covariance, Moments,
 };
 
-type Nd = NdArray<f32>;
-type Ad = Autodiff<Nd>;
-
 #[test]
 fn affine_transport_preserves_left_right_orientation() {
-    let device = Default::default();
-    let cross = Tensor::<Nd, 3>::from_data([[[1.0, 2.0], [3.0, 4.0]]], &device);
-    let weight = Tensor::<Nd, 2>::from_data([[2.0, -1.0], [0.5, 1.0]], &device);
+    let device = Device::flex().autodiff();
+    let cross = Tensor::<3>::from_data([[[1.0, 2.0], [3.0, 4.0]]], &device);
+    let weight = Tensor::<2>::from_data([[2.0, -1.0], [0.5, 1.0]], &device);
     let actual = propagate_linear_cross_covariance(cross, weight)
         .into_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap();
     assert_eq!(actual, vec![3.0, 1.0, 8.0, 1.0]);
 }
 
 #[test]
 fn relu_cross_covariance_has_half_gate_and_linear_tail_limits() {
-    let device = Default::default();
+    let device = Device::flex().autodiff();
     let right = Moments::new(
-        Tensor::<Nd, 2>::from_data([[0.0, 9.0, -9.0, 2.0]], &device),
-        Tensor::<Nd, 2>::from_data([[1.0, 1.0, 1.0, 0.0]], &device),
+        Tensor::<2>::from_data([[0.0, 9.0, -9.0, 2.0]], &device),
+        Tensor::<2>::from_data([[1.0, 1.0, 1.0, 0.0]], &device),
     );
-    let cross = Tensor::<Nd, 3>::from_data([[[0.2, 0.3, -0.4, 0.0]]], &device);
+    let cross = Tensor::<3>::from_data([[[0.2, 0.3, -0.4, 0.0]]], &device);
     let actual = propagate_relu_cross_covariance(cross, &right)
         .into_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap();
     for (&value, expected) in actual.iter().zip([0.1, 0.3, 0.0, 0.0]) {
         assert!((value - expected).abs() < 1e-6, "{actual:?}");
@@ -41,10 +36,10 @@ fn relu_cross_covariance_has_half_gate_and_linear_tail_limits() {
 
 #[test]
 fn cross_covariance_gradients_are_finite_at_zero_tiny_and_tail_variances() {
-    let device = Default::default();
-    let mean = Tensor::<Ad, 2>::from_data([[0.0, 1e-12, 9.0, -9.0]], &device).require_grad();
-    let var = Tensor::<Ad, 2>::from_data([[0.0, 1e-24, 1.0, 1.0]], &device).require_grad();
-    let cross = Tensor::<Ad, 3>::from_data([[[0.0, 0.5e-24, 0.1, 0.1]]], &device).require_grad();
+    let device = Device::flex().autodiff();
+    let mean = Tensor::<2>::from_data([[0.0, 1e-12, 9.0, -9.0]], &device).require_grad();
+    let var = Tensor::<2>::from_data([[0.0, 1e-24, 1.0, 1.0]], &device).require_grad();
+    let cross = Tensor::<3>::from_data([[[0.0, 0.5e-24, 0.1, 0.1]]], &device).require_grad();
     let out =
         propagate_relu_cross_covariance(cross.clone(), &Moments::new(mean.clone(), var.clone()));
     let gradients = out.sum().backward();
@@ -52,18 +47,18 @@ fn cross_covariance_gradients_are_finite_at_zero_tiny_and_tail_variances() {
         mean.grad(&gradients)
             .unwrap()
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap(),
         var.grad(&gradients)
             .unwrap()
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap(),
         cross
             .grad(&gradients)
             .unwrap()
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap(),
     ] {
         assert!(values.iter().all(|x| x.is_finite()), "{values:?}");
@@ -72,10 +67,10 @@ fn cross_covariance_gradients_are_finite_at_zero_tiny_and_tail_variances() {
 
 #[test]
 fn cross_covariance_gradient_matches_gaussian_cdf_derivative() {
-    let device = Default::default();
-    let mean = Tensor::<Ad, 2>::from_data([[0.3]], &device).require_grad();
-    let var = Tensor::<Ad, 2>::from_data([[0.49]], &device).require_grad();
-    let cross = Tensor::<Ad, 3>::from_data([[[0.2]]], &device).require_grad();
+    let device = Device::flex().autodiff();
+    let mean = Tensor::<2>::from_data([[0.3]], &device).require_grad();
+    let var = Tensor::<2>::from_data([[0.49]], &device).require_grad();
+    let cross = Tensor::<3>::from_data([[[0.2]]], &device).require_grad();
     let gradients =
         propagate_relu_cross_covariance(cross, &Moments::new(mean.clone(), var.clone()))
             .sum()
@@ -89,13 +84,13 @@ fn cross_covariance_gradient_matches_gaussian_cdf_derivative() {
         .grad(&gradients)
         .unwrap()
         .into_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()[0] as f64;
     let actual_var = var
         .grad(&gradients)
         .unwrap()
         .into_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()[0] as f64;
     assert!((actual_mean - expected_mean).abs() < 1e-6);
     assert!((actual_var - expected_var).abs() < 1e-6);
@@ -103,15 +98,15 @@ fn cross_covariance_gradient_matches_gaussian_cdf_derivative() {
 
 #[test]
 fn relu_transport_matches_joint_gaussian_monte_carlo() {
-    let device = Default::default();
+    let device = Device::flex().autodiff();
     let right = Moments::new(
-        Tensor::<Nd, 2>::from_data([[0.2, -0.3]], &device),
-        Tensor::<Nd, 2>::from_data([[0.65, 0.90]], &device),
+        Tensor::<2>::from_data([[0.2, -0.3]], &device),
+        Tensor::<2>::from_data([[0.65, 0.90]], &device),
     );
-    let cross = Tensor::<Nd, 3>::from_data([[[0.58, 0.57], [-0.75, 0.75]]], &device);
+    let cross = Tensor::<3>::from_data([[[0.58, 0.57], [-0.75, 0.75]]], &device);
     let analytic = propagate_relu_cross_covariance(cross, &right)
         .into_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap();
 
     let mut state = 0xC205_5C0Fu64;
@@ -153,8 +148,8 @@ fn relu_transport_matches_joint_gaussian_monte_carlo() {
 #[test]
 #[should_panic(expected = "right features must match weight inputs")]
 fn affine_transport_rejects_transposed_weight_layout() {
-    let device = Default::default();
-    let cross = Tensor::<Nd, 3>::zeros([2, 3, 4], &device);
-    let weight = Tensor::<Nd, 2>::zeros([5, 4], &device);
+    let device = Device::flex().autodiff();
+    let cross = Tensor::<3>::zeros([2, 3, 4], &device);
+    let weight = Tensor::<2>::zeros([5, 4], &device);
     let _ = propagate_linear_cross_covariance(cross, weight);
 }

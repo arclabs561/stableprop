@@ -14,19 +14,14 @@
 //! Run on CPU: `cargo run --release --example robust_training --features burn`
 //! Run on macOS Metal: `cargo run --release --example robust_training --features metal -- --metal`
 
-use burn::backend::Autodiff;
 use burn::module::Module;
 use burn::nn::loss::{MseLoss, Reduction};
 use burn::nn::{Linear, LinearConfig};
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
-use burn::tensor::backend::{AutodiffBackend, Backend};
+use burn::optim::{AdamConfig, GradientsParams};
 use burn::tensor::{activation, Device, Distribution, Tensor, TensorData};
-use burn_ndarray::NdArray;
 use std::time::Instant;
 
 use stableprop::burn_sdp::{propagate_linear, propagate_relu, Moments};
-
-type Ad = Autodiff<NdArray<f32>>;
 
 const D_IN: usize = 6;
 const HIDDEN: usize = 64;
@@ -36,13 +31,13 @@ const TRAIN_STD: f64 = 0.2;
 const TEST_STD: f64 = 0.3;
 
 #[derive(Module, Debug)]
-struct Mlp<B: Backend> {
-    lin1: Linear<B>,
-    lin2: Linear<B>,
+struct Mlp {
+    lin1: Linear,
+    lin2: Linear,
 }
 
-impl<B: Backend> Mlp<B> {
-    fn init(device: &B::Device) -> Self {
+impl Mlp {
+    fn init(device: &Device) -> Self {
         let model = Self {
             lin1: LinearConfig::new(D_IN, HIDDEN).init(device),
             lin2: LinearConfig::new(HIDDEN, 1).init(device),
@@ -56,14 +51,14 @@ impl<B: Backend> Mlp<B> {
         }
         model
     }
-    fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+    fn forward(&self, x: Tensor<2>) -> Tensor<2> {
         self.lin2.forward(activation::relu(self.lin1.forward(x)))
     }
     /// Point prediction and propagated variance under input noise `std`.
     /// The first output is not the mean over perturbed inputs.
-    fn forward_with_var(&self, x: Tensor<B, 2>, std: f64) -> (Tensor<B, 2>, Tensor<B, 2>) {
+    fn forward_with_var(&self, x: Tensor<2>, std: f64) -> (Tensor<2>, Tensor<2>) {
         let [n, d] = x.dims();
-        let var0 = Tensor::<B, 2>::full([n, d], std * std, &x.device());
+        let var0 = Tensor::<2>::full([n, d], std * std, &x.device());
         let w1 = self.lin1.weight.val();
         let b1 = self.lin1.bias.as_ref().map(|p| p.val());
         let w2 = self.lin2.weight.val();
@@ -79,22 +74,22 @@ fn target(x: &[f32]) -> f32 {
     (s * 0.6).sin() + 0.5 * x[0] * x[1] - 0.3 * x[2] * x[2]
 }
 
-fn run<B: AutodiffBackend>(dev: B::Device, backend: &str) {
-    B::seed(&dev, 0xA0B5_7001);
-    let make = |n: usize| -> (Tensor<B, 2>, Tensor<B, 2>) {
-        let xt = Tensor::<B, 2>::random([n, D_IN], Distribution::Normal(0.0, 1.0), &dev);
-        let xv = xt.to_data().to_vec::<f32>().unwrap();
+fn run(dev: &Device, backend: &str) {
+    dev.seed(0xA0B5_7001);
+    let make = |n: usize| -> (Tensor<2>, Tensor<2>) {
+        let xt = Tensor::<2>::random([n, D_IN], Distribution::Normal(0.0, 1.0), dev);
+        let xv = xt.to_data().try_to_vec::<f32>().unwrap();
         let yv: Vec<f32> = (0..n)
             .map(|i| target(&xv[i * D_IN..(i + 1) * D_IN]))
             .collect();
-        (xt, Tensor::from_data(TensorData::new(yv, [n, 1]), &dev))
+        (xt, Tensor::from_data(TensorData::new(yv, [n, 1]), dev))
     };
     let (x_tr, y_tr) = make(N_TRAIN);
     let (x_te, y_te) = make(N_TEST);
 
     // Same starting weights for both nets: only the loss differs.
-    let init = Mlp::<B>::init(&dev);
-    let train = |mut model: Mlp<B>, lambda: f64| -> Mlp<B> {
+    let init = Mlp::init(dev);
+    let train = |mut model: Mlp, lambda: f64| -> Mlp {
         let mut optim = AdamConfig::new().init();
         for _ in 0..800 {
             let (pred, var) = model.forward_with_var(x_tr.clone(), TRAIN_STD);
@@ -107,29 +102,29 @@ fn run<B: AutodiffBackend>(dev: B::Device, backend: &str) {
         }
         model
     };
-    B::sync(&dev).expect("training backend synchronization failed");
+    dev.sync().expect("training backend synchronization failed");
     let started = Instant::now();
     let plain = train(init.clone(), 0.0);
     let robust = train(init, 3.0);
-    B::sync(&dev).expect("training backend synchronization failed");
+    dev.sync().expect("training backend synchronization failed");
     let elapsed = started.elapsed();
 
     // Same test-noise draws for both nets.
     let clean = vec![x_te.clone()];
-    let noisy: Vec<Tensor<B, 2>> = (0..20)
+    let noisy: Vec<Tensor<2>> = (0..20)
         .map(|_| {
             x_te.clone()
-                + Tensor::<B, 2>::random([N_TEST, D_IN], Distribution::Normal(0.0, TEST_STD), &dev)
+                + Tensor::<2>::random([N_TEST, D_IN], Distribution::Normal(0.0, TEST_STD), dev)
         })
         .collect();
-    let y = y_te.into_data().to_vec::<f32>().unwrap();
-    let rmse = |model: &Mlp<B>, inputs: &[Tensor<B, 2>]| -> f64 {
+    let y = y_te.into_data().try_to_vec::<f32>().unwrap();
+    let rmse = |model: &Mlp, inputs: &[Tensor<2>]| -> f64 {
         let mut total = 0.0;
         for x in inputs {
             let p = model
                 .forward(x.clone())
                 .into_data()
-                .to_vec::<f32>()
+                .try_to_vec::<f32>()
                 .unwrap();
             total += (0..N_TEST)
                 .map(|i| (p[i] - y[i]).powi(2) as f64)
@@ -163,8 +158,8 @@ fn run<B: AutodiffBackend>(dev: B::Device, backend: &str) {
     println!("Different backend RNG streams can produce different trained metrics.");
 }
 
-fn run_ndarray() {
-    run::<Ad>(Device::<Ad>::default(), "NdArray CPU");
+fn run_cpu() {
+    run(&Device::flex().autodiff(), "CPU");
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -174,12 +169,11 @@ fn run_metal() {
         init_setup, RuntimeOptions, WgpuDevice,
     };
 
-    type MetalAd = Autodiff<burn::backend::Metal<f32>>;
-    let device = WgpuDevice::DefaultDevice;
-    let setup = init_setup::<Metal>(&device, RuntimeOptions::default());
+    let setup = init_setup::<Metal>(&WgpuDevice::DefaultDevice, RuntimeOptions::default());
     assert_eq!(setup.backend, Metal::backend());
     println!("Device: {}", setup.adapter.get_info().name);
-    run::<MetalAd>(device, "Metal");
+    let device = Device::metal(burn::tensor::DeviceKind::DefaultDevice).autodiff();
+    run(&device, "Metal");
 }
 
 #[cfg(not(all(feature = "metal", target_os = "macos")))]
@@ -212,7 +206,7 @@ fn main() -> Result<(), String> {
         #[cfg(not(all(feature = "metal", target_os = "macos")))]
         run_metal()?;
     } else {
-        run_ndarray();
+        run_cpu();
     }
 
     Ok(())
@@ -224,12 +218,12 @@ mod tests {
 
     #[test]
     fn cloned_baseline_has_identical_forward_predictions() {
-        let device = Device::<Ad>::default();
-        <Ad as Backend>::seed(&device, 0xA0B5_7E57);
-        let baseline = Mlp::<Ad>::init(&device);
+        let device = Device::flex().autodiff();
+        device.seed(0xA0B5_7E57);
+        let baseline = Mlp::init(&device);
         let left = baseline.clone();
         let right = baseline.clone();
-        let probe = Tensor::<Ad, 2>::from_data(
+        let probe = Tensor::<2>::from_data(
             TensorData::new(
                 vec![
                     -1.0, -0.5, 0.25, 0.75, 1.25, 1.5, 0.4, -0.8, 1.2, -1.6, 2.0, -2.4,
@@ -242,9 +236,13 @@ mod tests {
         let left = left
             .forward(probe.clone())
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
-        let right = right.forward(probe).into_data().to_vec::<f32>().unwrap();
+        let right = right
+            .forward(probe)
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
         assert_eq!(
             left, right,
             "cloned baselines must share initialized weights"

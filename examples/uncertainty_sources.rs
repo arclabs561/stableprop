@@ -9,11 +9,8 @@
 //! Run: `cargo run --release --example uncertainty_sources --features burn`
 
 use burn::tensor::{Device, Tensor, TensorData};
-use burn_ndarray::NdArray;
 
 use stableprop::burn_sdp::{propagate_linear_bayes, Moments};
-
-type Nd = NdArray<f32>;
 
 const D: usize = 3;
 const MC_SAMPLES: usize = 100_000;
@@ -57,25 +54,25 @@ fn monte_carlo(
 }
 
 fn propagated_variance(
-    dev: &Device<Nd>,
+    dev: &Device,
     x_mean: &[f64; D],
     x_var: &[f64; D],
     beta_mean: &[f64; D],
     beta_var: &[f64; D],
 ) -> (f64, f64) {
     let to_f32 = |xs: &[f64; D]| xs.iter().map(|&x| x as f32).collect();
-    let x_mean = Tensor::<Nd, 2>::from_data(TensorData::new(to_f32(x_mean), [1, D]), dev);
-    let x_var = Tensor::<Nd, 2>::from_data(TensorData::new(to_f32(x_var), [1, D]), dev);
-    let beta_mean = Tensor::<Nd, 2>::from_data(TensorData::new(to_f32(beta_mean), [D, 1]), dev);
-    let beta_var = Tensor::<Nd, 2>::from_data(TensorData::new(to_f32(beta_var), [D, 1]), dev);
+    let x_mean = Tensor::<2>::from_data(TensorData::new(to_f32(x_mean), [1, D]), dev);
+    let x_var = Tensor::<2>::from_data(TensorData::new(to_f32(x_var), [1, D]), dev);
+    let beta_mean = Tensor::<2>::from_data(TensorData::new(to_f32(beta_mean), [D, 1]), dev);
+    let beta_var = Tensor::<2>::from_data(TensorData::new(to_f32(beta_var), [D, 1]), dev);
     let out = propagate_linear_bayes(&Moments::new(x_mean, x_var), beta_mean, beta_var, None);
-    let mean = out.mean.to_data().to_vec::<f32>().unwrap()[0] as f64;
-    let variance = out.var.to_data().to_vec::<f32>().unwrap()[0] as f64;
+    let mean = out.mean.to_data().try_to_vec::<f32>().unwrap()[0] as f64;
+    let variance = out.var.to_data().try_to_vec::<f32>().unwrap()[0] as f64;
     (mean, variance)
 }
 
 fn main() {
-    let dev = Device::<Nd>::default();
+    let dev = Device::flex();
     let x_mean = [1.25, -0.75, 0.50];
     let x_var = [0.16, 0.09, 0.04];
     let beta_mean = [0.80, -1.10, 0.50];

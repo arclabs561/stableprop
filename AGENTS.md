@@ -37,8 +37,10 @@ Carlo regression tests; a shared backend RNG can couple parallel tests.
 Materialize Burn parameters before cloning a shared experimental baseline or
 changing the RNG seed. Cloning uninitialized parameters leaves each clone to
 draw its own weights on first use.
-Specify tensor dtypes explicitly in tests that mix precisions. Burn's default
-float dtype is shared by device, independently of the NdArray backend alias.
+Specify tensor dtypes explicitly in tests that mix precisions. Burn selects the
+default float dtype through the device; pass `DType::F64` explicitly when needed.
+The optional Burn development API requires Rust 1.95; the vector API remains at
+Rust 1.80.
 `just property-test` runs propagation, calibration-rank and simulator-oracle
 properties with 4,096 cases each; supply a count to override it.
 When changing the reference generator or its frozen fixtures, run
@@ -46,7 +48,7 @@ When changing the reference generator or its frozen fixtures, run
 
 On macOS, run `just metal-check` to compile the GPU tests and training example, and
 `just metal-test` to compare values and gradients on a Metal device. CI only
-compiles the GPU tests; its numerical tests use NdArray. `just metal-train`
+compiles the GPU tests; its CPU tensor tests use `Device::flex()`. `just metal-train`
 runs the training example on Metal.
 
 GPU timings require warmup and synchronization. Keep host transfers outside

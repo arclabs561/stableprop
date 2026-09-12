@@ -9,7 +9,7 @@ just bench-burn
 
 `bench` measures the `f64` vector API on square and rectangular affine maps,
 plus ReLU as a separate workload. `bench-burn` measures diagonal and full
-affine and ReLU propagation using Burn's `f32` NdArray backend. ReLU cases
+affine and ReLU propagation using Burn's `f32` CPU Flex runtime. ReLU cases
 separate central inputs from negative tails (`mean / std = -7`), where
 accurate small moments need different numerical formulas. Their precision and
 input validation differ; these suites are not a direct backend comparison.

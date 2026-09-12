@@ -1,9 +1,9 @@
 # Examples
 
-Run these commands from the repository root with Rust 1.92 or newer; Cargo
+Run these commands from the repository root with Rust 1.95 or newer; Cargo
 also builds the Burn development dependencies for `basic`. That example
 uses the dependency-free vector API; the other examples default to Burn's CPU
-NdArray backend. `robust_training` also accepts `--metal` on macOS with the
+Flex backend. `robust_training` also accepts `--metal` on macOS with the
 `metal` feature. Training and sampling use fixed seeds. Floating-point results may
 still differ across backend or dependency versions.
 
@@ -245,9 +245,10 @@ coverage and width differences use independent fits and data splits as the
 units for standard errors. The [method guide](../docs/methods.md#uncertainty-sources-and-downstream-methods)
 distinguishes a supplied posterior from supplied measurement noise.
 
-In the 20-fit CPU run at 90% nominal coverage, propagated-scale and constant
-intervals covered 89.5% and 89.6% of test targets. Propagated-scale mean width
-was 0.182 lower (paired standard error 0.034): 2.770 versus 2.952. This result depends
+In a 20-fit Flex run with the pinned Burn revision at 90% nominal coverage,
+propagated-scale and constant intervals covered 89.5% and 89.6% of test targets.
+Propagated-scale mean width was 0.182 lower (paired standard error 0.034):
+2.770 versus 2.952. This result depends
 on the specified simulator and noise law; it does not establish performance
 with estimated sensor covariances or a misspecified state model.
 
@@ -369,7 +370,7 @@ whole fits, not individual targets or candidates. Combine it with `--quick`
 for three fits at 80 and 320 epochs. The checkpoints are fixed in advance;
 this experiment does not select a training duration.
 
-In a 20-fit run with the stated seeds, clean RMSE fell from 0.608 to 0.139
+In a 20-fit Burn 0.21 NdArray run with the stated seeds, clean RMSE fell from 0.608 to 0.139
 between checkpoints. At the correct covariance, full K3 loss MAE against
 surrogate Monte Carlo was similar (0.0117 and 0.0135), while mean simulator
 regret fell from 0.1653 to 0.0029. Accurate surrogate moments were insufficient

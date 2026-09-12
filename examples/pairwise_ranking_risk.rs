@@ -13,11 +13,9 @@
 //! descriptive workflow check.
 
 use burn::tensor::{Device, Tensor, TensorData};
-use burn_ndarray::NdArray;
 use stableprop::burn_sdp::{propagate_linear_full, propagate_relu_full, MomentsFull};
 use std::time::Instant;
 
-type Nd = NdArray<f32>;
 const D: usize = 2;
 const H: usize = 4;
 const Q: usize = 96;
@@ -95,22 +93,22 @@ fn stream_seed(role: u32, replicate: usize) -> u64 {
     ((role as u64) << 32) | replicate as u64
 }
 
-fn tensor2(data: Vec<f32>, shape: [usize; 2], dev: &Device<Nd>) -> Tensor<Nd, 2> {
+fn tensor2(data: Vec<f32>, shape: [usize; 2], dev: &Device) -> Tensor<2> {
     Tensor::from_data(TensorData::new(data, shape), dev)
 }
-fn tensor1(data: Vec<f32>, dev: &Device<Nd>) -> Tensor<Nd, 1> {
+fn tensor1(data: Vec<f32>, dev: &Device) -> Tensor<1> {
     let n = data.len();
     Tensor::from_data(TensorData::new(data, [n]), dev)
 }
-fn cdf(z: Vec<f32>, dev: &Device<Nd>) -> Vec<f64> {
+fn cdf(z: Vec<f32>, dev: &Device) -> Vec<f64> {
     let n = z.len();
-    Tensor::<Nd, 1>::from_data(TensorData::new(z, [n]), dev)
+    Tensor::<1>::from_data(TensorData::new(z, [n]), dev)
         .mul_scalar(std::f64::consts::FRAC_1_SQRT_2)
         .erf()
         .add_scalar(1.0)
         .mul_scalar(0.5)
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .into_iter()
         .map(f64::from)
@@ -174,7 +172,7 @@ fn sampled_rates(query: &[[f64; D]], relu: bool, draws: usize, seed: u64) -> Vec
 fn moment_probabilities(
     query: &[[f64; D]],
     relu: bool,
-    dev: &Device<Nd>,
+    dev: &Device,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
     let x = tensor2(
         query
@@ -187,7 +185,7 @@ fn moment_probabilities(
     let w = tensor2(W.iter().flatten().map(|&x| x as f32).collect(), [D, H], dev);
     let b = tensor1(B.iter().map(|&x| x as f32).collect(), dev);
     let e = tensor2(E.iter().flatten().map(|&x| x as f32).collect(), [H, C], dev);
-    let input = MomentsFull::from_diagonal(x, Tensor::<Nd, 2>::full([Q, D], STD * STD, dev));
+    let input = MomentsFull::from_diagonal(x, Tensor::<2>::full([Q, D], STD * STD, dev));
     let hidden = propagate_linear_full(&input, w, Some(b));
     let output = if relu {
         propagate_linear_full(&propagate_relu_full(&hidden), e, None)
@@ -197,7 +195,7 @@ fn moment_probabilities(
     let mean: Vec<f64> = output
         .mean
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .into_iter()
         .map(f64::from)
@@ -205,7 +203,7 @@ fn moment_probabilities(
     let cov: Vec<f64> = output
         .cov
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .into_iter()
         .map(f64::from)
@@ -258,7 +256,7 @@ fn margin_probability(
     cov: &[f64],
     winners: &[usize],
     drop_cross: bool,
-    dev: &Device<Nd>,
+    dev: &Device,
 ) -> Vec<f64> {
     let mut out = vec![0.0; Q];
     let mut ix = Vec::new();
@@ -303,23 +301,30 @@ struct ExactReluMarginControl {
     gaussian_proxy: f64,
 }
 
-fn exact_relu_margin_control(dev: &Device<Nd>) -> ExactReluMarginControl {
+fn exact_relu_margin_control(dev: &Device) -> ExactReluMarginControl {
     let bias = 0.1f64;
     let input = MomentsFull::from_diagonal(
         tensor2(vec![0.0], [1, 1], dev),
-        Tensor::<Nd, 2>::full([1, 1], 1.0, dev),
+        Tensor::<2>::full([1, 1], 1.0, dev),
     );
     let rectified = propagate_relu_full(&input);
-    let relu_mean = f64::from(rectified.mean.clone().to_data().to_vec::<f32>().unwrap()[0]);
-    let relu_variance = f64::from(rectified.cov.clone().to_data().to_vec::<f32>().unwrap()[0]);
+    let relu_mean = f64::from(
+        rectified
+            .mean
+            .clone()
+            .to_data()
+            .try_to_vec::<f32>()
+            .unwrap()[0],
+    );
+    let relu_variance = f64::from(rectified.cov.clone().to_data().try_to_vec::<f32>().unwrap()[0]);
     // Scores are (bias, ReLU(X)), so the point winner is candidate zero.
     let scores = propagate_linear_full(
         &rectified,
         tensor2(vec![0.0, 1.0], [1, 2], dev),
         Some(tensor1(vec![bias as f32, 0.0], dev)),
     );
-    let mean = scores.mean.to_data().to_vec::<f32>().unwrap();
-    let covariance = scores.cov.to_data().to_vec::<f32>().unwrap();
+    let mean = scores.mean.to_data().try_to_vec::<f32>().unwrap();
+    let covariance = scores.cov.to_data().try_to_vec::<f32>().unwrap();
     let margin_mean = f64::from(mean[0] - mean[1]);
     let margin_variance = f64::from(covariance[0] + covariance[3] - covariance[1] - covariance[2]);
     ExactReluMarginControl {
@@ -333,7 +338,7 @@ fn exact_relu_margin_control(dev: &Device<Nd>) -> ExactReluMarginControl {
     }
 }
 
-fn report_exact_relu_margin_control(dev: &Device<Nd>) {
+fn report_exact_relu_margin_control(dev: &Device) {
     let control = exact_relu_margin_control(dev);
     let gap = control.gaussian_proxy - control.exact_flip;
     println!("ReLU margin with exact moments:");
@@ -350,12 +355,7 @@ fn report_exact_relu_margin_control(dev: &Device<Nd>) {
     );
 }
 
-fn local_probability(
-    query: &[[f64; D]],
-    winners: &[usize],
-    relu: bool,
-    dev: &Device<Nd>,
-) -> Vec<f64> {
+fn local_probability(query: &[[f64; D]], winners: &[usize], relu: bool, dev: &Device) -> Vec<f64> {
     let mut out = vec![0.0; Q];
     let mut ix = Vec::new();
     let mut z = Vec::with_capacity(Q);
@@ -478,7 +478,7 @@ fn moment_probabilities_model(
     query: &[[f64; D]],
     relu: bool,
     std: f64,
-    dev: &Device<Nd>,
+    dev: &Device,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
     let x = tensor2(
         query
@@ -499,7 +499,7 @@ fn moment_probabilities_model(
         [H, C],
         dev,
     );
-    let input = MomentsFull::from_diagonal(x, Tensor::<Nd, 2>::full([Q, D], std * std, dev));
+    let input = MomentsFull::from_diagonal(x, Tensor::<2>::full([Q, D], std * std, dev));
     let hidden = propagate_linear_full(&input, w, Some(b));
     let output = if relu {
         propagate_linear_full(&propagate_relu_full(&hidden), e, None)
@@ -509,7 +509,7 @@ fn moment_probabilities_model(
     let mean: Vec<f64> = output
         .mean
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .into_iter()
         .map(f64::from)
@@ -517,7 +517,7 @@ fn moment_probabilities_model(
     let cov: Vec<f64> = output
         .cov
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .into_iter()
         .map(f64::from)
@@ -548,7 +548,7 @@ fn local_probability_model(
     winners: &[usize],
     relu: bool,
     std: f64,
-    dev: &Device<Nd>,
+    dev: &Device,
 ) -> Vec<f64> {
     let mut out = vec![0.0; Q];
     let mut ix = Vec::new();
@@ -793,7 +793,7 @@ fn report_regime_policy_contrasts(rows: &[Rows; 5], std: f64, uncertainty: bool)
     }
 }
 
-fn generalization_study(config: Config, models: usize, quick: bool, dev: &Device<Nd>) {
+fn generalization_study(config: Config, models: usize, quick: bool, dev: &Device) {
     let started = Instant::now();
     let mut rows: [Rows; 5] = std::array::from_fn(|_| Rows::default());
     let mut rows_by_regime: Vec<[Rows; 5]> = (0..GENERALIZE_STDS.len())
@@ -965,7 +965,7 @@ fn main() {
     }
     assert!(!quick || generalize, "--quick requires --generalize");
     let config = if study { STUDY } else { DEFAULT };
-    let dev = Device::<Nd>::default();
+    let dev = Device::flex();
     report_exact_relu_margin_control(&dev);
     if generalize {
         assert!(
@@ -1075,7 +1075,7 @@ fn main() {
 mod tests {
     use super::{
         deferred_count, deterministic_flip_probability, exact_relu_margin_control,
-        margin_probability, Device, Nd, DEFER, Q,
+        margin_probability, Device, DEFER, Q,
     };
 
     #[test]
@@ -1094,7 +1094,7 @@ mod tests {
 
     #[test]
     fn exact_relu_margin_control_isolates_non_gaussian_tail_shape() {
-        let dev = Device::<Nd>::default();
+        let dev = Device::flex();
         let control = exact_relu_margin_control(&dev);
         let expected_relu_mean = 1.0 / (2.0 * std::f64::consts::PI).sqrt();
         let expected_relu_variance = 0.5 - 1.0 / (2.0 * std::f64::consts::PI);

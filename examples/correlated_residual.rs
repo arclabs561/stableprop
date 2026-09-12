@@ -9,15 +9,12 @@
 
 use burn::tensor::linalg;
 use burn::tensor::{Device, Tensor, TensorData};
-use burn_ndarray::NdArray;
 
 use stableprop::burn_sdp::{
     propagate_linear, propagate_linear_cross_covariance, propagate_relu,
     propagate_relu_cross_covariance, propagate_residual_add, propagate_residual_add_correlated,
     Moments, MomentsFull,
 };
-
-type Nd = NdArray<f32>;
 
 const D_IN: usize = 2;
 const D_OUT: usize = 2;
@@ -67,7 +64,7 @@ fn monte_carlo(
 }
 
 fn main() {
-    let dev = Device::<Nd>::default();
+    let dev = Device::flex();
     let x_mean = [0.2, -0.1];
     let x_std = [0.5, 0.4];
     let weight = [[1.0], [-0.75]];
@@ -75,7 +72,7 @@ fn main() {
     let value = [[0.8, 0.6]];
 
     let tensor2 =
-        |values: Vec<f32>, shape| Tensor::<Nd, 2>::from_data(TensorData::new(values, shape), &dev);
+        |values: Vec<f32>, shape| Tensor::<2>::from_data(TensorData::new(values, shape), &dev);
     let mean = tensor2(x_mean.map(|x| x as f32).to_vec(), [1, D_IN]);
     let var = tensor2(x_std.map(|x| (x * x) as f32).to_vec(), [1, D_IN]);
     let w = tensor2(
@@ -86,7 +83,7 @@ fn main() {
         value.into_iter().flatten().map(|x| x as f32).collect(),
         [1, D_OUT],
     );
-    let b = Tensor::<Nd, 1>::from_data([bias as f32], &dev);
+    let b = Tensor::<1>::from_data([bias as f32], &dev);
 
     let skip = Moments::new(mean.clone(), var.clone());
     let hidden_pre = propagate_linear(&skip, w.clone(), Some(b));
@@ -99,12 +96,12 @@ fn main() {
     let c_x_hidden_pre = propagate_linear_cross_covariance(cxx, w);
     let c_x_hidden = propagate_relu_cross_covariance(c_x_hidden_pre, &hidden_pre);
     let c_x_branch = propagate_linear_cross_covariance(c_x_hidden, v);
-    let skip_branch_cov: Tensor<Nd, 2> = linalg::diag(c_x_branch);
+    let skip_branch_cov: Tensor<2> = linalg::diag(c_x_branch);
     let correlated = propagate_residual_add_correlated(&skip, &branch, skip_branch_cov);
 
-    let propagated_mean = correlated.mean.to_data().to_vec::<f32>().unwrap();
-    let propagated_var = correlated.var.to_data().to_vec::<f32>().unwrap();
-    let independent_var = independent.var.to_data().to_vec::<f32>().unwrap();
+    let propagated_mean = correlated.mean.to_data().try_to_vec::<f32>().unwrap();
+    let propagated_var = correlated.var.to_data().try_to_vec::<f32>().unwrap();
+    let independent_var = independent.var.to_data().try_to_vec::<f32>().unwrap();
     let (mc_mean, mc_var) = monte_carlo(x_mean, x_std, weight, bias, value);
 
     println!("residual output moments vs {MC_SAMPLES}-sample seeded Monte Carlo:");

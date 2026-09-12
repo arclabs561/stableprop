@@ -3,18 +3,12 @@
 
 //! Local Apple-GPU parity and timing checks. They are deliberately ignored:
 //! the runtime checks require an Apple GPU, while CI only compiles this harness.
+//! Burn 0.22 chooses WGSL/SPIR-V/MSL at runtime, so this suite selects the real
+//! `Device::metal` path and compares it with Flex rather than naming compiler aliases.
 
-use std::{env, hint::black_box, sync::OnceLock, time::Instant};
+use std::{env, hint::black_box, time::Instant};
 
-use burn::{
-    backend::wgpu::{
-        graphics::{GraphicsApi, Metal as MetalApi},
-        init_setup, CubeBackend, RuntimeOptions, WgpuDevice, WgpuRuntime,
-    },
-    backend::{Autodiff, Metal as MetalBackend, Wgpu},
-    tensor::{backend::Backend, Device, Tensor, TensorData},
-};
-use burn_ndarray::NdArray;
+use burn::tensor::{Device, DeviceKind, Tensor, TensorData};
 use stableprop::burn_sdp::{
     propagate_conv2d, propagate_leaky_relu, propagate_linear, propagate_linear_bayes,
     propagate_linear_cauchy, propagate_linear_cross_covariance, propagate_linear_full,
@@ -22,32 +16,8 @@ use stableprop::burn_sdp::{
     propagate_relu_full, propagate_residual_add_correlated, Cauchy, Moments, MomentsFull,
 };
 
-type Cpu = NdArray<f32>;
-type GpuDefault = Wgpu<f32>;
-type GpuMsl = MetalBackend<f32>;
-type GpuEager = CubeBackend<WgpuRuntime, f32, i32, u8>;
-
-fn metal_device() -> WgpuDevice {
-    static DEVICE: OnceLock<WgpuDevice> = OnceLock::new();
-    DEVICE
-        .get_or_init(|| {
-            let device = WgpuDevice::DefaultDevice;
-            let setup = init_setup::<MetalApi>(&device, RuntimeOptions::default());
-            assert_eq!(
-                setup.backend,
-                MetalApi::backend(),
-                "Metal setup must not fall back to CPU"
-            );
-            eprintln!(
-                "Metal adapter={:?}; backend={:?}; Wgpu default runtime={}; Metal alias runtime={}",
-                setup.adapter.get_info(),
-                setup.backend,
-                GpuDefault::name(&device),
-                GpuMsl::name(&device),
-            );
-            device
-        })
-        .clone()
+fn metal_device() -> Device {
+    Device::metal(DeviceKind::DefaultDevice)
 }
 
 fn close(actual: &[f32], expected: &[f32], label: &str) {
@@ -61,8 +31,8 @@ fn close(actual: &[f32], expected: &[f32], label: &str) {
     }
 }
 
-fn data<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Vec<f32> {
-    tensor.into_data().to_vec::<f32>().unwrap()
+fn data<const D: usize>(tensor: Tensor<D>) -> Vec<f32> {
+    tensor.into_data().try_to_vec::<f32>().unwrap()
 }
 
 #[derive(Clone, Copy)]
@@ -115,11 +85,11 @@ fn relative(actual: f32, expected: f32, label: &str) {
     );
 }
 
-fn tail_values<B: Backend>(device: &B::Device, alpha: f32, variance: f32) -> [f32; 5] {
+fn tail_values(device: &Device, alpha: f32, variance: f32) -> [f32; 5] {
     let mean = alpha * variance.sqrt();
     let moments = Moments::new(
-        Tensor::<B, 2>::from_data([[mean]], device),
-        Tensor::<B, 2>::from_data([[variance]], device),
+        Tensor::<2>::from_data([[mean]], device),
+        Tensor::<2>::from_data([[variance]], device),
     );
     let diagonal = propagate_relu(&moments);
     let full = propagate_relu_full(&MomentsFull::from_diagonal(
@@ -128,10 +98,8 @@ fn tail_values<B: Backend>(device: &B::Device, alpha: f32, variance: f32) -> [f3
     ));
     let full_var = data(full.variance())[0];
     let full_mean = data(full.mean)[0];
-    let cross = propagate_relu_cross_covariance(
-        Tensor::<B, 3>::from_data([[[variance]]], device),
-        &moments,
-    );
+    let cross =
+        propagate_relu_cross_covariance(Tensor::<3>::from_data([[[variance]]], device), &moments);
     [
         data(diagonal.mean)[0],
         data(diagonal.var)[0],
@@ -141,15 +109,10 @@ fn tail_values<B: Backend>(device: &B::Device, alpha: f32, variance: f32) -> [f3
     ]
 }
 
-fn tail_gradients<B: Backend>(
-    device: &B::Device,
-    alpha: f32,
-    variance: f32,
-    mean_loss: bool,
-) -> (f32, f32) {
-    let mean =
-        Tensor::<Autodiff<B>, 2>::from_data([[alpha * variance.sqrt()]], device).require_grad();
-    let var = Tensor::<Autodiff<B>, 2>::from_data([[variance]], device).require_grad();
+fn tail_gradients(device: &Device, alpha: f32, variance: f32, mean_loss: bool) -> (f32, f32) {
+    let device = device.clone().autodiff();
+    let mean = Tensor::<2>::from_data([[alpha * variance.sqrt()]], &device).require_grad();
+    let var = Tensor::<2>::from_data([[variance]], &device).require_grad();
     let out = propagate_relu(&Moments::new(mean.clone(), var.clone()));
     let loss = if mean_loss {
         out.mean.sum()
@@ -163,11 +126,11 @@ fn tail_gradients<B: Backend>(
     )
 }
 
-fn assert_tail_values<B: Backend>(device: &B::Device, label: &str) {
+fn assert_tail_values(device: &Device, label: &str) {
     for tail in TAILS {
         for variance in [2f32.powi(-40), 1.0, 2f32.powi(40)] {
             let sigma = variance.sqrt();
-            let actual = tail_values::<B>(device, tail.alpha, variance);
+            let actual = tail_values(device, tail.alpha, variance);
             let expected_mean = sigma * tail.mean;
             let expected_var = variance * tail.var;
             relative(actual[0], expected_mean, &format!("{label} diagonal mean"));
@@ -183,7 +146,7 @@ fn assert_tail_values<B: Backend>(device: &B::Device, label: &str) {
     }
 }
 
-fn assert_tail_gradients<B: Backend>(device: &B::Device, label: &str) {
+fn assert_tail_gradients(device: &Device, label: &str) {
     for tail in TAILS {
         for variance in [2f32.powi(-40), 1.0, 2f32.powi(40)] {
             let sigma = variance.sqrt();
@@ -195,7 +158,7 @@ fn assert_tail_gradients<B: Backend>(device: &B::Device, label: &str) {
                     [2.0 * mean * (1.0 - tail.p), tail.p - tail.mean * tail.phi],
                 ),
             ] {
-                let actual = tail_gradients::<B>(device, tail.alpha, variance, mean_loss);
+                let actual = tail_gradients(device, tail.alpha, variance, mean_loss);
                 relative(actual.0, expected[0], &format!("{label} d/dmean"));
                 relative(actual.1, expected[1], &format!("{label} d/dvariance"));
             }
@@ -207,20 +170,18 @@ fn assert_tail_gradients<B: Backend>(device: &B::Device, label: &str) {
 #[ignore = "requires a Metal GPU"]
 fn metal_tail_relu_values_and_gradients_match_erfc_references() {
     let device = metal_device();
-    assert_tail_values::<GpuMsl>(&device, "Metal fused");
-    assert_tail_values::<GpuEager>(&device, "Metal eager");
-    assert_tail_gradients::<GpuMsl>(&device, "Metal fused");
-    <Autodiff<GpuMsl> as Backend>::sync(&device).unwrap();
-    assert_tail_gradients::<GpuEager>(&device, "Metal eager");
-    <Autodiff<GpuEager> as Backend>::sync(&device).unwrap();
+    assert_tail_values(&device, "Metal");
+    assert_tail_gradients(&device, "Metal");
+    device.sync().unwrap();
 }
 
-fn assert_distant_tail_gradients<B: Backend>(device: &B::Device) {
+fn assert_distant_tail_gradients(device: &Device) {
+    let device = device.clone().autodiff();
     // All inputs are normal f32 values. The old division backward still
     // overflows: mean / variance is 1e50 even though the selected slope is 0 or 1.
     for mode in ["relu", "leaky", "full", "cross"] {
-        let mean = Tensor::<Autodiff<B>, 2>::from_data([[1e20, -1e20]], device).require_grad();
-        let var = Tensor::<Autodiff<B>, 2>::from_data([[1e-30; 2]], device).require_grad();
+        let mean = Tensor::<2>::from_data([[1e20, -1e20]], &device).require_grad();
+        let var = Tensor::<2>::from_data([[1e-30; 2]], &device).require_grad();
         let moments = Moments::new(mean.clone(), var.clone());
         let (output_mean, output_var) = match mode {
             "relu" => {
@@ -238,7 +199,7 @@ fn assert_distant_tail_gradients<B: Backend>(device: &B::Device) {
                 (out.mean, variance)
             }
             "cross" => {
-                let cross = Tensor::<Autodiff<B>, 3>::from_data([[[5e-31; 2]]], device);
+                let cross = Tensor::<3>::from_data([[[5e-31; 2]]], &device);
                 let out = propagate_relu_cross_covariance(cross, &moments).reshape([1, 2]);
                 (out.clone(), out)
             }
@@ -275,18 +236,17 @@ fn assert_distant_tail_gradients<B: Backend>(device: &B::Device) {
 #[ignore = "requires a Metal GPU"]
 fn metal_distant_relu_tails_have_linear_gradients() {
     let device = metal_device();
-    assert_distant_tail_gradients::<GpuMsl>(&device);
-    assert_distant_tail_gradients::<GpuEager>(&device);
+    assert_distant_tail_gradients(&device);
 }
 
-fn assert_mixed_scale_covariance_gradients<B: Backend>(device: &B::Device) {
+fn assert_mixed_scale_covariance_gradients(device: &Device) {
+    let device = device.clone().autodiff();
     let v0 = 1e-30f32;
     let v1 = 1e30f32;
     let cross = 0.25f32;
-    let cov =
-        Tensor::<Autodiff<B>, 3>::from_data([[[v0, cross], [cross, v1]]], device).require_grad();
+    let cov = Tensor::<3>::from_data([[[v0, cross], [cross, v1]]], &device).require_grad();
     let out = propagate_relu_full(&MomentsFull::new(
-        Tensor::<Autodiff<B>, 2>::zeros([1, 2], device),
+        Tensor::<2>::zeros([1, 2], &device),
         cov.clone(),
     ));
     let gradients = out.cov.sum().backward();
@@ -311,17 +271,16 @@ fn assert_mixed_scale_covariance_gradients<B: Backend>(device: &B::Device) {
 #[ignore = "requires a Metal GPU"]
 fn metal_mixed_scale_covariance_gradients_match_centered_series() {
     let device = metal_device();
-    assert_mixed_scale_covariance_gradients::<GpuMsl>(&device);
-    assert_mixed_scale_covariance_gradients::<GpuEager>(&device);
+    assert_mixed_scale_covariance_gradients(&device);
 }
 
-fn fixture<B: Backend>(device: &B::Device) -> Vec<Vec<f32>> {
+fn fixture(device: &Device) -> Vec<Vec<f32>> {
     // Includes zero variance, a central input, tiny scale, and linear tails.
-    let mean = Tensor::<B, 2>::from_data([[0.0, 1e-12, 9.0, -9.0]], device);
-    let var = Tensor::<B, 2>::from_data([[0.0, 1e-24, 0.49, 1.0]], device);
+    let mean = Tensor::<2>::from_data([[0.0, 1e-12, 9.0, -9.0]], device);
+    let var = Tensor::<2>::from_data([[0.0, 1e-24, 0.49, 1.0]], device);
     let moments = Moments::new(mean.clone(), var.clone());
     let leaky = propagate_leaky_relu(&moments, 0.1);
-    let weight = Tensor::<B, 2>::from_data(
+    let weight = Tensor::<2>::from_data(
         [
             [0.5, -1.0, 0.25],
             [1.0, 0.5, -0.5],
@@ -330,7 +289,7 @@ fn fixture<B: Backend>(device: &B::Device) -> Vec<Vec<f32>> {
         ],
         device,
     );
-    let w_var = Tensor::<B, 2>::from_data(
+    let w_var = Tensor::<2>::from_data(
         [
             [0.01, 0.02, 0.03],
             [0.04, 0.01, 0.02],
@@ -381,10 +340,10 @@ fn fixture<B: Backend>(device: &B::Device) -> Vec<Vec<f32>> {
         &bayes,
     );
     let (conv_mean, conv_var) = propagate_conv2d(
-        Tensor::<B, 4>::from_data([[[[0.0, 1.0], [2.0, -1.0]]]], device),
-        Tensor::<B, 4>::from_data([[[[1e-24, 0.25], [0.5, 1.0]]]], device),
-        Tensor::<B, 4>::from_data([[[[0.5, -1.0], [0.25, 0.75]]]], device),
-        Some(Tensor::<B, 1>::from_data([0.1], device)),
+        Tensor::<4>::from_data([[[[0.0, 1.0], [2.0, -1.0]]]], device),
+        Tensor::<4>::from_data([[[[1e-24, 0.25], [0.5, 1.0]]]], device),
+        Tensor::<4>::from_data([[[[0.5, -1.0], [0.25, 0.75]]]], device),
+        Some(Tensor::<1>::from_data([0.1], device)),
         burn::tensor::ops::ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
     );
     let cauchy = propagate_relu_cauchy(&propagate_linear_cauchy(
@@ -427,21 +386,18 @@ enum GradientContribution {
     All,
 }
 
-fn gradient_fixture<B: Backend>(
-    device: &B::Device,
-    contribution: GradientContribution,
-) -> Vec<Option<Vec<f32>>> {
-    type Ad<B> = Autodiff<B>;
+fn gradient_fixture(device: &Device, contribution: GradientContribution) -> Vec<Option<Vec<f32>>> {
+    let device = device.clone().autodiff();
     // CPU/GPU gradient parity stays off exact kinks; tiny correlated boundary
     // gradients have their own finite-value check below.
-    let mean = Tensor::<Ad<B>, 2>::from_data([[0.1, 1e-4, 9.0, -9.0]], device).require_grad();
-    let var = Tensor::<Ad<B>, 2>::from_data([[1e-6, 1e-8, 0.49, 1.0]], device).require_grad();
-    let cross = Tensor::<Ad<B>, 3>::from_data([[[1e-5, 1e-6, 0.2, -0.2]]], device).require_grad();
+    let mean = Tensor::<2>::from_data([[0.1, 1e-4, 9.0, -9.0]], &device).require_grad();
+    let var = Tensor::<2>::from_data([[1e-6, 1e-8, 0.49, 1.0]], &device).require_grad();
+    let cross = Tensor::<3>::from_data([[[1e-5, 1e-6, 0.2, -0.2]]], &device).require_grad();
     let moments = Moments::new(mean.clone(), var.clone());
     let leaky = propagate_leaky_relu(&moments, 0.1);
-    let weight = Tensor::<Ad<B>, 2>::from_data(
+    let weight = Tensor::<2>::from_data(
         [[0.5, -1.0], [1.0, 0.5], [-0.25, 0.75], [0.5, -0.25]],
-        device,
+        &device,
     )
     .require_grad();
     let bayes = propagate_linear_bayes(
@@ -450,17 +406,17 @@ fn gradient_fixture<B: Backend>(
         weight.clone() * weight.clone().mul_scalar(0.02),
         None,
     );
-    let left = propagate_matmul_left(Tensor::from_data([[1.0], [0.5]], device), &bayes);
+    let left = propagate_matmul_left(Tensor::from_data([[1.0], [0.5]], &device), &bayes);
     let residual =
         propagate_residual_add_correlated(&left, &left, left.var.clone().mul_scalar(0.2));
-    let full_cov = Tensor::<Ad<B>, 3>::from_data(
+    let full_cov = Tensor::<3>::from_data(
         [[
             [1e-6, 5e-8, 0.0, 0.0],
             [5e-8, 1e-8, 0.0, 0.0],
             [0.0, 0.0, 0.49, 0.21],
             [0.0, 0.0, 0.21, 1.0],
         ]],
-        device,
+        &device,
     )
     .require_grad();
     let full = propagate_relu_full(&propagate_linear_full(
@@ -475,7 +431,7 @@ fn gradient_fixture<B: Backend>(
     let (conv_mean, conv_var) = propagate_conv2d(
         mean.clone().reshape([1, 1, 2, 2]),
         var.clone().reshape([1, 1, 2, 2]),
-        Tensor::from_data([[[[0.5, -1.0], [0.25, 0.75]]]], device),
+        Tensor::from_data([[[[0.5, -1.0], [0.25, 0.75]]]], &device),
         None,
         burn::tensor::ops::ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
     );
@@ -540,24 +496,15 @@ fn gradient_fixture<B: Backend>(
 
 #[test]
 #[ignore = "requires a Metal GPU"]
-fn metal_wgpu_and_msl_match_ndarray_forward_and_autodiff() {
-    let cpu_device = Default::default();
+fn metal_matches_flex_forward_and_autodiff() {
+    let cpu_device = Device::flex();
     let gpu_device = metal_device();
-    let expected = fixture::<Cpu>(&cpu_device);
-    for (label, actual) in [
-        ("Wgpu default", fixture::<GpuDefault>(&gpu_device)),
-        ("Metal alias", fixture::<GpuMsl>(&gpu_device)),
-    ] {
-        for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
-            close(
-                actual,
-                expected,
-                &format!("{label} forward fixture {index}"),
-            );
-        }
+    let expected = fixture(&cpu_device);
+    for (index, (actual, expected)) in fixture(&gpu_device).iter().zip(&expected).enumerate() {
+        close(actual, expected, &format!("Metal forward fixture {index}"));
     }
     // Absolute tolerance alone would accept losing the 1e-24 variance.
-    let gpu_tiny = fixture::<GpuMsl>(&gpu_device)[1][1] / 1e-24;
+    let gpu_tiny = fixture(&gpu_device)[1][1] / 1e-24;
     let cpu_tiny = expected[1][1] / 1e-24;
     assert!(
         (gpu_tiny - cpu_tiny).abs() < 0.02,
@@ -570,28 +517,18 @@ fn metal_wgpu_and_msl_match_ndarray_forward_and_autodiff() {
         GradientContribution::Full,
         GradientContribution::ResidualCross,
     ] {
-        let expected_gradients = gradient_fixture::<Cpu>(&cpu_device, contribution);
-        for (label, actual) in [
-            (
-                "Metal alias",
-                gradient_fixture::<GpuMsl>(&gpu_device, contribution),
-            ),
-            (
-                "Wgpu default",
-                gradient_fixture::<GpuDefault>(&gpu_device, contribution),
-            ),
-        ] {
-            <Autodiff<GpuDefault> as Backend>::sync(&gpu_device).unwrap();
-            for (index, (actual, expected)) in actual.iter().zip(&expected_gradients).enumerate() {
-                match (actual, expected) {
-                    (Some(actual), Some(expected)) => close(
-                        actual,
-                        expected,
-                        &format!("{label} {contribution:?} gradient {index}"),
-                    ),
-                    (None, None) => {}
-                    _ => panic!("{label} {contribution:?} gradient presence differs at {index}"),
-                }
+        let expected_gradients = gradient_fixture(&cpu_device, contribution);
+        let actual = gradient_fixture(&gpu_device, contribution);
+        gpu_device.sync().unwrap();
+        for (index, (actual, expected)) in actual.iter().zip(&expected_gradients).enumerate() {
+            match (actual, expected) {
+                (Some(actual), Some(expected)) => close(
+                    actual,
+                    expected,
+                    &format!("Metal {contribution:?} gradient {index}"),
+                ),
+                (None, None) => {}
+                _ => panic!("Metal {contribution:?} gradient presence differs at {index}"),
             }
         }
     }
@@ -599,37 +536,37 @@ fn metal_wgpu_and_msl_match_ndarray_forward_and_autodiff() {
 
 #[test]
 #[ignore = "requires a Metal GPU"]
-fn eager_metal_accumulates_shared_branch_gradients() {
-    let cpu_device = Default::default();
+fn metal_accumulates_shared_branch_gradients() {
+    let cpu_device = Device::flex();
     let gpu_device = metal_device();
     let contribution = GradientContribution::ResidualCross;
-    let expected = gradient_fixture::<Cpu>(&cpu_device, contribution);
-    let actual = gradient_fixture::<GpuEager>(&gpu_device, contribution);
-    <Autodiff<GpuEager> as Backend>::sync(&gpu_device).unwrap();
+    let expected = gradient_fixture(&cpu_device, contribution);
+    let actual = gradient_fixture(&gpu_device, contribution);
+    gpu_device.sync().unwrap();
     for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
         match (actual, expected) {
             (Some(actual), Some(expected)) => close(
                 actual,
                 expected,
-                &format!("eager {contribution:?} gradient {index}"),
+                &format!("Metal {contribution:?} gradient {index}"),
             ),
             (None, None) => {}
-            _ => panic!("eager {contribution:?} gradient presence differs at {index}"),
+            _ => panic!("Metal {contribution:?} gradient presence differs at {index}"),
         }
     }
 }
 
 #[test]
 #[ignore = "requires a Metal GPU"]
-fn eager_metal_matches_ndarray_forward_and_autodiff() {
-    let cpu_device = Default::default();
+fn metal_extended_fixture_matches_flex_forward_and_autodiff() {
+    let cpu_device = Device::flex();
     let gpu_device = metal_device();
-    for (index, (actual, expected)) in fixture::<GpuEager>(&gpu_device)
+    for (index, (actual, expected)) in fixture(&gpu_device)
         .iter()
-        .zip(fixture::<Cpu>(&cpu_device))
+        .zip(fixture(&cpu_device))
         .enumerate()
     {
-        close(actual, &expected, &format!("eager forward fixture {index}"));
+        close(actual, &expected, &format!("Metal forward fixture {index}"));
     }
     for contribution in [
         GradientContribution::BayesLeftResidual,
@@ -642,28 +579,27 @@ fn eager_metal_matches_ndarray_forward_and_autodiff() {
         GradientContribution::ResidualCrossConvCauchy,
         GradientContribution::All,
     ] {
-        let expected = gradient_fixture::<Cpu>(&cpu_device, contribution);
-        let actual = gradient_fixture::<GpuEager>(&gpu_device, contribution);
-        <Autodiff<GpuEager> as Backend>::sync(&gpu_device).unwrap();
+        let expected = gradient_fixture(&cpu_device, contribution);
+        let actual = gradient_fixture(&gpu_device, contribution);
+        gpu_device.sync().unwrap();
         for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
             match (actual, expected) {
                 (Some(actual), Some(expected)) => close(
                     actual,
                     expected,
-                    &format!("eager {contribution:?} gradient {index}"),
+                    &format!("Metal {contribution:?} gradient {index}"),
                 ),
                 (None, None) => {}
-                _ => panic!("eager {contribution:?} gradient presence differs at {index}"),
+                _ => panic!("Metal {contribution:?} gradient presence differs at {index}"),
             }
         }
     }
 }
 
-fn direct_conv_gradients<B: Backend>(device: &B::Device) -> (Vec<f32>, Vec<f32>) {
-    type Ad<B> = Autodiff<B>;
-    let input = Tensor::<Ad<B>, 4>::from_data([[[[0.0, 1.0], [2.0, -1.0]]]], device).require_grad();
-    let weight =
-        Tensor::<Ad<B>, 4>::from_data([[[[0.5, -1.0], [0.25, 0.75]]]], device).require_grad();
+fn direct_conv_gradients(device: &Device) -> (Vec<f32>, Vec<f32>) {
+    let device = device.clone().autodiff();
+    let input = Tensor::<4>::from_data([[[[0.0, 1.0], [2.0, -1.0]]]], &device).require_grad();
+    let weight = Tensor::<4>::from_data([[[[0.5, -1.0], [0.25, 0.75]]]], &device).require_grad();
     let output = burn::tensor::module::conv2d(
         input.clone(),
         weight.clone(),
@@ -677,11 +613,10 @@ fn direct_conv_gradients<B: Backend>(device: &B::Device) -> (Vec<f32>, Vec<f32>)
     )
 }
 
-fn shared_weight_conv_gradients<B: Backend>(device: &B::Device) -> (Vec<f32>, Vec<f32>) {
-    type Ad<B> = Autodiff<B>;
-    let input = Tensor::<Ad<B>, 4>::from_data([[[[0.0, 1.0], [2.0, -1.0]]]], device).require_grad();
-    let weight =
-        Tensor::<Ad<B>, 4>::from_data([[[[0.5, -1.0], [0.25, 0.75]]]], device).require_grad();
+fn shared_weight_conv_gradients(device: &Device) -> (Vec<f32>, Vec<f32>) {
+    let device = device.clone().autodiff();
+    let input = Tensor::<4>::from_data([[[[0.0, 1.0], [2.0, -1.0]]]], &device).require_grad();
+    let weight = Tensor::<4>::from_data([[[[0.5, -1.0], [0.25, 0.75]]]], &device).require_grad();
     let options = burn::tensor::ops::ConvOptions::new([1, 1], [0, 0], [1, 1], 1);
     let output = burn::tensor::module::conv2d(input.clone(), weight.clone(), None, options.clone())
         + burn::tensor::module::conv2d(input.clone(), weight.clone(), None, options);
@@ -694,66 +629,66 @@ fn shared_weight_conv_gradients<B: Backend>(device: &B::Device) -> (Vec<f32>, Ve
 
 #[test]
 #[ignore = "requires a Metal GPU"]
-fn eager_metal_direct_conv2d_gradients_match_ndarray() {
-    let cpu_device = Default::default();
+fn metal_direct_conv2d_gradients_match_flex_analytic() {
+    let cpu_device = Device::flex();
     let gpu_device = metal_device();
-    let (cpu_input, cpu_weight) = direct_conv_gradients::<Cpu>(&cpu_device);
-    let (gpu_input, gpu_weight) = direct_conv_gradients::<GpuEager>(&gpu_device);
-    <Autodiff<GpuEager> as Backend>::sync(&gpu_device).unwrap();
-    close(&gpu_input, &cpu_input, "eager direct conv input gradient");
+    let (cpu_input, cpu_weight) = direct_conv_gradients(&cpu_device);
+    let (gpu_input, gpu_weight) = direct_conv_gradients(&gpu_device);
+    gpu_device.sync().unwrap();
+    close(&gpu_input, &cpu_input, "Metal direct conv input gradient");
     close(
         &gpu_weight,
         &cpu_weight,
-        "eager direct conv weight gradient",
+        "Metal direct conv weight gradient",
     );
     close(
         &gpu_input,
         &[0.5, -1.0, 0.25, 0.75],
-        "eager direct conv input analytic gradient",
+        "Metal direct conv input analytic gradient",
     );
     close(
         &gpu_weight,
         &[0.0, 1.0, 2.0, -1.0],
-        "eager direct conv weight analytic gradient",
+        "Metal direct conv weight analytic gradient",
     );
 }
 
 #[test]
 #[ignore = "requires a Metal GPU"]
-fn fused_metal_direct_conv2d_gradients_match_ndarray() {
-    let cpu_device = Default::default();
+fn metal_direct_conv2d_gradients_match_flex() {
+    let cpu_device = Device::flex();
     let gpu_device = metal_device();
-    let (cpu_input, cpu_weight) = direct_conv_gradients::<Cpu>(&cpu_device);
-    let (gpu_input, gpu_weight) = direct_conv_gradients::<GpuMsl>(&gpu_device);
-    <Autodiff<GpuMsl> as Backend>::sync(&gpu_device).unwrap();
-    close(&gpu_input, &cpu_input, "fused direct conv input gradient");
+    let (cpu_input, cpu_weight) = direct_conv_gradients(&cpu_device);
+    let (gpu_input, gpu_weight) = direct_conv_gradients(&gpu_device);
+    gpu_device.sync().unwrap();
+    close(&gpu_input, &cpu_input, "Metal direct conv input gradient");
     close(
         &gpu_weight,
         &cpu_weight,
-        "fused direct conv weight gradient",
+        "Metal direct conv weight gradient",
     );
 }
 
 #[test]
 #[ignore = "requires a Metal GPU"]
-fn fused_metal_shared_weight_conv2d_gradients_match_ndarray() {
-    let cpu_device = Default::default();
+fn metal_shared_weight_conv2d_gradients_match_flex() {
+    let cpu_device = Device::flex();
     let gpu_device = metal_device();
-    let (cpu_input, cpu_weight) = shared_weight_conv_gradients::<Cpu>(&cpu_device);
-    let (gpu_input, gpu_weight) = shared_weight_conv_gradients::<GpuMsl>(&gpu_device);
-    <Autodiff<GpuMsl> as Backend>::sync(&gpu_device).unwrap();
-    close(&gpu_input, &cpu_input, "fused shared conv input gradient");
+    let (cpu_input, cpu_weight) = shared_weight_conv_gradients(&cpu_device);
+    let (gpu_input, gpu_weight) = shared_weight_conv_gradients(&gpu_device);
+    gpu_device.sync().unwrap();
+    close(&gpu_input, &cpu_input, "Metal shared conv input gradient");
     close(
         &gpu_weight,
         &cpu_weight,
-        "fused shared conv weight gradient",
+        "Metal shared conv weight gradient",
     );
 }
 
-fn diagonal_work<B: Backend>(device: &B::Device, batch: usize, width: usize) -> Moments<B> {
-    let mean = Tensor::<B, 2>::full([batch, width], 0.2, device);
-    let var = Tensor::<B, 2>::full([batch, width], 0.3, device);
-    let weight = Tensor::<B, 2>::full([width, width], 0.01, device);
+fn diagonal_work(device: &Device, batch: usize, width: usize) -> Moments {
+    let mean = Tensor::<2>::full([batch, width], 0.2, device);
+    let var = Tensor::<2>::full([batch, width], 0.3, device);
+    let weight = Tensor::<2>::full([width, width], 0.01, device);
     propagate_relu(&propagate_linear_bayes(
         &Moments::new(mean, var),
         weight.clone(),
@@ -762,10 +697,10 @@ fn diagonal_work<B: Backend>(device: &B::Device, batch: usize, width: usize) -> 
     ))
 }
 
-fn full_work<B: Backend>(device: &B::Device, batch: usize, width: usize) -> MomentsFull<B> {
-    let mean = Tensor::<B, 2>::full([batch, width], 0.2, device);
-    let var = Tensor::<B, 2>::full([batch, width], 0.3, device);
-    let weight = Tensor::<B, 2>::full([width, width], 0.01, device);
+fn full_work(device: &Device, batch: usize, width: usize) -> MomentsFull {
+    let mean = Tensor::<2>::full([batch, width], 0.2, device);
+    let var = Tensor::<2>::full([batch, width], 0.3, device);
+    let weight = Tensor::<2>::full([width, width], 0.01, device);
     propagate_relu_full(&propagate_linear_full(
         &MomentsFull::from_diagonal(mean, var),
         weight,
@@ -773,15 +708,11 @@ fn full_work<B: Backend>(device: &B::Device, batch: usize, width: usize) -> Mome
     ))
 }
 
-fn diagonal_training_work<B: Backend>(
-    device: &B::Device,
-    batch: usize,
-    width: usize,
-) -> Tensor<B, 2> {
-    type Ad<B> = Autodiff<B>;
-    let mean = Tensor::<Ad<B>, 2>::full([batch, width], 0.2, device).require_grad();
-    let var = Tensor::<Ad<B>, 2>::full([batch, width], 0.3, device).require_grad();
-    let weight = Tensor::<Ad<B>, 2>::full([width, width], 0.01, device).require_grad();
+fn diagonal_training_work(device: &Device, batch: usize, width: usize) -> Tensor<2> {
+    let device = device.clone().autodiff();
+    let mean = Tensor::<2>::full([batch, width], 0.2, &device).require_grad();
+    let var = Tensor::<2>::full([batch, width], 0.3, &device).require_grad();
+    let weight = Tensor::<2>::full([width, width], 0.01, &device).require_grad();
     let output = propagate_relu(&propagate_linear_bayes(
         &Moments::new(mean.clone(), var),
         weight.clone(),
@@ -791,45 +722,39 @@ fn diagonal_training_work<B: Backend>(
     mean.grad(&output.mean.sum().backward()).unwrap()
 }
 
-struct FullBackwardFixture<B: Backend> {
-    mean: Tensor<Autodiff<B>, 2>,
-    cov: Tensor<Autodiff<B>, 3>,
-    weight: Tensor<Autodiff<B>, 2>,
+struct FullBackwardFixture {
+    mean: Tensor<2>,
+    cov: Tensor<3>,
+    weight: Tensor<2>,
 }
 
-struct FullBackwardGradients<B: Backend> {
-    mean: Tensor<B, 2>,
-    cov: Tensor<B, 3>,
-    weight: Tensor<B, 2>,
+struct FullBackwardGradients {
+    mean: Tensor<2>,
+    cov: Tensor<3>,
+    weight: Tensor<2>,
 }
 
-fn full_backward_fixture<B: Backend>(
-    device: &B::Device,
-    batch: usize,
-    width: usize,
-) -> FullBackwardFixture<B> {
+fn full_backward_fixture(device: &Device, batch: usize, width: usize) -> FullBackwardFixture {
+    let device = device.clone().autodiff();
     let cov: Vec<f32> = (0..batch)
         .flat_map(|_| {
             (0..width).flat_map(move |i| (0..width).map(move |j| if i == j { 0.3 } else { 0.001 }))
         })
         .collect();
     FullBackwardFixture {
-        mean: Tensor::<Autodiff<B>, 2>::from_data(
+        mean: Tensor::<2>::from_data(
             TensorData::new(vec![0.2; batch * width], [batch, width]),
-            device,
+            &device,
         ),
-        cov: Tensor::<Autodiff<B>, 3>::from_data(
-            TensorData::new(cov, [batch, width, width]),
-            device,
-        ),
-        weight: Tensor::<Autodiff<B>, 2>::from_data(
+        cov: Tensor::<3>::from_data(TensorData::new(cov, [batch, width, width]), &device),
+        weight: Tensor::<2>::from_data(
             TensorData::new(vec![0.01; width * width], [width, width]),
-            device,
+            &device,
         ),
     }
 }
 
-fn full_backward_work<B: Backend>(fixture: &FullBackwardFixture<B>) -> FullBackwardGradients<B> {
+fn full_backward_work(fixture: &FullBackwardFixture) -> FullBackwardGradients {
     let mean = fixture.mean.clone().require_grad();
     let cov = fixture.cov.clone().require_grad();
     let weight = fixture.weight.clone().require_grad();
@@ -848,12 +773,12 @@ fn full_backward_work<B: Backend>(fixture: &FullBackwardFixture<B>) -> FullBackw
 
 #[test]
 #[ignore = "requires a Metal GPU"]
-fn metal_rank_one_full_backward_matches_ndarray() {
+fn metal_rank_one_full_backward_matches_flex() {
     // Several rows and features expose partially evaluated broadcast selection
     // kernels that tiny matrices can miss. Constant weight columns produce a
     // rank-one output covariance and equal feature standard deviations.
-    fn compare<B: Backend>(device: &B::Device, width: usize, cpu: &FullBackwardGradients<Cpu>) {
-        let fixture = full_backward_fixture::<B>(device, 8, width);
+    fn compare(device: &Device, width: usize, cpu: &FullBackwardGradients) {
+        let fixture = full_backward_fixture(device, 8, width);
         let gradients = full_backward_work(&fixture);
         close(
             &data(gradients.mean),
@@ -873,37 +798,32 @@ fn metal_rank_one_full_backward_matches_ndarray() {
     }
     let dev = metal_device();
     for width in [4, 16] {
-        let cpu = full_backward_work(&full_backward_fixture::<Cpu>(&Default::default(), 8, width));
-        compare::<GpuEager>(&dev, width, &cpu);
-        compare::<GpuMsl>(&dev, width, &cpu);
+        let cpu = full_backward_work(&full_backward_fixture(&Device::flex(), 8, width));
+        compare(&dev, width, &cpu);
     }
 }
 
-fn timed<B: Backend, T>(label: &str, device: &B::Device, mut work: impl FnMut() -> T) -> T {
+fn timed<T>(label: &str, device: &Device, mut work: impl FnMut() -> T) -> T {
     let warmup = work();
-    B::sync(device).unwrap();
+    device.sync().unwrap();
     black_box(warmup);
     let start = Instant::now();
     let result = work();
-    B::sync(device).unwrap();
+    device.sync().unwrap();
     let elapsed = start.elapsed();
     eprintln!("{label}: {elapsed:?}");
     black_box(result)
 }
 
-fn timed_repeated<B: Backend, T>(
-    label: &str,
-    device: &B::Device,
-    mut work: impl FnMut() -> T,
-) -> T {
+fn timed_repeated<T>(label: &str, device: &Device, mut work: impl FnMut() -> T) -> T {
     let warmup = work();
-    B::sync(device).unwrap();
+    device.sync().unwrap();
     black_box(warmup);
     let mut last = None;
     for repeat in 1..=3 {
         let start = Instant::now();
         let result = work();
-        B::sync(device).unwrap();
+        device.sync().unwrap();
         eprintln!("{label} repeat={repeat}: {:?}", start.elapsed());
         last = Some(result);
     }
@@ -912,14 +832,14 @@ fn timed_repeated<B: Backend, T>(
 
 #[test]
 #[ignore = "requires a Metal GPU and is an informational local benchmark"]
-fn metal_full_covariance_backward_timing_matches_ndarray_and_series_control() {
-    let cpu_device = Default::default();
+fn metal_full_covariance_backward_timing_matches_flex_and_series_control() {
+    let cpu_device = Device::flex();
     let gpu_device = metal_device();
     eprintln!("Warmed f32 full backward; tensor-resident timing includes graph allocation, host validation excluded.");
     for &(batch, width, iterations) in &[(8, 16, 8), (64, 64, 1)] {
-        let cpu_fixture = full_backward_fixture::<Cpu>(&cpu_device, batch, width);
-        let gpu_fixture = full_backward_fixture::<GpuMsl>(&gpu_device, batch, width);
-        let cpu = timed_repeated::<Cpu, _>(
+        let cpu_fixture = full_backward_fixture(&cpu_device, batch, width);
+        let gpu_fixture = full_backward_fixture(&gpu_device, batch, width);
+        let cpu = timed_repeated(
             &format!("CPU full backward b={batch} w={width} n={iterations}"),
             &cpu_device,
             || {
@@ -930,7 +850,7 @@ fn metal_full_covariance_backward_timing_matches_ndarray_and_series_control() {
                 last
             },
         );
-        let gpu = timed_repeated::<GpuMsl, _>(
+        let gpu = timed_repeated(
             &format!("Metal full backward b={batch} w={width} n={iterations}"),
             &gpu_device,
             || {
@@ -957,35 +877,35 @@ fn metal_full_covariance_backward_timing_matches_ndarray_and_series_control() {
             "timed full backward weight gradient",
         );
     }
-    assert_mixed_scale_covariance_gradients::<Cpu>(&cpu_device);
-    assert_mixed_scale_covariance_gradients::<GpuMsl>(&gpu_device);
+    assert_mixed_scale_covariance_gradients(&cpu_device);
+    assert_mixed_scale_covariance_gradients(&gpu_device);
 }
 
 #[test]
 #[ignore = "requires a Metal GPU and is an informational local benchmark"]
 fn metal_synchronized_diagonal_and_full_timings() {
-    let cpu_device = Default::default();
+    let cpu_device = Device::flex();
     let gpu_device = metal_device();
     eprintln!("Warmed f32 workloads; allocation included, host validation excluded.");
     for &(batch, width, iterations) in &[(8, 16, 32), (64, 64, 8), (256, 256, 1)] {
-        let cpu = timed::<Cpu, _>(
+        let cpu = timed(
             &format!("CPU diagonal b={batch} w={width} n={iterations}"),
             &cpu_device,
             || {
-                let mut last = diagonal_work::<Cpu>(&cpu_device, batch, width);
+                let mut last = diagonal_work(&cpu_device, batch, width);
                 for _ in 1..iterations {
-                    last = diagonal_work::<Cpu>(&cpu_device, batch, width);
+                    last = diagonal_work(&cpu_device, batch, width);
                 }
                 last
             },
         );
-        let gpu = timed::<GpuMsl, _>(
+        let gpu = timed(
             &format!("Metal diagonal b={batch} w={width} n={iterations}"),
             &gpu_device,
             || {
-                let mut last = diagonal_work::<GpuMsl>(&gpu_device, batch, width);
+                let mut last = diagonal_work(&gpu_device, batch, width);
                 for _ in 1..iterations {
-                    last = diagonal_work::<GpuMsl>(&gpu_device, batch, width);
+                    last = diagonal_work(&gpu_device, batch, width);
                 }
                 last
             },
@@ -993,24 +913,24 @@ fn metal_synchronized_diagonal_and_full_timings() {
         close(&data(gpu.mean), &data(cpu.mean), "timed diagonal mean");
         close(&data(gpu.var), &data(cpu.var), "timed diagonal variance");
         if width <= 64 {
-            let cpu = timed::<Cpu, _>(
+            let cpu = timed(
                 &format!("CPU full b={batch} w={width} n={iterations}"),
                 &cpu_device,
                 || {
-                    let mut last = full_work::<Cpu>(&cpu_device, batch, width);
+                    let mut last = full_work(&cpu_device, batch, width);
                     for _ in 1..iterations {
-                        last = full_work::<Cpu>(&cpu_device, batch, width);
+                        last = full_work(&cpu_device, batch, width);
                     }
                     last
                 },
             );
-            let gpu = timed::<GpuMsl, _>(
+            let gpu = timed(
                 &format!("Metal full b={batch} w={width} n={iterations}"),
                 &gpu_device,
                 || {
-                    let mut last = full_work::<GpuMsl>(&gpu_device, batch, width);
+                    let mut last = full_work(&gpu_device, batch, width);
                     for _ in 1..iterations {
-                        last = full_work::<GpuMsl>(&gpu_device, batch, width);
+                        last = full_work(&gpu_device, batch, width);
                     }
                     last
                 },
@@ -1018,24 +938,24 @@ fn metal_synchronized_diagonal_and_full_timings() {
             close(&data(gpu.mean), &data(cpu.mean), "timed full mean");
             close(&data(gpu.cov), &data(cpu.cov), "timed full covariance");
         }
-        let cpu = timed::<Cpu, _>(
+        let cpu = timed(
             &format!("CPU diagonal training b={batch} w={width} n={iterations}"),
             &cpu_device,
             || {
-                let mut last = diagonal_training_work::<Cpu>(&cpu_device, batch, width);
+                let mut last = diagonal_training_work(&cpu_device, batch, width);
                 for _ in 1..iterations {
-                    last = diagonal_training_work::<Cpu>(&cpu_device, batch, width);
+                    last = diagonal_training_work(&cpu_device, batch, width);
                 }
                 last
             },
         );
-        let gpu = timed::<GpuMsl, _>(
+        let gpu = timed(
             &format!("Metal diagonal training b={batch} w={width} n={iterations}"),
             &gpu_device,
             || {
-                let mut last = diagonal_training_work::<GpuMsl>(&gpu_device, batch, width);
+                let mut last = diagonal_training_work(&gpu_device, batch, width);
                 for _ in 1..iterations {
-                    last = diagonal_training_work::<GpuMsl>(&gpu_device, batch, width);
+                    last = diagonal_training_work(&gpu_device, batch, width);
                 }
                 last
             },
@@ -1120,17 +1040,17 @@ fn full_diagonal_covariance(host: &MatchedHostFixture) -> Vec<f32> {
         .collect()
 }
 
-struct MatchedDiagonalForwardFixture<B: Backend> {
-    mean: Tensor<B, 2>,
-    variance: Tensor<B, 2>,
-    weight: Tensor<B, 2>,
-    bias: Tensor<B, 1>,
+struct MatchedDiagonalForwardFixture {
+    mean: Tensor<2>,
+    variance: Tensor<2>,
+    weight: Tensor<2>,
+    bias: Tensor<1>,
 }
 
-fn matched_diagonal_forward_fixture<B: Backend>(
-    device: &B::Device,
+fn matched_diagonal_forward_fixture(
+    device: &Device,
     host: &MatchedHostFixture,
-) -> MatchedDiagonalForwardFixture<B> {
+) -> MatchedDiagonalForwardFixture {
     MatchedDiagonalForwardFixture {
         mean: Tensor::from_data(
             TensorData::new(host.mean.clone(), [host.batch, host.width]),
@@ -1148,7 +1068,7 @@ fn matched_diagonal_forward_fixture<B: Backend>(
     }
 }
 
-fn matched_diagonal_forward<B: Backend>(fixture: &MatchedDiagonalForwardFixture<B>) -> Moments<B> {
+fn matched_diagonal_forward(fixture: &MatchedDiagonalForwardFixture) -> Moments {
     let input = Moments::new(fixture.mean.clone(), fixture.variance.clone());
     propagate_relu(&propagate_linear(
         &input,
@@ -1157,17 +1077,17 @@ fn matched_diagonal_forward<B: Backend>(fixture: &MatchedDiagonalForwardFixture<
     ))
 }
 
-struct MatchedFullForwardFixture<B: Backend> {
-    mean: Tensor<B, 2>,
-    covariance: Tensor<B, 3>,
-    weight: Tensor<B, 2>,
-    bias: Tensor<B, 1>,
+struct MatchedFullForwardFixture {
+    mean: Tensor<2>,
+    covariance: Tensor<3>,
+    weight: Tensor<2>,
+    bias: Tensor<1>,
 }
 
-fn matched_full_forward_fixture<B: Backend>(
-    device: &B::Device,
+fn matched_full_forward_fixture(
+    device: &Device,
     host: &MatchedHostFixture,
-) -> MatchedFullForwardFixture<B> {
+) -> MatchedFullForwardFixture {
     MatchedFullForwardFixture {
         mean: Tensor::from_data(
             TensorData::new(host.mean.clone(), [host.batch, host.width]),
@@ -1188,7 +1108,7 @@ fn matched_full_forward_fixture<B: Backend>(
     }
 }
 
-fn matched_full_forward<B: Backend>(fixture: &MatchedFullForwardFixture<B>) -> MomentsFull<B> {
+fn matched_full_forward(fixture: &MatchedFullForwardFixture) -> MomentsFull {
     let input = MomentsFull::new(fixture.mean.clone(), fixture.covariance.clone());
     propagate_relu_full(&propagate_linear_full(
         &input,
@@ -1197,44 +1117,43 @@ fn matched_full_forward<B: Backend>(fixture: &MatchedFullForwardFixture<B>) -> M
     ))
 }
 
-struct MatchedDiagonalBackwardFixture<B: Backend> {
-    mean: Tensor<Autodiff<B>, 2>,
-    variance: Tensor<Autodiff<B>, 2>,
-    weight: Tensor<Autodiff<B>, 2>,
-    bias: Tensor<Autodiff<B>, 1>,
+struct MatchedDiagonalBackwardFixture {
+    mean: Tensor<2>,
+    variance: Tensor<2>,
+    weight: Tensor<2>,
+    bias: Tensor<1>,
 }
 
-fn matched_diagonal_backward_fixture<B: Backend>(
-    device: &B::Device,
+fn matched_diagonal_backward_fixture(
+    device: &Device,
     host: &MatchedHostFixture,
-) -> MatchedDiagonalBackwardFixture<B> {
+) -> MatchedDiagonalBackwardFixture {
+    let device = device.clone().autodiff();
     MatchedDiagonalBackwardFixture {
         mean: Tensor::from_data(
             TensorData::new(host.mean.clone(), [host.batch, host.width]),
-            device,
+            &device,
         ),
         variance: Tensor::from_data(
             TensorData::new(host.variance.clone(), [host.batch, host.width]),
-            device,
+            &device,
         ),
         weight: Tensor::from_data(
             TensorData::new(host.weight.clone(), [host.width, host.width]),
-            device,
+            &device,
         ),
-        bias: Tensor::from_data(TensorData::new(host.bias.clone(), [host.width]), device),
+        bias: Tensor::from_data(TensorData::new(host.bias.clone(), [host.width]), &device),
     }
 }
 
-struct MatchedDiagonalGradients<B: Backend> {
-    mean: Tensor<B, 2>,
-    variance: Tensor<B, 2>,
-    weight: Tensor<B, 2>,
-    bias: Tensor<B, 1>,
+struct MatchedDiagonalGradients {
+    mean: Tensor<2>,
+    variance: Tensor<2>,
+    weight: Tensor<2>,
+    bias: Tensor<1>,
 }
 
-fn matched_diagonal_backward<B: Backend>(
-    fixture: &MatchedDiagonalBackwardFixture<B>,
-) -> MatchedDiagonalGradients<B> {
+fn matched_diagonal_backward(fixture: &MatchedDiagonalBackwardFixture) -> MatchedDiagonalGradients {
     let mean = fixture.mean.clone().require_grad();
     let variance = fixture.variance.clone().require_grad();
     let weight = fixture.weight.clone().require_grad();
@@ -1253,47 +1172,46 @@ fn matched_diagonal_backward<B: Backend>(
     }
 }
 
-struct MatchedFullBackwardFixture<B: Backend> {
-    mean: Tensor<Autodiff<B>, 2>,
-    covariance: Tensor<Autodiff<B>, 3>,
-    weight: Tensor<Autodiff<B>, 2>,
-    bias: Tensor<Autodiff<B>, 1>,
+struct MatchedFullBackwardFixture {
+    mean: Tensor<2>,
+    covariance: Tensor<3>,
+    weight: Tensor<2>,
+    bias: Tensor<1>,
 }
 
-fn matched_full_backward_fixture<B: Backend>(
-    device: &B::Device,
+fn matched_full_backward_fixture(
+    device: &Device,
     host: &MatchedHostFixture,
-) -> MatchedFullBackwardFixture<B> {
+) -> MatchedFullBackwardFixture {
+    let device = device.clone().autodiff();
     MatchedFullBackwardFixture {
         mean: Tensor::from_data(
             TensorData::new(host.mean.clone(), [host.batch, host.width]),
-            device,
+            &device,
         ),
         covariance: Tensor::from_data(
             TensorData::new(
                 full_diagonal_covariance(host),
                 [host.batch, host.width, host.width],
             ),
-            device,
+            &device,
         ),
         weight: Tensor::from_data(
             TensorData::new(host.weight.clone(), [host.width, host.width]),
-            device,
+            &device,
         ),
-        bias: Tensor::from_data(TensorData::new(host.bias.clone(), [host.width]), device),
+        bias: Tensor::from_data(TensorData::new(host.bias.clone(), [host.width]), &device),
     }
 }
 
-struct MatchedFullGradients<B: Backend> {
-    mean: Tensor<B, 2>,
-    covariance: Tensor<B, 3>,
-    weight: Tensor<B, 2>,
-    bias: Tensor<B, 1>,
+struct MatchedFullGradients {
+    mean: Tensor<2>,
+    covariance: Tensor<3>,
+    weight: Tensor<2>,
+    bias: Tensor<1>,
 }
 
-fn matched_full_backward<B: Backend>(
-    fixture: &MatchedFullBackwardFixture<B>,
-) -> MatchedFullGradients<B> {
+fn matched_full_backward(fixture: &MatchedFullBackwardFixture) -> MatchedFullGradients {
     let mean = fixture.mean.clone().require_grad();
     let covariance = fixture.covariance.clone().require_grad();
     let weight = fixture.weight.clone().require_grad();
@@ -1313,58 +1231,53 @@ fn matched_full_backward<B: Backend>(
     }
 }
 
-fn warm<B: Backend, T>(device: &B::Device, work: &mut impl FnMut() -> T) {
+fn warm<T>(device: &Device, work: &mut impl FnMut() -> T) {
     let warmup = work();
-    B::sync(device).unwrap();
+    device.sync().unwrap();
     black_box(warmup);
 }
 
-fn timed_once<B: Backend, T>(
-    label: &str,
-    repeat: usize,
-    device: &B::Device,
-    work: &mut impl FnMut() -> T,
-) -> T {
+fn timed_once<T>(label: &str, repeat: usize, device: &Device, work: &mut impl FnMut() -> T) -> T {
     let start = Instant::now();
     let result = work();
-    B::sync(device).unwrap();
+    device.sync().unwrap();
     eprintln!("{label} repeat={repeat}: {:?}", start.elapsed());
     result
 }
 
 fn timed_interleaved<C, G>(
     label: &str,
-    cpu_device: &Device<Cpu>,
-    gpu_device: &Device<GpuMsl>,
+    cpu_device: &Device,
+    gpu_device: &Device,
     mut cpu_work: impl FnMut() -> C,
     mut gpu_work: impl FnMut() -> G,
 ) -> (C, G) {
-    warm::<Cpu, _>(cpu_device, &mut cpu_work);
-    warm::<GpuMsl, _>(gpu_device, &mut gpu_work);
+    warm(cpu_device, &mut cpu_work);
+    warm(gpu_device, &mut gpu_work);
     let mut cpu_last = None;
     let mut gpu_last = None;
     for repeat in 1..=3 {
         if repeat % 2 == 1 {
-            cpu_last = Some(timed_once::<Cpu, _>(
+            cpu_last = Some(timed_once(
                 &format!("CPU {label}"),
                 repeat,
                 cpu_device,
                 &mut cpu_work,
             ));
-            gpu_last = Some(timed_once::<GpuMsl, _>(
+            gpu_last = Some(timed_once(
                 &format!("Metal {label}"),
                 repeat,
                 gpu_device,
                 &mut gpu_work,
             ));
         } else {
-            gpu_last = Some(timed_once::<GpuMsl, _>(
+            gpu_last = Some(timed_once(
                 &format!("Metal {label}"),
                 repeat,
                 gpu_device,
                 &mut gpu_work,
             ));
-            cpu_last = Some(timed_once::<Cpu, _>(
+            cpu_last = Some(timed_once(
                 &format!("CPU {label}"),
                 repeat,
                 cpu_device,
@@ -1495,15 +1408,15 @@ fn close_matched_tail_backward_values(
     close_matched_values(&gpu[1..], &cpu[1..], label, host);
 }
 
-fn diagonal_forward_values<B: Backend>(output: Moments<B>) -> Vec<Vec<f32>> {
+fn diagonal_forward_values(output: Moments) -> Vec<Vec<f32>> {
     vec![data(output.mean), data(output.var)]
 }
 
-fn full_forward_values<B: Backend>(output: MomentsFull<B>) -> Vec<Vec<f32>> {
+fn full_forward_values(output: MomentsFull) -> Vec<Vec<f32>> {
     vec![data(output.mean), data(output.cov)]
 }
 
-fn diagonal_backward_values<B: Backend>(output: MatchedDiagonalGradients<B>) -> Vec<Vec<f32>> {
+fn diagonal_backward_values(output: MatchedDiagonalGradients) -> Vec<Vec<f32>> {
     vec![
         data(output.mean),
         data(output.variance),
@@ -1512,7 +1425,7 @@ fn diagonal_backward_values<B: Backend>(output: MatchedDiagonalGradients<B>) -> 
     ]
 }
 
-fn full_backward_values<B: Backend>(output: MatchedFullGradients<B>) -> Vec<Vec<f32>> {
+fn full_backward_values(output: MatchedFullGradients) -> Vec<Vec<f32>> {
     vec![
         data(output.mean),
         data(output.covariance),
@@ -1525,26 +1438,22 @@ macro_rules! profile_matched_case {
     ($backend:expr, $label:expr, $host:expr, $fixture:ident, $work:ident, $values:ident, $compare:ident) => {{
         match $backend {
             "cpu" => {
-                let device = Default::default();
-                let fixture = $fixture::<Cpu>(&device, $host);
-                let values = ($values)(timed_repeated::<Cpu, _>($label, &device, || {
-                    $work(&fixture)
-                }));
+                let device = Device::flex();
+                let fixture = $fixture(&device, $host);
+                let values = ($values)(timed_repeated($label, &device, || $work(&fixture)));
                 validate_values(&values, $label);
             }
             "metal" => {
                 let device = metal_device();
-                let fixture = $fixture::<GpuMsl>(&device, $host);
-                let values = ($values)(timed_repeated::<GpuMsl, _>($label, &device, || {
-                    $work(&fixture)
-                }));
+                let fixture = $fixture(&device, $host);
+                let values = ($values)(timed_repeated($label, &device, || $work(&fixture)));
                 validate_values(&values, $label);
             }
             "both" => {
-                let cpu_device = Default::default();
+                let cpu_device = Device::flex();
                 let gpu_device = metal_device();
-                let cpu_fixture = $fixture::<Cpu>(&cpu_device, $host);
-                let gpu_fixture = $fixture::<GpuMsl>(&gpu_device, $host);
+                let cpu_fixture = $fixture(&cpu_device, $host);
+                let gpu_fixture = $fixture(&gpu_device, $host);
                 let (cpu, gpu) = timed_interleaved(
                     $label,
                     &cpu_device,

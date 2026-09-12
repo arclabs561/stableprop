@@ -1,6 +1,6 @@
 [package]
 name = "stableprop"
-version = "0.5.2"
+version = "0.6.0-dev"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
@@ -17,22 +17,21 @@ publish = true
 
 [features]
 default = []
-# Burn-tensor backend: differentiable, batched moment propagation (Rust 1.92+).
+# Burn-tensor backend: differentiable, batched moment propagation (Rust 1.95+).
 burn = ["dep:burn"]
 # WGPU Metal backend with operation fusion (macOS, f32).
 metal = ["burn", "burn/metal", "burn/fusion"]
 
 [dependencies]
-burn = { version = "0.21.0", default-features = false, features = ["std"], optional = true }
+burn = { git = "https://github.com/tracel-ai/burn", rev = "1414c8a14e5169ef5e5fc67f9b8ab01a25d6352d", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
 # autodiff is needed by the cora_uncertainty example's training loop; cargo
 # unifies this with the optional `burn` dep when building stableprop's examples.
-burn = { version = "0.21.0", default-features = false, features = ["std", "autodiff"] }
-burn-ndarray = "0.21.0"
-ricci = "0.10"
+burn = { git = "https://github.com/tracel-ai/burn", rev = "1414c8a14e5169ef5e5fc67f9b8ab01a25d6352d", default-features = false, features = ["std", "autodiff", "optim", "flex", "linalg"] }
+ricci = { git = "https://github.com/arclabs561/ricci", rev = "0cb0e88439e15420bbba14086ceea459b46d3527" }
 statskit = "0.3.0"
-tuplet = { version = "0.3", features = ["burn-ndarray"] }
+tuplet = { git = "https://github.com/arclabs561/tuplet", rev = "dc4f68d4ea78a938b1c0254f0121cbaf80aa7a2a", features = ["burn-flex"] }
 proptest = "1.5"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 

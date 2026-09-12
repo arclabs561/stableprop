@@ -1,24 +1,20 @@
 #![cfg(feature = "burn")]
 
-use burn::backend::Autodiff;
-use burn::tensor::{Tensor, TensorData};
-use burn_ndarray::NdArray;
+use burn::tensor::{Device, Tensor, TensorData};
 use stableprop::burn_sdp::{
     propagate_leaky_relu, propagate_relu, propagate_relu_full, Moments, MomentsFull,
 };
 
-type Ad = Autodiff<NdArray<f32>>;
-
 #[test]
 fn activation_boundary_conventions_keep_gradients_finite() {
-    let device = Default::default();
+    let device = Device::flex().autodiff();
     for full in [false, true] {
-        let mean = Tensor::<Ad, 2>::from_data(
+        let mean = Tensor::<2>::from_data(
             TensorData::new(vec![0.0f32, 1e-12, 10_000.0, -1.0], [1, 4]),
             &device,
         )
         .require_grad();
-        let var = Tensor::<Ad, 2>::from_data(
+        let var = Tensor::<2>::from_data(
             TensorData::new(vec![0.0f32, 1e-24, 1.0, 0.0], [1, 4]),
             &device,
         )
@@ -34,7 +30,7 @@ fn activation_boundary_conventions_keep_gradients_finite() {
         };
         let grads = loss.backward();
         for gradient in [mean.grad(&grads).unwrap(), var.grad(&grads).unwrap()] {
-            let values = gradient.to_data().to_vec::<f32>().unwrap();
+            let values = gradient.to_data().try_to_vec::<f32>().unwrap();
             assert!(
                 values.iter().all(|x| x.is_finite()),
                 "full={full}: {values:?}"
@@ -45,15 +41,15 @@ fn activation_boundary_conventions_keep_gradients_finite() {
 
 #[test]
 fn positive_variance_relu_gradients_match_analytical_derivatives() {
-    let device = Default::default();
+    let device = Device::flex().autodiff();
     // Phi(-2), Phi(0), Phi(2), independently tabulated standard-normal CDFs.
     let cdf = [0.022_750_131_948_179_21, 0.5, 0.977_249_868_051_820_8];
     for variance in [1e-24f32, 0.25, 4.0] {
         let sigma = variance.sqrt();
         for mean_loss in [true, false] {
-            let mean = Tensor::<Ad, 2>::from_data([[-2.0 * sigma, 0.0, 2.0 * sigma]], &device)
-                .require_grad();
-            let var = Tensor::<Ad, 2>::from_data([[variance; 3]], &device).require_grad();
+            let mean =
+                Tensor::<2>::from_data([[-2.0 * sigma, 0.0, 2.0 * sigma]], &device).require_grad();
+            let var = Tensor::<2>::from_data([[variance; 3]], &device).require_grad();
             let out = propagate_relu(&Moments::new(mean.clone(), var.clone()));
             let gradients = if mean_loss {
                 out.mean.sum()
@@ -65,13 +61,13 @@ fn positive_variance_relu_gradients_match_analytical_derivatives() {
                 .grad(&gradients)
                 .unwrap()
                 .into_data()
-                .to_vec::<f32>()
+                .try_to_vec::<f32>()
                 .unwrap();
             let var_gradient = var
                 .grad(&gradients)
                 .unwrap()
                 .into_data()
-                .to_vec::<f32>()
+                .try_to_vec::<f32>()
                 .unwrap();
             for (i, a) in [-2.0f64, 0.0, 2.0].into_iter().enumerate() {
                 let sigma = (variance as f64).sqrt();
@@ -102,15 +98,15 @@ fn positive_variance_relu_gradients_match_analytical_derivatives() {
 
 #[test]
 fn tiny_correlated_relu_preserves_scale_and_finite_gradients() {
-    let device = Default::default();
-    let mean = Tensor::<Ad, 2>::zeros([1, 2], &device).require_grad();
-    let cov = Tensor::<Ad, 3>::from_data(
+    let device = Device::flex().autodiff();
+    let mean = Tensor::<2>::zeros([1, 2], &device).require_grad();
+    let cov = Tensor::<3>::from_data(
         TensorData::new(vec![1e-24f32, 0.5e-24, 0.5e-24, 1e-24], [1, 2, 2]),
         &device,
     )
     .require_grad();
     let out = propagate_relu_full(&MomentsFull::new(mean.clone(), cov.clone()));
-    let values = out.cov.to_data().to_vec::<f32>().unwrap();
+    let values = out.cov.to_data().try_to_vec::<f32>().unwrap();
     // Closed-form zero-mean bivariate ReLU covariance, scaled by input variance.
     let rho = 0.5f32;
     let pi = core::f32::consts::PI;
@@ -122,9 +118,13 @@ fn tiny_correlated_relu_preserves_scale_and_finite_gradients() {
         mean.grad(&grads)
             .unwrap()
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap(),
-        cov.grad(&grads).unwrap().to_data().to_vec::<f32>().unwrap(),
+        cov.grad(&grads)
+            .unwrap()
+            .to_data()
+            .try_to_vec::<f32>()
+            .unwrap(),
     ] {
         assert!(values.iter().all(|x| x.is_finite()), "{values:?}");
     }
@@ -132,11 +132,11 @@ fn tiny_correlated_relu_preserves_scale_and_finite_gradients() {
 
 #[test]
 fn inactive_relu_tail_has_zero_covariance_with_other_features() {
-    let device = Default::default();
-    let mean = Tensor::<Ad, 2>::from_data([[-9.0f32, 0.0]], &device).require_grad();
-    let cov = Tensor::<Ad, 3>::from_data([[[1.0f32, 0.5], [0.5, 1.0]]], &device).require_grad();
+    let device = Device::flex().autodiff();
+    let mean = Tensor::<2>::from_data([[-9.0f32, 0.0]], &device).require_grad();
+    let cov = Tensor::<3>::from_data([[[1.0f32, 0.5], [0.5, 1.0]]], &device).require_grad();
     let out = propagate_relu_full(&MomentsFull::new(mean.clone(), cov.clone()));
-    let values = out.cov.to_data().to_vec::<f32>().unwrap();
+    let values = out.cov.to_data().try_to_vec::<f32>().unwrap();
     // A deterministic zero output cannot covary with another feature.
     assert_eq!(&values[..3], &[0.0; 3]);
     let grads = (out.mean.sum() + out.cov.sum()).backward();
@@ -144,7 +144,7 @@ fn inactive_relu_tail_has_zero_covariance_with_other_features() {
         .grad(&grads)
         .unwrap()
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .iter()
         .all(|x| x.is_finite()));
@@ -152,7 +152,7 @@ fn inactive_relu_tail_has_zero_covariance_with_other_features() {
         .grad(&grads)
         .unwrap()
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .iter()
         .all(|x| x.is_finite()));

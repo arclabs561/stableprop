@@ -62,7 +62,7 @@ example name *args:
 bench *args:
     cargo bench --bench reference -- "$@"
 
-# Benchmark diagonal and full covariance on Burn's f32 CPU backend.
+# Benchmark diagonal and full covariance on Burn's f32 Flex CPU backend.
 bench-burn *args:
     cargo bench --features burn --bench burn -- "$@"
 

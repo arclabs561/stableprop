@@ -19,19 +19,13 @@
 
 use std::time::{Duration, Instant};
 
-use burn::backend::Autodiff;
 use burn::module::Module;
 use burn::nn::loss::CrossEntropyLoss;
 use burn::nn::{Linear, LinearConfig};
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
-use burn::tensor::backend::Backend;
+use burn::optim::{AdamConfig, GradientsParams};
 use burn::tensor::{activation, Device, Int, Tensor, TensorData};
-use burn_ndarray::NdArray;
 
 use stableprop::burn_sdp::{propagate_linear_full, propagate_relu_full, MomentsFull};
-
-type Ad = Autodiff<NdArray<f32>>;
-type Nd = NdArray<f32>;
 
 const D_IN: usize = 2;
 const HIDDEN: usize = 16;
@@ -50,13 +44,13 @@ const SEEDS: [u64; 3] = [0x51EC_0001, 0x51EC_0002, 0x51EC_0003];
 const VARIANCE_TOLERANCE: f64 = 1e-7;
 
 #[derive(Module, Debug)]
-struct Net<B: Backend> {
-    lin1: Linear<B>,
-    lin2: Linear<B>,
+struct Net {
+    lin1: Linear,
+    lin2: Linear,
 }
 
-impl<B: Backend> Net<B> {
-    fn init(device: &B::Device) -> Self {
+impl Net {
+    fn init(device: &Device) -> Self {
         let model = Self {
             lin1: LinearConfig::new(D_IN, HIDDEN).init(device),
             lin2: LinearConfig::new(HIDDEN, N_CLASS).init(device),
@@ -70,7 +64,7 @@ impl<B: Backend> Net<B> {
         }
         model
     }
-    fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+    fn forward(&self, x: Tensor<2>) -> Tensor<2> {
         self.lin2.forward(activation::relu(self.lin1.forward(x)))
     }
 }
@@ -161,15 +155,15 @@ fn make_data(n: usize, rng: &mut Rng) -> Data {
     Data { x, y }
 }
 
-fn train(init: &Net<Ad>, data: &Data, chosen: &[usize], device: &Device<Ad>) -> Net<Ad> {
+fn train(init: &Net, data: &Data, chosen: &[usize], device: &Device) -> Net {
     let mut xv = Vec::with_capacity(chosen.len() * D_IN);
     let mut yv = Vec::with_capacity(chosen.len());
     for &i in chosen {
         xv.extend_from_slice(&data.x[i * D_IN..(i + 1) * D_IN]);
         yv.push(data.y[i]); // labels are used only once this index is selected.
     }
-    let x = Tensor::<Ad, 2>::from_data(TensorData::new(xv, [chosen.len(), D_IN]), device);
-    let y = Tensor::<Ad, 1, Int>::from_data(TensorData::new(yv, [chosen.len()]), device);
+    let x = Tensor::<2>::from_data(TensorData::new(xv, [chosen.len(), D_IN]), device);
+    let y = Tensor::<1, Int>::from_data(TensorData::new(yv, [chosen.len()]), device);
     let mut model = init.clone();
     let mut optimizer = AdamConfig::new().init();
     for _ in 0..EPOCHS {
@@ -188,7 +182,7 @@ struct Weights {
     b2: Vec<f32>,
 }
 
-fn weights(model: &Net<Ad>) -> Weights {
+fn weights(model: &Net) -> Weights {
     Weights {
         w1: model
             .lin1
@@ -196,7 +190,7 @@ fn weights(model: &Net<Ad>) -> Weights {
             .val()
             .inner()
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap(),
         b1: model
             .lin1
@@ -206,7 +200,7 @@ fn weights(model: &Net<Ad>) -> Weights {
             .val()
             .inner()
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap(),
         w2: model
             .lin2
@@ -214,7 +208,7 @@ fn weights(model: &Net<Ad>) -> Weights {
             .val()
             .inner()
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap(),
         b2: model
             .lin2
@@ -224,7 +218,7 @@ fn weights(model: &Net<Ad>) -> Weights {
             .val()
             .inner()
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap(),
     }
 }
@@ -256,20 +250,20 @@ fn entropy(w: &Weights, x: &[f32]) -> f64 {
     -p0 * p0.ln() - (1.0 - p0) * (1.0 - p0).ln()
 }
 
-fn analytic_scores(model: &Net<Ad>, x: &[f32], n: usize, device: &Device<Nd>) -> Vec<f64> {
+fn analytic_scores(model: &Net, x: &[f32], n: usize, device: &Device) -> Vec<f64> {
     let w1 = model.lin1.weight.val().inner();
     let b1 = model.lin1.bias.as_ref().map(|p| p.val().inner());
     let w2 = model.lin2.weight.val().inner();
     let b2 = model.lin2.bias.as_ref().map(|p| p.val().inner());
-    let input = Tensor::<Nd, 2>::from_data(TensorData::new(x.to_vec(), [n, D_IN]), device);
-    let variance = Tensor::<Nd, 2>::full([n, D_IN], INPUT_STD * INPUT_STD, device);
+    let input = Tensor::<2>::from_data(TensorData::new(x.to_vec(), [n, D_IN]), device);
+    let variance = Tensor::<2>::full([n, D_IN], INPUT_STD * INPUT_STD, device);
     let m1 = propagate_relu_full(&propagate_linear_full(
         &MomentsFull::from_diagonal(input, variance),
         w1,
         b1,
     ));
     let m2 = propagate_linear_full(&m1, w2, b2);
-    let cov = m2.cov.to_data().to_vec::<f32>().unwrap();
+    let cov = m2.cov.to_data().try_to_vec::<f32>().unwrap();
     (0..n)
         .map(|i| {
             let block = &cov[i * N_CLASS * N_CLASS..(i + 1) * N_CLASS * N_CLASS];
@@ -300,7 +294,7 @@ fn centered_disagreement(cov: &[f64]) -> f64 {
 
 /// `2 * sum_c Var[(P f(x + eps))_c]`, estimated from 64 iid views.  This
 /// equals expected squared disagreement of two independent centered views.
-fn mc_scores(model: &Net<Ad>, x: &[f32], n: usize, rng: &mut Rng, device: &Device<Nd>) -> Vec<f64> {
+fn mc_scores(model: &Net, x: &[f32], n: usize, rng: &mut Rng, device: &Device) -> Vec<f64> {
     let mut views = Vec::with_capacity(n * MC_DRAWS * D_IN);
     for i in 0..n {
         let p = &x[i * D_IN..(i + 1) * D_IN];
@@ -309,9 +303,9 @@ fn mc_scores(model: &Net<Ad>, x: &[f32], n: usize, rng: &mut Rng, device: &Devic
             views.push(p[1] + (INPUT_STD * rng.normal()) as f32);
         }
     }
-    // This is the same NdArray affine/ReLU forward path as the analytic
+    // This is the same Flex affine/ReLU forward path as the analytic
     // propagator's fixed model, with explicitly seeded host-side input noise.
-    let input = Tensor::<Nd, 2>::from_data(TensorData::new(views, [n * MC_DRAWS, D_IN]), device);
+    let input = Tensor::<2>::from_data(TensorData::new(views, [n * MC_DRAWS, D_IN]), device);
     let w1 = model.lin1.weight.val().inner();
     let b1 = model.lin1.bias.as_ref().unwrap().val().inner();
     let w2 = model.lin2.weight.val().inner();
@@ -319,7 +313,7 @@ fn mc_scores(model: &Net<Ad>, x: &[f32], n: usize, rng: &mut Rng, device: &Devic
     let output = (activation::relu(input.matmul(w1) + b1.reshape([1, HIDDEN])).matmul(w2)
         + b2.reshape([1, N_CLASS]))
     .to_data()
-    .to_vec::<f32>()
+    .try_to_vec::<f32>()
     .unwrap();
     let mut scores = vec![0.0; n];
     for (i, score) in scores.iter_mut().enumerate() {
@@ -392,12 +386,12 @@ fn select_top(indices: &[usize], scores: &[f64], count: usize, tie_rng: &mut Rng
 
 fn acquire(
     policy: Policy,
-    model: &Net<Ad>,
+    model: &Net,
     pool_features: &[f32],
     chosen: &[usize],
     count: usize,
     seed: u64,
-    nd_device: &Device<Nd>,
+    nd_device: &Device,
 ) -> (Vec<usize>, Duration, Option<Agreement>) {
     let started = Instant::now();
     let mut candidates: Vec<usize> = (0..N_POOL).filter(|i| !chosen.contains(i)).collect();
@@ -488,28 +482,28 @@ fn noisy_accuracy(w: &Weights, data: &Data, rng: &mut Rng) -> f64 {
     correct as f64 / (data.y.len() * EVAL_DRAWS) as f64
 }
 
-fn prediction_bytes(model: &Net<Ad>, data: &Data, device: &Device<Ad>) -> Vec<f32> {
-    let input = Tensor::<Ad, 2>::from_data(
+fn prediction_bytes(model: &Net, data: &Data, device: &Device) -> Vec<f32> {
+    let input = Tensor::<2>::from_data(
         TensorData::new(data.x.clone(), [data.y.len(), D_IN]),
         device,
     );
-    model.forward(input).to_data().to_vec::<f32>().unwrap()
+    model.forward(input).to_data().try_to_vec::<f32>().unwrap()
 }
 
 fn main() {
-    let ad_device = Device::<Ad>::default();
-    let nd_device = Device::<Nd>::default();
+    let ad_device = Device::flex().autodiff();
+    let nd_device = Device::flex();
     let mut rows = Vec::new();
     for &seed in &SEEDS {
         let mut pool_rng = Rng::new(seed ^ 0xDADA_0001);
         let mut test_rng = Rng::new(seed ^ 0xDADA_0002);
         let pool = make_data(N_POOL, &mut pool_rng);
         let test = make_data(N_TEST, &mut test_rng);
-        <Ad as Backend>::seed(&ad_device, seed ^ 0x1A17_0000);
+        ad_device.seed(seed ^ 0x1A17_0000);
         // The model is initialized once per seed and cloned for every fit.
         // The following prediction equality assertion makes this shared-init
         // control observable instead of relying on that implementation detail.
-        let init = Net::<Ad>::init(&ad_device);
+        let init = Net::init(&ad_device);
         let mut initial_prediction = None;
         for policy in Policy::ALL {
             let mut chosen: Vec<usize> = (0..INITIAL).collect();
@@ -660,10 +654,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        centered_disagreement, correlation, ranks, Ad, Backend, Device, Net, Tensor, TensorData,
-        D_IN,
-    };
+    use super::{centered_disagreement, correlation, ranks, Device, Net, Tensor, TensorData, D_IN};
 
     #[test]
     fn centered_disagreement_ignores_common_logit_shift_covariance() {
@@ -692,12 +683,12 @@ mod tests {
 
     #[test]
     fn cloned_baseline_has_identical_forward_predictions() {
-        let device = Device::<Ad>::default();
-        <Ad as Backend>::seed(&device, 0x51EC_7E57);
-        let baseline = Net::<Ad>::init(&device);
+        let device = Device::flex().autodiff();
+        device.seed(0x51EC_7E57);
+        let baseline = Net::init(&device);
         let left = baseline.clone();
         let right = baseline.clone();
-        let probe = Tensor::<Ad, 2>::from_data(
+        let probe = Tensor::<2>::from_data(
             TensorData::new(vec![-1.0, 0.5, 1.25, -0.75], [2, D_IN]),
             &device,
         );
@@ -705,9 +696,13 @@ mod tests {
         let left = left
             .forward(probe.clone())
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
-        let right = right.forward(probe).into_data().to_vec::<f32>().unwrap();
+        let right = right
+            .forward(probe)
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
         assert_eq!(
             left, right,
             "cloned baselines must share initialized weights"

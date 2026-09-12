@@ -24,39 +24,33 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 
-use burn::backend::Autodiff;
 use burn::module::Module;
 use burn::nn::loss::{MseLoss, Reduction};
 use burn::nn::{Linear, LinearConfig};
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
-use burn::tensor::backend::Backend;
+use burn::optim::{AdamConfig, GradientsParams};
 use burn::tensor::{activation, Device, Tensor, TensorData};
-use burn_ndarray::NdArray;
 use stableprop::burn_sdp::{propagate_linear, propagate_relu, Moments};
 use statskit::conformal::{calibrate_in_place, Coverage, Threshold};
-
-type Ad = Autodiff<NdArray<f32>>;
-type Nd = NdArray<f32>;
 
 const HIDDEN: usize = 16;
 const INPUT_STRESS_STD: f32 = 0.05;
 const VARIANCE_FLOOR: f64 = 1e-4;
 
 #[derive(Module, Debug)]
-struct Mlp<B: Backend> {
-    first: Linear<B>,
-    last: Linear<B>,
+struct Mlp {
+    first: Linear,
+    last: Linear,
 }
 
-impl<B: Backend> Mlp<B> {
-    fn init(inputs: usize, device: &B::Device) -> Self {
+impl Mlp {
+    fn init(inputs: usize, device: &Device) -> Self {
         Self {
             first: LinearConfig::new(inputs, HIDDEN).init(device),
             last: LinearConfig::new(HIDDEN, 1).init(device),
         }
     }
 
-    fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+    fn forward(&self, x: Tensor<2>) -> Tensor<2> {
         self.last.forward(activation::relu(self.first.forward(x)))
     }
 }
@@ -400,16 +394,16 @@ fn train(
     fit: &[usize],
     standardizer: &Standardizer,
     epochs: usize,
-    device: &Device<Ad>,
-) -> Mlp<Ad> {
-    <Ad as Backend>::seed(device, 0xA11C_E001);
+    device: &Device,
+) -> Mlp {
+    device.seed(0xA11C_E001);
     let x: Vec<f32> = fit
         .iter()
         .flat_map(|&row| standardizer.x(&rows.x[row]))
         .collect();
     let y: Vec<f32> = fit.iter().map(|&row| standardizer.y(rows.y[row])).collect();
-    let x = Tensor::<Ad, 2>::from_data(TensorData::new(x, [fit.len(), rows.inputs]), device);
-    let y = Tensor::<Ad, 2>::from_data(TensorData::new(y, [fit.len(), 1]), device);
+    let x = Tensor::<2>::from_data(TensorData::new(x, [fit.len(), rows.inputs]), device);
+    let y = Tensor::<2>::from_data(TensorData::new(y, [fit.len(), 1]), device);
     let mut model = Mlp::init(rows.inputs, device);
     let mut optimizer = AdamConfig::new().init();
     for _ in 0..epochs {
@@ -420,16 +414,10 @@ fn train(
     model
 }
 
-fn propagated(
-    model: &Mlp<Ad>,
-    x: &[f32],
-    inputs: usize,
-    device: &Device<Nd>,
-) -> (Vec<f32>, Vec<f64>) {
+fn propagated(model: &Mlp, x: &[f32], inputs: usize, device: &Device) -> (Vec<f32>, Vec<f64>) {
     let n = x.len() / inputs;
-    let input = Tensor::<Nd, 2>::from_data(TensorData::new(x.to_vec(), [n, inputs]), device);
-    let variance =
-        Tensor::<Nd, 2>::ones([n, inputs], device) * (INPUT_STRESS_STD * INPUT_STRESS_STD);
+    let input = Tensor::<2>::from_data(TensorData::new(x.to_vec(), [n, inputs]), device);
+    let variance = Tensor::<2>::ones([n, inputs], device) * (INPUT_STRESS_STD * INPUT_STRESS_STD);
     let first = propagate_relu(&propagate_linear(
         &Moments::new(input, variance),
         model.first.weight.val().inner(),
@@ -440,7 +428,7 @@ fn propagated(
         model.last.weight.val().inner(),
         model.last.bias.as_ref().map(|bias| bias.val().inner()),
     );
-    let mean = output.mean.to_data().to_vec::<f32>().unwrap();
+    let mean = output.mean.to_data().try_to_vec::<f32>().unwrap();
     assert!(
         mean.iter().all(|value| value.is_finite()),
         "propagated means must be finite"
@@ -448,7 +436,7 @@ fn propagated(
     let variance = output
         .var
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .into_iter()
         .map(f64::from)
@@ -466,15 +454,15 @@ fn propagated(
 /// feature center.  It intentionally does not use the propagated mean under
 /// the experimental input-noise law, so both calibration arms share one point
 /// predictor.
-fn point_centers(model: &Mlp<Ad>, x: &[f32], inputs: usize, device: &Device<Ad>) -> Vec<f32> {
+fn point_centers(model: &Mlp, x: &[f32], inputs: usize, device: &Device) -> Vec<f32> {
     let n = x.len() / inputs;
     let centers = model
-        .forward(Tensor::<Ad, 2>::from_data(
+        .forward(Tensor::<2>::from_data(
             TensorData::new(x.to_vec(), [n, inputs]),
             device,
         ))
         .into_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap();
     assert!(
         centers.iter().all(|value| value.is_finite()),
@@ -578,12 +566,12 @@ fn metrics(indices: &[usize], rows: &Rows, centers: &[f64], half_widths: &[f64])
 }
 
 fn mc_check(
-    model: &Mlp<Ad>,
+    model: &Mlp,
     x: &[f32],
     inputs: usize,
     analytic_mean: &[f32],
     analytic_variance: &[f64],
-    device: &Device<Nd>,
+    device: &Device,
     quick: bool,
 ) {
     let n = x.len() / inputs;
@@ -596,7 +584,7 @@ fn mc_check(
             .iter()
             .map(|value| (*value as f64 + INPUT_STRESS_STD as f64 * rng.normal()) as f32)
             .collect();
-        let input = Tensor::<Nd, 2>::from_data(TensorData::new(noisy, [n, inputs]), device);
+        let input = Tensor::<2>::from_data(TensorData::new(noisy, [n, inputs]), device);
         let hidden = activation::relu(
             input.matmul(model.first.weight.val().inner())
                 + model
@@ -618,7 +606,7 @@ fn mc_check(
                 .inner()
                 .reshape([1, 1]))
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap();
         for (index, value) in output.into_iter().enumerate() {
             let delta = f64::from(value) - means[index];
@@ -679,9 +667,9 @@ fn run(dataset: DataSet, path: &str, quick: bool) -> Result<(), String> {
     );
     println!("feature stress std {INPUT_STRESS_STD}, output variance floor {VARIANCE_FLOOR} in fit-standardized units");
     println!("coverage assumes exchangeable complete groups under the same observation scheme; the stress is not measured sensor noise");
-    let device = Device::<Ad>::default();
+    let device = Device::flex().autodiff();
     let model = train(&rows, &split.fit, &standardizer, epochs, &device);
-    let inner = Device::<Nd>::default();
+    let inner = Device::flex();
     let normalized = |indices: &[usize]| {
         indices
             .iter()

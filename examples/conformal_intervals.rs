@@ -19,23 +19,17 @@
 //! Diagnose: `cargo run --release --example conformal_intervals --features burn -- --diagnose`
 //! Full diagnostic study: `cargo run --release --example conformal_intervals --features burn -- --diagnose-study`
 
-use burn::backend::Autodiff;
 use burn::module::Module;
 use burn::nn::loss::{MseLoss, Reduction};
 use burn::nn::{Linear, LinearConfig};
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
-use burn::tensor::backend::Backend;
+use burn::optim::{AdamConfig, GradientsParams};
 use burn::tensor::{activation, Device, Tensor, TensorData};
-use burn_ndarray::NdArray;
 use statskit::conformal::{calibrate_in_place, Coverage, Threshold};
 
 use stableprop::burn_sdp::{
     propagate_linear, propagate_linear_full, propagate_relu, propagate_relu_full, Moments,
     MomentsFull,
 };
-
-type Ad = Autodiff<NdArray<f32>>;
-type Nd = NdArray<f32>;
 
 const D_IN: usize = 6;
 const HIDDEN: usize = 64;
@@ -66,19 +60,19 @@ const DIAGNOSTIC_MC_DRAWS: usize = 512;
 const DIAGNOSTIC_SEED_BASE: u64 = 0xD1A6_0000;
 
 #[derive(Module, Debug)]
-struct Mlp<B: Backend> {
-    lin1: Linear<B>,
-    lin2: Linear<B>,
+struct Mlp {
+    lin1: Linear,
+    lin2: Linear,
 }
 
-impl<B: Backend> Mlp<B> {
-    fn init(device: &B::Device) -> Self {
+impl Mlp {
+    fn init(device: &Device) -> Self {
         Self {
             lin1: LinearConfig::new(D_IN, HIDDEN).init(device),
             lin2: LinearConfig::new(HIDDEN, 1).init(device),
         }
     }
-    fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+    fn forward(&self, x: Tensor<2>) -> Tensor<2> {
         let h = activation::relu(self.lin1.forward(x));
         self.lin2.forward(h)
     }
@@ -216,11 +210,11 @@ fn make_data(
     Data { x, y, sigma }
 }
 
-fn train_model(data: &Data, epochs: usize, model_seed: u64, dev: &Device<Ad>) -> Mlp<Ad> {
-    <Ad as Backend>::seed(dev, model_seed);
-    let x = Tensor::<Ad, 2>::from_data(TensorData::new(data.x.clone(), [data.y.len(), D_IN]), dev);
-    let y = Tensor::<Ad, 2>::from_data(TensorData::new(data.y.clone(), [data.y.len(), 1]), dev);
-    let mut model = Mlp::<Ad>::init(dev);
+fn train_model(data: &Data, epochs: usize, model_seed: u64, dev: &Device) -> Mlp {
+    dev.seed(model_seed);
+    let x = Tensor::<2>::from_data(TensorData::new(data.x.clone(), [data.y.len(), D_IN]), dev);
+    let y = Tensor::<2>::from_data(TensorData::new(data.y.clone(), [data.y.len(), 1]), dev);
+    let mut model = Mlp::init(dev);
     let mut optim = AdamConfig::new().init();
     for _ in 0..epochs {
         let pred = model.forward(x.clone());
@@ -234,11 +228,11 @@ fn train_model(data: &Data, epochs: usize, model_seed: u64, dev: &Device<Ad>) ->
 /// Propagated mean and standard deviation under supplied per-example feature
 /// uncertainty. The variance floor is a conformal-score normalization floor,
 /// not an uncertainty estimate.
-fn predict(model: &Mlp<Ad>, x: &[f32], sigma: &[f32], dev: &Device<Nd>) -> (Vec<f32>, Vec<f64>) {
+fn predict(model: &Mlp, x: &[f32], sigma: &[f32], dev: &Device) -> (Vec<f32>, Vec<f64>) {
     let n = sigma.len();
     assert_eq!(x.len(), n * D_IN, "input shape must match feature scales");
-    let input = Tensor::<Nd, 2>::from_data(TensorData::new(x.to_vec(), [n, D_IN]), dev);
-    let input_variance = Tensor::<Nd, 2>::from_data(
+    let input = Tensor::<2>::from_data(TensorData::new(x.to_vec(), [n, D_IN]), dev);
+    let input_variance = Tensor::<2>::from_data(
         TensorData::new(sigma.iter().map(|s| s * s).collect::<Vec<_>>(), [n, 1]),
         dev,
     )
@@ -253,11 +247,11 @@ fn predict(model: &Mlp<Ad>, x: &[f32], sigma: &[f32], dev: &Device<Nd>) -> (Vec<
         b1,
     ));
     let m2 = propagate_linear(&m1, w2, b2);
-    let mean = m2.mean.to_data().to_vec::<f32>().unwrap();
+    let mean = m2.mean.to_data().try_to_vec::<f32>().unwrap();
     let std = m2
         .var
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .iter()
         .map(|value| {
@@ -276,15 +270,15 @@ fn predict(model: &Mlp<Ad>, x: &[f32], sigma: &[f32], dev: &Device<Nd>) -> (Vec<
 /// law. There is no repeated Gaussian closure in this architecture: the only
 /// nonlinear moment approximation is the hidden full-covariance K3 step.
 fn predict_diagnostic_moments(
-    model: &Mlp<Ad>,
+    model: &Mlp,
     x: &[f32],
     sigma: &[f32],
-    dev: &Device<Nd>,
+    dev: &Device,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
     let n = sigma.len();
     assert_eq!(x.len(), n * D_IN, "input shape must match feature scales");
-    let input = Tensor::<Nd, 2>::from_data(TensorData::new(x.to_vec(), [n, D_IN]), dev);
-    let input_variance = Tensor::<Nd, 2>::from_data(
+    let input = Tensor::<2>::from_data(TensorData::new(x.to_vec(), [n, D_IN]), dev);
+    let input_variance = Tensor::<2>::from_data(
         TensorData::new(sigma.iter().map(|s| s * s).collect::<Vec<_>>(), [n, 1]),
         dev,
     )
@@ -315,7 +309,7 @@ fn predict_diagnostic_moments(
     let diagonal_mean = diagonal
         .mean
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .into_iter()
         .map(f64::from)
@@ -323,7 +317,7 @@ fn predict_diagnostic_moments(
     let diagonal_variance = diagonal
         .var
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .into_iter()
         .map(f64::from)
@@ -331,7 +325,7 @@ fn predict_diagnostic_moments(
     let full_mean = full
         .mean
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .into_iter()
         .map(f64::from)
@@ -339,7 +333,7 @@ fn predict_diagnostic_moments(
     let full_variance = full
         .variance()
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .into_iter()
         .map(f64::from)
@@ -359,7 +353,7 @@ fn sample_mean_variance(values: &[f64]) -> (f64, f64) {
 }
 
 fn sample_model_outputs(
-    model: &Mlp<Ad>,
+    model: &Mlp,
     center: &[f32],
     sigma: f64,
     draws: usize,
@@ -374,8 +368,8 @@ fn sample_model_outputs(
                 .map(|value| *value + (sigma * rng.normal()) as f32),
         );
     }
-    let dev = Device::<Nd>::default();
-    let input = Tensor::<Nd, 2>::from_data(TensorData::new(input, [draws, D_IN]), &dev);
+    let dev = Device::flex();
+    let input = Tensor::<2>::from_data(TensorData::new(input, [draws, D_IN]), &dev);
     let w1 = model.lin1.weight.val().inner();
     let b1 = model.lin1.bias.as_ref().map(|p| p.val().inner());
     let w2 = model.lin2.weight.val().inner();
@@ -390,7 +384,7 @@ fn sample_model_outputs(
     }
     output
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .into_iter()
         .map(f64::from)
@@ -501,10 +495,10 @@ fn evaluate(
     test: Data,
     epochs: usize,
     model_seed: u64,
-    dev: &Device<Ad>,
+    dev: &Device,
 ) -> Trial {
     let model = train_model(&train, epochs, model_seed, dev);
-    let inner = Device::<Nd>::default();
+    let inner = Device::flex();
     let (cal_mean, cal_sigma) = predict(&model, &calibration.x, &calibration.sigma, &inner);
     let (test_mean, test_sigma) = predict(&model, &test.x, &test.sigma, &inner);
     let scaled_quantile = conformal_quantile(
@@ -578,7 +572,7 @@ fn print_summary(name: &str, coverage: MeanCi, width: MeanCi) {
     );
 }
 
-fn run_study(dev: &Device<Ad>) {
+fn run_study(dev: &Device) {
     let mut trials = Vec::with_capacity(STUDY_REPEATS);
     for repeat in 0..STUDY_REPEATS {
         println!("  study repeat {}/{}", repeat + 1, STUDY_REPEATS);
@@ -703,7 +697,7 @@ fn diagnostic_centers(n: usize, seed: u64) -> Vec<f32> {
     (0..n * D_IN).map(|_| rng.normal() as f32).collect()
 }
 
-fn diagnostic_trial(repeat: usize, centers: usize, dev: &Device<Ad>) -> DiagnosticMetrics {
+fn diagnostic_trial(repeat: usize, centers: usize, dev: &Device) -> DiagnosticMetrics {
     let train = make_data(STUDY_TRAIN, diagnostic_seed(repeat, 1), true, false);
     let model = train_model(&train, STUDY_EPOCHS, diagnostic_seed(repeat, 2), dev);
     let centers_x = diagnostic_centers(centers, diagnostic_seed(repeat, 3));
@@ -711,7 +705,7 @@ fn diagnostic_trial(repeat: usize, centers: usize, dev: &Device<Ad>) -> Diagnost
         .chunks_exact(D_IN)
         .map(|center| known_feature_std(f64::from(center[0])) as f32)
         .collect();
-    let inner = Device::<Nd>::default();
+    let inner = Device::flex();
     let (diagonal_mean, diagonal_variance, full_mean, full_variance) =
         predict_diagnostic_moments(&model, &centers_x, &center_sigma, &inner);
     let mut metric = DiagnosticMetrics::default();
@@ -833,7 +827,7 @@ fn print_diagnostic_metric(
     }
 }
 
-fn run_diagnostic(dev: &Device<Ad>, repeats: usize, centers: usize, full_study: bool) {
+fn run_diagnostic(dev: &Device, repeats: usize, centers: usize, full_study: bool) {
     println!(
         "conformal diagnostic: repeats={repeats}; train={STUDY_TRAIN}; epochs={STUDY_EPOCHS}; centers/model={centers}; MC={DIAGNOSTIC_MC_BATCHES} independent batches x {DIAGNOSTIC_MC_DRAWS} draws"
     );
@@ -1027,7 +1021,7 @@ mod tests {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let dev = Device::<Ad>::default();
+    let dev = Device::flex().autodiff();
     match args.as_slice() {
         [] => {
             let trial = evaluate(

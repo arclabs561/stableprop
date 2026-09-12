@@ -16,19 +16,13 @@
 //!
 //! Run: `cargo run --release --example regression_intervals --features burn`
 
-use burn::backend::Autodiff;
 use burn::module::Module;
 use burn::nn::loss::{MseLoss, Reduction};
 use burn::nn::{Linear, LinearConfig};
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
-use burn::tensor::backend::Backend;
+use burn::optim::{AdamConfig, GradientsParams};
 use burn::tensor::{activation, Device, Distribution, Tensor, TensorData};
-use burn_ndarray::NdArray;
 
 use stableprop::burn_sdp::{propagate_linear, propagate_relu, Moments};
-
-type Ad = Autodiff<NdArray<f32>>;
-type Nd = NdArray<f32>;
 
 const D_IN: usize = 8;
 const HIDDEN: usize = 64;
@@ -38,19 +32,19 @@ const MC_SAMPLES: usize = 200;
 
 /// Single-hidden-layer MLP regressor: Linear -> ReLU -> Linear -> scalar.
 #[derive(Module, Debug)]
-struct Mlp<B: Backend> {
-    lin1: Linear<B>,
-    lin2: Linear<B>,
+struct Mlp {
+    lin1: Linear,
+    lin2: Linear,
 }
 
-impl<B: Backend> Mlp<B> {
-    fn init(device: &B::Device) -> Self {
+impl Mlp {
+    fn init(device: &Device) -> Self {
         Self {
             lin1: LinearConfig::new(D_IN, HIDDEN).init(device),
             lin2: LinearConfig::new(HIDDEN, 1).init(device),
         }
     }
-    fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+    fn forward(&self, x: Tensor<2>) -> Tensor<2> {
         let h = activation::relu(self.lin1.forward(x));
         self.lin2.forward(h)
     }
@@ -119,12 +113,12 @@ impl RunningMoments {
 }
 
 fn main() {
-    let dev = Device::<Ad>::default();
-    <Ad as Backend>::seed(&dev, 0xAE61_0001);
+    let dev = Device::flex().autodiff();
+    dev.seed(0xAE61_0001);
 
     let make = |n: usize| -> (Vec<f32>, Vec<f32>) {
-        let xt = Tensor::<Ad, 2>::random([n, D_IN], Distribution::Normal(0.0, 1.0), &dev);
-        let xv = xt.to_data().to_vec::<f32>().unwrap();
+        let xt = Tensor::<2>::random([n, D_IN], Distribution::Normal(0.0, 1.0), &dev);
+        let xv = xt.to_data().try_to_vec::<f32>().unwrap();
         let mut yv = Vec::with_capacity(n);
         for i in 0..n {
             yv.push(target(&xv[i * D_IN..(i + 1) * D_IN]));
@@ -133,10 +127,10 @@ fn main() {
     };
     let (xtr, ytr) = make(N_TRAIN);
     let (xte, _yte) = make(N_TEST);
-    let x_train = Tensor::<Ad, 2>::from_data(TensorData::new(xtr, [N_TRAIN, D_IN]), &dev);
-    let y_train = Tensor::<Ad, 2>::from_data(TensorData::new(ytr, [N_TRAIN, 1]), &dev);
+    let x_train = Tensor::<2>::from_data(TensorData::new(xtr, [N_TRAIN, D_IN]), &dev);
+    let y_train = Tensor::<2>::from_data(TensorData::new(ytr, [N_TRAIN, 1]), &dev);
 
-    let mut model = Mlp::<Ad>::init(&dev);
+    let mut model = Mlp::init(&dev);
     let mut optim = AdamConfig::new().init();
     println!("training MLP regressor ({N_TRAIN} samples, 800 epochs)...");
     for _ in 0..800 {
@@ -149,29 +143,29 @@ fn main() {
         let p = model
             .forward(x_train.clone())
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
-        let y = y_train.into_data().to_vec::<f32>().unwrap();
+        let y = y_train.into_data().try_to_vec::<f32>().unwrap();
         (p.iter().zip(&y).map(|(a, b)| (a - b).powi(2)).sum::<f32>() / N_TRAIN as f32).sqrt()
     };
     println!("train RMSE: {train_rmse:.4}\n");
 
     // Inner-backend weights for analytic propagation.
-    let idev = Device::<Nd>::default();
-    let x_test = Tensor::<Nd, 2>::from_data(TensorData::new(xte, [N_TEST, D_IN]), &idev);
+    let idev = Device::flex();
+    let x_test = Tensor::<2>::from_data(TensorData::new(xte, [N_TEST, D_IN]), &idev);
     let w1 = model.lin1.weight.val().inner();
     let b1 = model.lin1.bias.as_ref().map(|p| p.val().inner());
     let w2 = model.lin2.weight.val().inner();
     let b2 = model.lin2.bias.as_ref().map(|p| p.val().inner());
 
     // Each test point has its own known input-noise standard deviation.
-    let sigma = Tensor::<Nd, 2>::random([N_TEST, 1], Distribution::Uniform(0.05, 0.4), &idev);
+    let sigma = Tensor::<2>::random([N_TEST, 1], Distribution::Uniform(0.05, 0.4), &idev);
     let var0 = (sigma.clone() * sigma.clone()).expand([N_TEST, D_IN]);
     let m0 = Moments::new(x_test.clone(), var0);
     let m1 = propagate_relu(&propagate_linear(&m0, w1.clone(), b1.clone()));
     let m2 = propagate_linear(&m1, w2.clone(), b2.clone());
-    let mp_mean = m2.mean.to_data().to_vec::<f32>().unwrap();
-    let mp_variance = m2.var.to_data().to_vec::<f32>().unwrap();
+    let mp_mean = m2.mean.to_data().try_to_vec::<f32>().unwrap();
+    let mp_variance = m2.var.to_data().try_to_vec::<f32>().unwrap();
     assert!(
         mp_variance
             .iter()
@@ -188,12 +182,12 @@ fn main() {
     let mut within = 0usize;
     let mut total = 0usize;
     for _ in 0..MC_SAMPLES {
-        let z = Tensor::<Nd, 2>::random([N_TEST, D_IN], Distribution::Normal(0.0, 1.0), &idev);
+        let z = Tensor::<2>::random([N_TEST, D_IN], Distribution::Normal(0.0, 1.0), &idev);
         let xk = x_test.clone() + z * sigma.clone();
         let h = activation::relu(xk.matmul(w1.clone()) + b1.clone().unwrap().reshape([1, HIDDEN]));
         let yk = (h.matmul(w2.clone()) + b2.clone().unwrap().reshape([1, 1]))
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         for i in 0..N_TEST {
             let v = yk[i] as f64;

@@ -16,19 +16,13 @@
 //!
 //! Run: `cargo run --release --example misclassification_risk --features burn`
 
-use burn::backend::Autodiff;
 use burn::module::Module;
 use burn::nn::loss::CrossEntropyLoss;
 use burn::nn::{Linear, LinearConfig};
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
-use burn::tensor::backend::Backend;
+use burn::optim::{AdamConfig, GradientsParams};
 use burn::tensor::{activation, Device, Int, Tensor, TensorData};
-use burn_ndarray::NdArray;
 
 use stableprop::burn_sdp::{propagate_linear_full, propagate_relu_full, MomentsFull};
-
-type Ad = Autodiff<NdArray<f32>>;
-type Nd = NdArray<f32>;
 
 const D_IN: usize = 4;
 const HIDDEN: usize = 32;
@@ -40,19 +34,19 @@ const MC_SAMPLES: usize = 400;
 const RISK_BIN_UPPER: [f64; 5] = [0.02, 0.05, 0.10, 0.20, 1.0];
 
 #[derive(Module, Debug)]
-struct Net<B: Backend> {
-    lin1: Linear<B>,
-    lin2: Linear<B>,
+struct Net {
+    lin1: Linear,
+    lin2: Linear,
 }
 
-impl<B: Backend> Net<B> {
-    fn init(device: &B::Device) -> Self {
+impl Net {
+    fn init(device: &Device) -> Self {
         Self {
             lin1: LinearConfig::new(D_IN, HIDDEN).init(device),
             lin2: LinearConfig::new(HIDDEN, N_CLASS).init(device),
         }
     }
-    fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+    fn forward(&self, x: Tensor<2>) -> Tensor<2> {
         self.lin2.forward(activation::relu(self.lin1.forward(x)))
     }
 }
@@ -143,12 +137,11 @@ struct RiskBinSummary {
 
 /// Class-conditional Gaussian blobs: balanced classes, blob `c` shifted on two
 /// features so the classes separate.
-fn make(n: usize, dev: &Device<Ad>) -> (Vec<f32>, Vec<i32>) {
-    let mut x =
-        Tensor::<Ad, 2>::random([n, D_IN], burn::tensor::Distribution::Normal(0.0, 0.6), dev)
-            .to_data()
-            .to_vec::<f32>()
-            .unwrap();
+fn make(n: usize, dev: &Device) -> (Vec<f32>, Vec<i32>) {
+    let mut x = Tensor::<2>::random([n, D_IN], burn::tensor::Distribution::Normal(0.0, 0.6), dev)
+        .to_data()
+        .try_to_vec::<f32>()
+        .unwrap();
     let lab: Vec<i32> = (0..n).map(|i| (i % N_CLASS) as i32).collect();
     for i in 0..n {
         let c = lab[i] as f32;
@@ -159,16 +152,16 @@ fn make(n: usize, dev: &Device<Ad>) -> (Vec<f32>, Vec<i32>) {
 }
 
 fn main() {
-    let dev = Device::<Ad>::default();
-    <Ad as Backend>::seed(&dev, 0xA115_C1A5);
-    let idev = Device::<Nd>::default();
+    let dev = Device::flex().autodiff();
+    dev.seed(0xA115_C1A5);
+    let idev = Device::flex();
     let (xtr, ytr) = make(N_TRAIN, &dev);
     let (xte, yte) = make(N_TEST, &dev);
 
-    let x_train = Tensor::<Ad, 2>::from_data(TensorData::new(xtr, [N_TRAIN, D_IN]), &dev);
-    let y_train = Tensor::<Ad, 1, Int>::from_data(TensorData::new(ytr, [N_TRAIN]), &dev);
+    let x_train = Tensor::<2>::from_data(TensorData::new(xtr, [N_TRAIN, D_IN]), &dev);
+    let y_train = Tensor::<1, Int>::from_data(TensorData::new(ytr, [N_TRAIN]), &dev);
 
-    let mut model = Net::<Ad>::init(&dev);
+    let mut model = Net::init(&dev);
     let mut optim = AdamConfig::new().init();
     println!("training classifier...");
     for _ in 0..400 {
@@ -183,13 +176,13 @@ fn main() {
     let b1 = model.lin1.bias.as_ref().map(|p| p.val().inner());
     let w2 = model.lin2.weight.val().inner();
     let b2 = model.lin2.bias.as_ref().map(|p| p.val().inner());
-    let x_te = Tensor::<Nd, 2>::from_data(TensorData::new(xte.clone(), [N_TEST, D_IN]), &idev);
-    let var0 = Tensor::<Nd, 2>::full([N_TEST, D_IN], INPUT_STD * INPUT_STD, &idev);
+    let x_te = Tensor::<2>::from_data(TensorData::new(xte.clone(), [N_TEST, D_IN]), &idev);
+    let var0 = Tensor::<2>::full([N_TEST, D_IN], INPUT_STD * INPUT_STD, &idev);
     let m0 = MomentsFull::from_diagonal(x_te.clone(), var0);
     let m1 = propagate_relu_full(&propagate_linear_full(&m0, w1.clone(), b1.clone()));
     let m2 = propagate_linear_full(&m1, w2.clone(), b2.clone());
-    let mean = m2.mean.to_data().to_vec::<f32>().unwrap(); // [N_TEST * C]
-    let cov = m2.cov.to_data().to_vec::<f32>().unwrap(); // [N_TEST * C * C]
+    let mean = m2.mean.to_data().try_to_vec::<f32>().unwrap(); // [N_TEST * C]
+    let cov = m2.cov.to_data().try_to_vec::<f32>().unwrap(); // [N_TEST * C * C]
 
     // Test-only per-input risk estimate: a sum of approximate Gaussian margin
     // probabilities for the known true class, capped at one. Competing margin
@@ -217,7 +210,7 @@ fn main() {
     // Monte-Carlo misclassification rate per input.
     let mut mc_errors = vec![0usize; N_TEST];
     for _ in 0..MC_SAMPLES {
-        let noise = Tensor::<Nd, 2>::random(
+        let noise = Tensor::<2>::random(
             [N_TEST, D_IN],
             burn::tensor::Distribution::Normal(0.0, INPUT_STD),
             &idev,
@@ -228,7 +221,7 @@ fn main() {
         .matmul(w2.clone())
             + b2.clone().unwrap().reshape([1, N_CLASS]))
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap();
         for i in 0..N_TEST {
             let row = &logits[i * c..(i + 1) * c];
@@ -316,14 +309,14 @@ mod tests {
 
     #[test]
     fn identical_affine_scores_have_deterministic_margin_risk() {
-        let device = Device::<Nd>::default();
-        let moments = MomentsFull::<Nd>::from_diagonal(
+        let device = Device::flex();
+        let moments = MomentsFull::from_diagonal(
             Tensor::from_data([[0.5, -0.25]], &device),
             Tensor::from_data([[0.25, 0.5]], &device),
         );
         let identical_scores = Tensor::from_data([[1.0, 1.0], [-2.0, -2.0]], &device);
         let propagated = propagate_linear_full(&moments, identical_scores, None);
-        let covariance = propagated.cov.to_data().to_vec::<f32>().unwrap();
+        let covariance = propagated.cov.to_data().try_to_vec::<f32>().unwrap();
         let terms = [
             f64::from(covariance[0]),
             f64::from(covariance[3]),

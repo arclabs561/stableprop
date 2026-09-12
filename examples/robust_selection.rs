@@ -18,21 +18,15 @@
 
 use std::env;
 
-use burn::backend::Autodiff;
 use burn::module::{AutodiffModule, Module};
 use burn::nn::loss::{MseLoss, Reduction};
 use burn::nn::{Linear, LinearConfig};
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
-use burn::tensor::backend::Backend;
+use burn::optim::{AdamConfig, GradientsParams};
 use burn::tensor::{activation, Device, Tensor, TensorData};
-use burn_ndarray::NdArray;
 use stableprop::burn_sdp::{
     propagate_linear, propagate_linear_full, propagate_relu, propagate_relu_full, Moments,
     MomentsFull,
 };
-
-type Ad = Autodiff<NdArray<f32>>;
-type Nd = NdArray<f32>;
 
 const HIDDEN: usize = 32;
 const TRAIN_ROWS: usize = 1_024;
@@ -42,18 +36,18 @@ const RATIOS: [f64; 3] = [0.75, 1.0, 1.25];
 const TRUE_L: [[f64; 2]; 2] = [[0.20, 0.0], [0.12, 0.16]];
 
 #[derive(Module, Debug)]
-struct Mlp<B: Backend> {
-    first: Linear<B>,
-    last: Linear<B>,
+struct Mlp {
+    first: Linear,
+    last: Linear,
 }
-impl<B: Backend> Mlp<B> {
-    fn init(device: &B::Device) -> Self {
+impl Mlp {
+    fn init(device: &Device) -> Self {
         Self {
             first: LinearConfig::new(2, HIDDEN).init(device),
             last: LinearConfig::new(HIDDEN, 1).init(device),
         }
     }
-    fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+    fn forward(&self, x: Tensor<2>) -> Tensor<2> {
         self.last.forward(activation::relu(self.first.forward(x)))
     }
 }
@@ -138,17 +132,17 @@ fn train_trajectory(
     repeat: usize,
     checkpoint: Option<usize>,
     epochs: usize,
-    device: &Device<Ad>,
-) -> (Option<Mlp<Nd>>, Mlp<Nd>) {
+    device: &Device,
+) -> (Option<Mlp>, Mlp) {
     assert!(checkpoint.map_or(true, |epoch| epoch < epochs));
     let mut rng = Rng::new(0xF17_0000 + repeat as u64);
     let points: Vec<[f64; 2]> = (0..TRAIN_ROWS)
         .map(|_| [4.0 * rng.uniform() - 2.0, 4.0 * rng.uniform() - 2.0])
         .collect();
     let labels: Vec<f32> = points.iter().map(|&x| q(x) as f32).collect();
-    let x = Tensor::<Ad, 2>::from_data(TensorData::new(flat(&points), [TRAIN_ROWS, 2]), device);
-    let y = Tensor::<Ad, 2>::from_data(TensorData::new(labels, [TRAIN_ROWS, 1]), device);
-    <Ad as Backend>::seed(device, 0xA0D3_0000 + repeat as u64);
+    let x = Tensor::<2>::from_data(TensorData::new(flat(&points), [TRAIN_ROWS, 2]), device);
+    let y = Tensor::<2>::from_data(TensorData::new(labels, [TRAIN_ROWS, 1]), device);
+    device.seed(0xA0D3_0000 + repeat as u64);
     let mut model = Mlp::init(device);
     let mut optimizer = AdamConfig::new().init();
     let mut snapshot = None;
@@ -163,7 +157,7 @@ fn train_trajectory(
     (snapshot, model.valid())
 }
 
-fn train(repeat: usize, epochs: usize, device: &Device<Ad>) -> Mlp<Nd> {
+fn train(repeat: usize, epochs: usize, device: &Device) -> Mlp {
     train_trajectory(repeat, None, epochs, device).1
 }
 
@@ -173,24 +167,24 @@ fn train_snapshots(
     repeat: usize,
     first_epoch: usize,
     last_epoch: usize,
-    device: &Device<Ad>,
-) -> (Mlp<Nd>, Mlp<Nd>) {
+    device: &Device,
+) -> (Mlp, Mlp) {
     let (first, last) = train_trajectory(repeat, Some(first_epoch), last_epoch, device);
     (first.expect("first checkpoint"), last)
 }
 
-fn clean_rmse(model: &Mlp<Nd>, repeat: usize, device: &Device<Nd>) -> f64 {
+fn clean_rmse(model: &Mlp, repeat: usize, device: &Device) -> f64 {
     let mut rng = Rng::new(0xB31D_0000 + repeat as u64);
     let points: Vec<[f64; 2]> = (0..HELDOUT_ROWS)
         .map(|_| [4.0 * rng.uniform() - 2.0, 4.0 * rng.uniform() - 2.0])
         .collect();
     let output = model
-        .forward(Tensor::<Nd, 2>::from_data(
+        .forward(Tensor::<2>::from_data(
             TensorData::new(flat(&points), [HELDOUT_ROWS, 2]),
             device,
         ))
         .into_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap();
     (points
         .iter()
@@ -232,33 +226,39 @@ fn checked_variance(values: Vec<f32>) -> Vec<f64> {
     );
     values
 }
-fn point_mean(model: &Mlp<Nd>, candidates: &[[f64; 2]], device: &Device<Nd>) -> Vec<f64> {
+fn point_mean(model: &Mlp, candidates: &[[f64; 2]], device: &Device) -> Vec<f64> {
     model
-        .forward(Tensor::<Nd, 2>::from_data(
+        .forward(Tensor::<2>::from_data(
             TensorData::new(flat(candidates), [candidates.len(), 2]),
             device,
         ))
         .into_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .into_iter()
         .map(f64::from)
         .collect()
 }
-fn point(model: &Mlp<Nd>, candidates: &[[f64; 2]], device: &Device<Nd>) -> Evaluation {
+fn point(model: &Mlp, candidates: &[[f64; 2]], device: &Device) -> Evaluation {
     from_moments(
         point_mean(model, candidates, device),
         vec![0.0; candidates.len()],
     )
 }
 fn local(
-    model: &Mlp<Nd>,
+    model: &Mlp,
     candidates: &[[f64; 2]],
     sigma: [[f64; 2]; 2],
-    device: &Device<Nd>,
+    device: &Device,
 ) -> Evaluation {
     let mean = point_mean(model, candidates, device);
-    let w1 = model.first.weight.val().to_data().to_vec::<f32>().unwrap();
+    let w1 = model
+        .first
+        .weight
+        .val()
+        .to_data()
+        .try_to_vec::<f32>()
+        .unwrap();
     let b1 = model
         .first
         .bias
@@ -266,9 +266,15 @@ fn local(
         .unwrap()
         .val()
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap();
-    let w2 = model.last.weight.val().to_data().to_vec::<f32>().unwrap();
+    let w2 = model
+        .last
+        .weight
+        .val()
+        .to_data()
+        .try_to_vec::<f32>()
+        .unwrap();
     let variance = candidates
         .iter()
         .map(|x| {
@@ -287,15 +293,15 @@ fn local(
 }
 
 fn propagation(
-    model: &Mlp<Nd>,
+    model: &Mlp,
     candidates: &[[f64; 2]],
     sigma: [[f64; 2]; 2],
     full: bool,
-    device: &Device<Nd>,
+    device: &Device,
 ) -> Evaluation {
     let n = candidates.len();
-    let mean = Tensor::<Nd, 2>::from_data(TensorData::new(flat(candidates), [n, 2]), device);
-    let covariance = Tensor::<Nd, 3>::from_data(
+    let mean = Tensor::<2>::from_data(TensorData::new(flat(candidates), [n, 2]), device);
+    let covariance = Tensor::<3>::from_data(
         TensorData::new(
             (0..n)
                 .flat_map(|_| {
@@ -325,11 +331,11 @@ fn propagation(
             w2,
             b2,
         );
-        let variance = checked_variance(end.variance().to_data().to_vec::<f32>().unwrap());
+        let variance = checked_variance(end.variance().to_data().try_to_vec::<f32>().unwrap());
         let mean = end
             .mean
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap()
             .into_iter()
             .map(f64::from)
@@ -348,33 +354,33 @@ fn propagation(
         let mean = end
             .mean
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap()
             .into_iter()
             .map(f64::from)
             .collect();
-        let variance = checked_variance(end.var.to_data().to_vec::<f32>().unwrap());
+        let variance = checked_variance(end.var.to_data().try_to_vec::<f32>().unwrap());
         from_moments(mean, variance)
     }
 }
 
 fn sigma_points(
-    model: &Mlp<Nd>,
+    model: &Mlp,
     candidates: &[[f64; 2]],
     l: [[f64; 2]; 2],
-    device: &Device<Nd>,
+    device: &Device,
 ) -> Evaluation {
     let mut all = Vec::with_capacity(candidates.len() * 4);
     for &mu in candidates {
         all.extend(sigma_rule(mu, l));
     }
     let y = model
-        .forward(Tensor::<Nd, 2>::from_data(
+        .forward(Tensor::<2>::from_data(
             TensorData::new(flat(&all), [all.len(), 2]),
             device,
         ))
         .into_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap();
     let mut mean = Vec::with_capacity(candidates.len());
     let mut variance = Vec::with_capacity(candidates.len());
@@ -416,12 +422,12 @@ fn sigma_rule(mu: [f64; 2], l: [[f64; 2]; 2]) -> [[f64; 2]; 4] {
 }
 
 fn mc(
-    model: &Mlp<Nd>,
+    model: &Mlp,
     candidates: &[[f64; 2]],
     l: [[f64; 2]; 2],
     draws: usize,
     seed: u64,
-    device: &Device<Nd>,
+    device: &Device,
 ) -> Evaluation {
     let mut rng = Rng::new(seed);
     let n = candidates.len();
@@ -438,12 +444,12 @@ fn mc(
             })
             .collect();
         let y = model
-            .forward(Tensor::<Nd, 2>::from_data(
+            .forward(Tensor::<2>::from_data(
                 TensorData::new(flat(&points), [n, 2]),
                 device,
             ))
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         for (i, value) in y.into_iter().enumerate() {
             let value = f64::from(value);
@@ -544,11 +550,11 @@ struct Study {
 
 fn evaluate_model(
     repeat: usize,
-    model: &Mlp<Nd>,
+    model: &Mlp,
     candidates: &[[f64; 2]],
     method_draws: usize,
     reference_draws: usize,
-    device: &Device<Nd>,
+    device: &Device,
 ) -> (f64, Vec<Record>) {
     let true_sigma = covariance(TRUE_L, 1.0);
     let rmse = clean_rmse(model, repeat, device);
@@ -625,8 +631,8 @@ fn run_fit_study(
     quick: bool,
     method_draws: usize,
     reference_draws: usize,
-    dev: &Device<Ad>,
-    inner: &Device<Nd>,
+    dev: &Device,
+    inner: &Device,
     candidates: &[[f64; 2]],
 ) {
     let repeats = if quick { 3 } else { 20 };
@@ -810,8 +816,8 @@ fn main() {
     let method_draws = if quick { 32 } else { 64 };
     let reference_draws = if quick { 256 } else { 2_048 };
     let candidates = candidates();
-    let dev = Device::<Ad>::default();
-    let inner = Device::<Nd>::default();
+    let dev = Device::flex().autodiff();
+    let inner = Device::flex();
     let mut records = Vec::new();
     let mut rmses = Vec::new();
     if fit_study {
@@ -886,7 +892,7 @@ mod tests {
     use super::*;
     use burn::module::Param;
 
-    fn hand_model(device: &Device<Nd>) -> Mlp<Nd> {
+    fn hand_model(device: &Device) -> Mlp {
         let mut first = vec![0.0; 2 * HIDDEN];
         first[0] = 1.0;
         first[HIDDEN + 1] = 1.0;
@@ -919,33 +925,37 @@ mod tests {
 
     #[test]
     fn frozen_checkpoint_matches_its_epoch_and_not_the_later_epoch() {
-        let device = Device::<Ad>::default();
-        let inner = Device::<Nd>::default();
+        let device = Device::flex().autodiff();
+        let inner = Device::flex();
         let (snapshot_one, snapshot_two) = train_snapshots(0, 1, 2, &device);
         let alone_one = train(0, 1, &device);
         let alone_two = train(0, 2, &device);
-        let input = Tensor::<Nd, 2>::from_data(TensorData::new(vec![0.2, -0.1], [1, 2]), &inner);
+        let input = Tensor::<2>::from_data(TensorData::new(vec![0.2, -0.1], [1, 2]), &inner);
         let one = snapshot_one
             .forward(input.clone())
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         let two = snapshot_two
             .forward(input.clone())
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         assert_eq!(
             one,
             alone_one
                 .forward(input.clone())
                 .to_data()
-                .to_vec::<f32>()
+                .try_to_vec::<f32>()
                 .unwrap()
         );
         assert_eq!(
             two,
-            alone_two.forward(input).to_data().to_vec::<f32>().unwrap()
+            alone_two
+                .forward(input)
+                .to_data()
+                .try_to_vec::<f32>()
+                .unwrap()
         );
         assert_ne!(
             one, two,
@@ -955,7 +965,7 @@ mod tests {
 
     #[test]
     fn zero_noise_actual_methods_match_deterministic_hand_model() {
-        let device = Device::<Nd>::default();
+        let device = Device::flex();
         let model = hand_model(&device);
         let candidates = [[0.2, -0.1], [0.7, 0.4]];
         let point = point(&model, &candidates, &device);
@@ -977,7 +987,7 @@ mod tests {
 
     #[test]
     fn local_gradient_matches_finite_difference_for_asymmetric_hand_model() {
-        let device = Device::<Nd>::default();
+        let device = Device::flex();
         let model = hand_model(&device);
         let x = [0.2, -0.1];
         let epsilon = 1e-3;

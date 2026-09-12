@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Breaking:** use Burn's development tensor API: `Moments`, `MomentsFull`,
+  and `Cauchy` no longer take a backend type parameter. Select a runtime
+  `Device`; enable autodiff on the device for gradient calculations.
+- Pin the Burn development revision containing the SIMD reciprocal fix; use
+  Flex for CPU examples and tests. Burn-enabled code requires Rust 1.95; the
+  dependency-free API retains Rust 1.80 support.
+
 - Share conformal rank selection with `statskit`; keep residual scores,
   sensitivity scales and group aggregation in the interval examples.
 

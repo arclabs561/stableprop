@@ -21,14 +21,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use burn::backend::Autodiff;
 use burn::module::Module;
 use burn::nn::loss::CrossEntropyLoss;
 use burn::optim::decay::WeightDecayConfig;
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
-use burn::tensor::backend::{AutodiffBackend, Backend};
-use burn::tensor::{activation, Int, Tensor, TensorData};
-use burn_ndarray::NdArray;
+use burn::optim::{AdamConfig, GradientsParams};
+use burn::tensor::{activation, Device, Int, Tensor, TensorData};
 
 use burn::nn::{Linear, LinearConfig};
 use stableprop::burn_sdp::{
@@ -226,26 +223,26 @@ fn load_planetoid(dir: &Path, name: &str) -> std::io::Result<Graph> {
 /// A GCN layer is `adj @ (x W + b)`. This example trains Burn linear layers;
 /// `gcn_uncertainty.rs` exercises ricci's `GCNConv`.
 #[derive(Module, Debug)]
-struct Gcn<B: Backend> {
-    lin1: Linear<B>,
-    lin2: Linear<B>,
+struct Gcn {
+    lin1: Linear,
+    lin2: Linear,
 }
 
-impl<B: Backend> Gcn<B> {
-    fn init(n_features: usize, n_classes: usize, device: &B::Device) -> Self {
+impl Gcn {
+    fn init(n_features: usize, n_classes: usize, device: &Device) -> Self {
         Self {
             lin1: LinearConfig::new(n_features, HIDDEN).init(device),
             lin2: LinearConfig::new(HIDDEN, n_classes).init(device),
         }
     }
-    fn forward(&self, x: Tensor<B, 2>, adj: Tensor<B, 2>) -> Tensor<B, 2> {
+    fn forward(&self, x: Tensor<2>, adj: Tensor<2>) -> Tensor<2> {
         let h = adj.clone().matmul(self.lin1.forward(x));
         let h = activation::relu(h);
         adj.matmul(self.lin2.forward(h))
     }
 
     /// SDP through one GCN layer: linear then adjacency aggregation.
-    fn sdp_gcn(m: &Moments<B>, lin: &Linear<B>, adj: Tensor<B, 2>) -> Moments<B> {
+    fn sdp_gcn(m: &Moments, lin: &Linear, adj: Tensor<2>) -> Moments {
         let w = lin.weight.val();
         let b = lin.bias.as_ref().map(|p| p.val());
         propagate_matmul_left(adj, &propagate_linear(m, w, b))
@@ -260,17 +257,17 @@ impl<B: Backend> Gcn<B> {
     /// count a random offset shared by every class as classification uncertainty.
     fn sdp_centered_logit_variance(
         &self,
-        x: Tensor<B, 2>,
-        adj: Tensor<B, 2>,
+        x: Tensor<2>,
+        adj: Tensor<2>,
         input_std: f64,
     ) -> Vec<f64> {
         let [n, d] = x.dims();
-        let var0 = Tensor::<B, 2>::full([n, d], input_std * input_std, &x.device());
+        let var0 = Tensor::<2>::full([n, d], input_std * input_std, &x.device());
         let m0 = Moments::new(x, var0);
         let m1 = propagate_relu(&Self::sdp_gcn(&m0, &self.lin1, adj.clone()));
         let row_trace = centered_linear_variance(&m1, self.lin2.weight.val(), None);
         let node_trace = (adj.clone() * adj).matmul(row_trace);
-        let v = node_trace.to_data().to_vec::<f32>().unwrap();
+        let v = node_trace.to_data().try_to_vec::<f32>().unwrap();
         (0..n).map(|i| v[i] as f64).collect()
     }
 }
@@ -281,11 +278,11 @@ impl<B: Backend> Gcn<B> {
 /// input moments. `weight_var` represents independent weight elements: its
 /// contribution remains diagonal before projection, so it contributes
 /// `(1 - 1/C) * sum(q)` rather than treating the centered weights as independent.
-fn centered_linear_variance<B: Backend>(
-    m: &Moments<B>,
-    weight_mean: Tensor<B, 2>,
-    weight_var: Option<Tensor<B, 2>>,
-) -> Tensor<B, 2> {
+fn centered_linear_variance(
+    m: &Moments,
+    weight_mean: Tensor<2>,
+    weight_var: Option<Tensor<2>>,
+) -> Tensor<2> {
     let c = weight_mean.dims()[1];
     let centered_weight_mean = weight_mean.clone() - weight_mean.mean_dim(1);
     let deterministic_trace = propagate_linear(m, centered_weight_mean, None)
@@ -444,7 +441,6 @@ mod tests {
         spearman, Moments, QUICK_EPOCHS, QUICK_MC_SAMPLES, STUDY_EPOCHS, STUDY_MC_SAMPLES,
     };
     use burn::tensor::{Device, Tensor, TensorData};
-    use burn_ndarray::NdArray;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -556,23 +552,22 @@ mod tests {
             - covariance.iter().flatten().sum::<f64>() / c;
         let trace_p_deterministic_cov_p = deterministic_trace;
 
-        type B = NdArray<f32>;
-        let device = Device::<B>::default();
+        let device = Device::flex();
         let m = Moments::new(
-            Tensor::<B, 2>::from_data(
+            Tensor::<2>::from_data(
                 TensorData::new(hidden_mean.map(|x| x as f32).to_vec(), [1, 2]),
                 &device,
             ),
-            Tensor::<B, 2>::from_data(
+            Tensor::<2>::from_data(
                 TensorData::new(hidden_var.map(|x| x as f32).to_vec(), [1, 2]),
                 &device,
             ),
         );
-        let weight_mean = Tensor::<B, 2>::from_data(
+        let weight_mean = Tensor::<2>::from_data(
             TensorData::new(w.into_iter().flatten().map(|x| x as f32).collect(), [2, 3]),
             &device,
         );
-        let weight_var = Tensor::<B, 2>::from_data(
+        let weight_var = Tensor::<2>::from_data(
             TensorData::new(
                 w_var.into_iter().flatten().map(|x| x as f32).collect(),
                 [2, 3],
@@ -581,11 +576,11 @@ mod tests {
         );
         let no_weight_noise = centered_linear_variance(&m, weight_mean.clone(), None)
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap()[0] as f64;
         let with_weight_noise = centered_linear_variance(&m, weight_mean, Some(weight_var))
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap()[0] as f64;
         assert!((no_weight_noise - trace_p_deterministic_cov_p).abs() < 1e-5);
         assert!((with_weight_noise - trace_p_cov_p).abs() < 1e-5);
@@ -627,21 +622,21 @@ fn auroc(score: &[f64], positive: &[bool]) -> f64 {
 /// it with zero input noise. This is neither a calibrated posterior nor a full
 /// Laplace approximation; it omits bias uncertainty, parameter correlations,
 /// shared-weight cross-node covariance. Its scale is not calibrated.
-fn epistemic_centered_logit_variance<B: AutodiffBackend>(
-    model: &Gcn<B>,
-    x: &Tensor<B, 2>,
-    adj: &Tensor<B, 2>,
-    targets: &Tensor<B, 1, Int>,
+fn epistemic_centered_logit_variance(
+    model: &Gcn,
+    x: &Tensor<2>,
+    adj: &Tensor<2>,
+    targets: &Tensor<1, Int>,
     train_idx: &[usize],
-    device: &B::Device,
+    device: &Device,
     prior_prec: f64,
 ) -> Vec<f64> {
     // Empirical Fisher diagonal for the two weight matrices.
-    let mut f1: Option<Tensor<B::InnerBackend, 2>> = None;
-    let mut f2: Option<Tensor<B::InnerBackend, 2>> = None;
+    let mut f1: Option<Tensor<2>> = None;
+    let mut f2: Option<Tensor<2>> = None;
     for &node in train_idx {
         let logits = model.forward(x.clone(), adj.clone());
-        let sel = Tensor::<B, 1, Int>::from_data(TensorData::new(vec![node as i32], [1]), device);
+        let sel = Tensor::<1, Int>::from_data(TensorData::new(vec![node as i32], [1]), device);
         let nl = logits.select(0, sel.clone());
         let nt = targets.clone().select(0, sel);
         let loss = CrossEntropyLoss::new(None, device).forward(nl, nt);
@@ -662,7 +657,7 @@ fn epistemic_centered_logit_variance<B: AutodiffBackend>(
     let wvar2 = f2.unwrap().add_scalar(prior_prec).recip();
     let wmean1 = model.lin1.weight.val().inner();
     let wmean2 = model.lin2.weight.val().inner();
-    let zeros_like = |t: &Tensor<B::InnerBackend, 1>| t.clone().zeros_like();
+    let zeros_like = |t: &Tensor<1>| t.clone().zeros_like();
     let bias1 = model
         .lin1
         .bias
@@ -680,17 +675,12 @@ fn epistemic_centered_logit_variance<B: AutodiffBackend>(
     ));
     let row_trace = centered_linear_variance(&m1, wmean2, Some(wvar2));
     let node_trace = (adji.clone() * adji).matmul(row_trace);
-    let v = node_trace.to_data().to_vec::<f32>().unwrap();
+    let v = node_trace.to_data().try_to_vec::<f32>().unwrap();
     (0..n).map(|i| v[i] as f64).collect()
 }
 
-fn run<B: AutodiffBackend>(
-    device: B::Device,
-    dir: &Path,
-    name: &str,
-    config: RunConfig,
-) -> std::io::Result<()> {
-    <B as Backend>::seed(&device, config.seed);
+fn run(device: Device, dir: &Path, name: &str, config: RunConfig) -> std::io::Result<()> {
+    device.seed(config.seed);
     let g = load_planetoid(dir, name)?;
     let (train_idx, test_idx) = split(&g.labels, g.n_classes);
     println!(
@@ -701,13 +691,13 @@ fn run<B: AutodiffBackend>(
         test_idx.len()
     );
 
-    let x = Tensor::<B, 2>::from_data(
+    let x = Tensor::<2>::from_data(
         TensorData::new(g.features.clone(), [g.n, g.n_features]),
         &device,
     );
-    let adj = Tensor::<B, 2>::from_data(TensorData::new(g.adj_norm.clone(), [g.n, g.n]), &device);
-    let targets = Tensor::<B, 1, Int>::from_data(TensorData::new(g.labels.clone(), [g.n]), &device);
-    let train_sel = Tensor::<B, 1, Int>::from_data(
+    let adj = Tensor::<2>::from_data(TensorData::new(g.adj_norm.clone(), [g.n, g.n]), &device);
+    let targets = Tensor::<1, Int>::from_data(TensorData::new(g.labels.clone(), [g.n]), &device);
+    let train_sel = Tensor::<1, Int>::from_data(
         TensorData::new(
             train_idx.iter().map(|&i| i as i32).collect::<Vec<_>>(),
             [train_idx.len()],
@@ -715,7 +705,7 @@ fn run<B: AutodiffBackend>(
         &device,
     );
 
-    let mut model = Gcn::<B>::init(g.n_features, g.n_classes, &device);
+    let mut model = Gcn::init(g.n_features, g.n_classes, &device);
     let mut optim = AdamConfig::new()
         .with_weight_decay(Some(WeightDecayConfig::new(5e-4)))
         .init();
@@ -731,7 +721,7 @@ fn run<B: AutodiffBackend>(
     }
 
     let logits = model.forward(x.clone(), adj.clone());
-    let logits_v = logits.into_data().to_vec::<f32>().unwrap();
+    let logits_v = logits.into_data().try_to_vec::<f32>().unwrap();
     let base_acc = {
         let c = test_idx
             .iter()
@@ -750,7 +740,7 @@ fn run<B: AutodiffBackend>(
     let mut acc_mean = vec![0.0f64; len];
     let mut acc_sq = vec![0.0f64; len];
     for _ in 0..config.mc_samples {
-        let noise = Tensor::<B, 2>::random(
+        let noise = Tensor::<2>::random(
             [g.n, g.n_features],
             burn::tensor::Distribution::Normal(0.0, INPUT_STD),
             &device,
@@ -758,7 +748,7 @@ fn run<B: AutodiffBackend>(
         let mut yk: Vec<f64> = model
             .forward(x.clone() + noise, adj.clone())
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap()
             .into_iter()
             .map(f64::from)
@@ -843,14 +833,14 @@ fn run<B: AutodiffBackend>(
 /// held-out node features and edges, remains visible to message passing, so this
 /// is not an inductive OOD evaluation. Compares input-noise, the empirical-Fisher
 /// weight-uncertainty proxy, and max-softmax probability (MSP).
-fn ood_eval<B: AutodiffBackend>(
-    device: B::Device,
+fn ood_eval(
+    device: Device,
     dir: &Path,
     name: &str,
     held_out: i32,
     config: RunConfig,
 ) -> std::io::Result<()> {
-    <B as Backend>::seed(&device, config.seed ^ 0x0000_0003);
+    device.seed(config.seed ^ 0x0000_0003);
     let g = load_planetoid(dir, name)?;
     if g.n_classes < 2 || !(0..g.n_classes as i32).contains(&held_out) {
         return Err(std::io::Error::new(
@@ -887,13 +877,13 @@ fn ood_eval<B: AutodiffBackend>(
         ood.len()
     );
 
-    let x = Tensor::<B, 2>::from_data(
+    let x = Tensor::<2>::from_data(
         TensorData::new(g.features.clone(), [g.n, g.n_features]),
         &device,
     );
-    let adj = Tensor::<B, 2>::from_data(TensorData::new(g.adj_norm.clone(), [g.n, g.n]), &device);
-    let targets = Tensor::<B, 1, Int>::from_data(TensorData::new(known_labels, [g.n]), &device);
-    let train_sel = Tensor::<B, 1, Int>::from_data(
+    let adj = Tensor::<2>::from_data(TensorData::new(g.adj_norm.clone(), [g.n, g.n]), &device);
+    let targets = Tensor::<1, Int>::from_data(TensorData::new(known_labels, [g.n]), &device);
+    let train_sel = Tensor::<1, Int>::from_data(
         TensorData::new(
             train_idx.iter().map(|&i| i as i32).collect::<Vec<_>>(),
             [train_idx.len()],
@@ -901,7 +891,7 @@ fn ood_eval<B: AutodiffBackend>(
         &device,
     );
 
-    let mut model = Gcn::<B>::init(g.n_features, known_classes, &device);
+    let mut model = Gcn::init(g.n_features, known_classes, &device);
     let mut optim = AdamConfig::new()
         .with_weight_decay(Some(WeightDecayConfig::new(5e-4)))
         .init();
@@ -917,7 +907,7 @@ fn ood_eval<B: AutodiffBackend>(
     let logits_v = model
         .forward(x.clone(), adj.clone())
         .into_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap();
     let node_var = model.sdp_centered_logit_variance(x.clone(), adj.clone(), INPUT_STD);
     let node_epi = epistemic_centered_logit_variance(
@@ -1001,13 +991,11 @@ fn main() -> ExitCode {
     if cli.config.quick {
         println!("quick mode is a smoke/workflow check, not study evidence; dense graph memory is unchanged.");
     }
-    if let Err(err) = run::<Autodiff<NdArray<f32>>>(Default::default(), &dir, "cora", cli.config) {
+    if let Err(err) = run(Device::flex().autodiff(), &dir, "cora", cli.config) {
         eprintln!("could not run Cora evaluation: {err}");
         return ExitCode::FAILURE;
     }
-    if let Err(err) =
-        ood_eval::<Autodiff<NdArray<f32>>>(Default::default(), &dir, "cora", 0, cli.config)
-    {
+    if let Err(err) = ood_eval(Device::flex().autodiff(), &dir, "cora", 0, cli.config) {
         eprintln!("could not run Cora transductive novel-class evaluation: {err}");
         return ExitCode::FAILURE;
     }

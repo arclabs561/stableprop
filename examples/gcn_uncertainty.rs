@@ -7,17 +7,14 @@
 //!
 //! Run: `cargo run --release --example gcn_uncertainty --features burn`
 
-use burn::tensor::{backend::Backend, Device, Distribution, Tensor, TensorData};
+use burn::tensor::{Device, Distribution, Tensor, TensorData};
 #[cfg(test)]
 use burn::{module::Param, nn::Linear};
-use burn_ndarray::NdArray;
 use ricci::GCNConv;
 use stableprop::burn_sdp::{propagate_linear, propagate_matmul_left, propagate_relu, Moments};
 
-type B = NdArray<f32>;
-
 /// Pull `(weight, bias)` tensors out of a ricci GCN layer's linear.
-fn lin_params(layer: &GCNConv<B>) -> (Tensor<B, 2>, Option<Tensor<B, 1>>) {
+fn lin_params(layer: &GCNConv) -> (Tensor<2>, Option<Tensor<1>>) {
     let w = layer.linear().weight.val();
     let b = layer.linear().bias.as_ref().map(|p| p.val());
     (w, b)
@@ -25,7 +22,7 @@ fn lin_params(layer: &GCNConv<B>) -> (Tensor<B, 2>, Option<Tensor<B, 1>>) {
 
 /// SDP through one GCN layer: transform and aggregate, then add the bias.
 /// This matches `GCNConv::forward`: `adj @ (x @ W) + b`.
-fn sdp_gcn(m: &Moments<B>, layer: &GCNConv<B>, adj: Tensor<B, 2>) -> Moments<B> {
+fn sdp_gcn(m: &Moments, layer: &GCNConv, adj: Tensor<2>) -> Moments {
     let (w, b) = lin_params(layer);
     let mut output = propagate_matmul_left(adj, &propagate_linear(m, w, None));
     if let Some(bias) = b {
@@ -68,8 +65,8 @@ fn pearson_undefined_reason(a: &[f64], b: &[f64]) -> &'static str {
 }
 
 fn main() {
-    let dev = Device::<B>::default();
-    <B as Backend>::seed(&dev, 0x6C6E_0001);
+    let dev = Device::flex();
+    dev.seed(0x6C6E_0001);
     let (n, d_in, d_hid, d_out) = (32usize, 8usize, 8usize, 4usize);
     let input_std = 0.3f64;
     let k = 4000usize;
@@ -81,19 +78,19 @@ fn main() {
             adj_v[i * n + j] = 1.0 / 3.0;
         }
     }
-    let adj = Tensor::<B, 2>::from_data(TensorData::new(adj_v, [n, n]), &dev);
+    let adj = Tensor::<2>::from_data(TensorData::new(adj_v, [n, n]), &dev);
 
     // Seeded input means and layers make this comparison repeatable.
-    let x_mean = Tensor::<B, 2>::random([n, d_in], Distribution::Normal(0.0, 1.0), &dev);
-    let layer1 = GCNConv::<B>::init(d_in, d_hid, &dev);
-    let layer2 = GCNConv::<B>::init(d_hid, d_out, &dev);
+    let x_mean = Tensor::<2>::random([n, d_in], Distribution::Normal(0.0, 1.0), &dev);
+    let layer1 = GCNConv::init(d_in, d_hid, &dev);
+    let layer2 = GCNConv::init(d_hid, d_out, &dev);
 
     // --- SDP: one analytic forward pass over moments ---
-    let var0 = Tensor::<B, 2>::full([n, d_in], input_std * input_std, &dev);
+    let var0 = Tensor::<2>::full([n, d_in], input_std * input_std, &dev);
     let m0 = Moments::new(x_mean.clone(), var0);
     let m1 = propagate_relu(&sdp_gcn(&m0, &layer1, adj.clone()));
     let m2 = sdp_gcn(&m1, &layer2, adj.clone());
-    let sdp_var = m2.var.to_data().to_vec::<f32>().unwrap();
+    let sdp_var = m2.var.to_data().try_to_vec::<f32>().unwrap();
     assert!(
         sdp_var
             .iter()
@@ -106,13 +103,13 @@ fn main() {
     let mut acc_mean = vec![0.0f64; len];
     let mut samples: Vec<Vec<f64>> = Vec::with_capacity(k);
     for _ in 0..k {
-        let noise = Tensor::<B, 2>::random([n, d_in], Distribution::Normal(0.0, input_std), &dev);
+        let noise = Tensor::<2>::random([n, d_in], Distribution::Normal(0.0, input_std), &dev);
         let xk = x_mean.clone() + noise;
         let h = layer1.forward(xk, adj.clone()).clamp_min(0.0);
         let yk = layer2.forward(h, adj.clone());
         let v: Vec<f64> = yk
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap()
             .iter()
             .map(|x| *x as f64)
@@ -219,16 +216,16 @@ mod tests {
 
     #[test]
     fn sdp_gcn_adds_bias_after_non_normalized_aggregation() {
-        let device = Device::<B>::default();
-        let weight = Tensor::<B, 2>::from_data([[2.0, -1.0], [0.5, 3.0]], &device);
-        let bias = Tensor::<B, 1>::from_data([0.75, -1.25], &device);
+        let device = Device::flex();
+        let weight = Tensor::<2>::from_data([[2.0, -1.0], [0.5, 3.0]], &device);
+        let bias = Tensor::<1>::from_data([0.75, -1.25], &device);
         let layer = GCNConv::new(Linear {
             weight: Param::from_tensor(weight.clone()),
             bias: Some(Param::from_tensor(bias.clone())),
         });
-        let mean = Tensor::<B, 2>::from_data([[1.0, -2.0], [0.5, 3.0]], &device);
-        let var = Tensor::<B, 2>::from_data([[0.25, 4.0], [1.0, 0.5]], &device);
-        let adj = Tensor::<B, 2>::from_data([[2.0, 1.0], [-1.0, 3.0]], &device);
+        let mean = Tensor::<2>::from_data([[1.0, -2.0], [0.5, 3.0]], &device);
+        let var = Tensor::<2>::from_data([[0.25, 4.0], [1.0, 0.5]], &device);
+        let adj = Tensor::<2>::from_data([[2.0, 1.0], [-1.0, 3.0]], &device);
 
         let actual = sdp_gcn(
             &Moments::new(mean.clone(), var.clone()),
@@ -236,19 +233,19 @@ mod tests {
             adj.clone(),
         );
         close(
-            actual.mean.into_data().to_vec::<f32>().unwrap(),
+            actual.mean.into_data().try_to_vec::<f32>().unwrap(),
             vec![5.25, -6.75, 7.25, 31.25],
         );
         close(
             layer
                 .forward(mean, adj)
                 .into_data()
-                .to_vec::<f32>()
+                .try_to_vec::<f32>()
                 .unwrap(),
             vec![5.25, -6.75, 7.25, 31.25],
         );
         close(
-            actual.var.into_data().to_vec::<f32>().unwrap(),
+            actual.var.into_data().try_to_vec::<f32>().unwrap(),
             vec![12.125, 150.5, 39.125, 85.75],
         );
     }

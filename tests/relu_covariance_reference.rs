@@ -1,8 +1,6 @@
 #![cfg(feature = "burn")]
 
-use burn::backend::Autodiff;
-use burn::tensor::{DType, Tensor, TensorData};
-use burn_ndarray::NdArray;
+use burn::tensor::{DType, Device, Tensor, TensorData};
 use proptest::prelude::*;
 use stableprop::burn_sdp::{propagate_linear_full, propagate_relu_full, MomentsFull};
 
@@ -25,15 +23,13 @@ fn relu_derivative_tail_energy(sigma: f64, alpha: f64, p: f64) -> f64 {
 }
 
 fn relu_covariance_correlation_gradient(mean: [f64; 2], std: [f64; 2], rho: f64) -> f64 {
-    type Ad = Autodiff<NdArray<f64>>;
-
-    let device = Default::default();
+    let device = Device::flex().autodiff();
     let sigma_product = std[0] * std[1];
-    let mean = Tensor::<Ad, 2>::from_data(
+    let mean = Tensor::<2>::from_data(
         TensorData::new(mean.to_vec(), [1, 2]),
         (&device, DType::F64),
     );
-    let covariance = Tensor::<Ad, 3>::from_data(
+    let covariance = Tensor::<3>::from_data(
         TensorData::new(
             vec![
                 std[0] * std[0],
@@ -52,7 +48,7 @@ fn relu_covariance_correlation_gradient(mean: [f64; 2], std: [f64; 2], rho: f64)
         .grad(&gradients)
         .unwrap()
         .into_data()
-        .to_vec::<f64>()
+        .try_to_vec::<f64>()
         .unwrap();
     // A symmetric correlation changes both input off-diagonal entries. Sum
     // both partials before restoring the covariance unit dSigma_ij/d rho.
@@ -240,13 +236,13 @@ fn assert_nonzero_relu_fixture(fixture: NonzeroReluFixture, scales: [f64; 2]) {
     let sigma_left = fixture.std[0] * scales[0];
     let sigma_right = fixture.std[1] * scales[1];
     let covariance_unit = sigma_left * sigma_right;
-    let device = Default::default();
+    let device = Device::flex().autodiff();
     let input = MomentsFull::new(
-        Tensor::<NdArray<f64>, 2>::from_data(
+        Tensor::<2>::from_data(
             TensorData::new(vec![mean_left, mean_right], [1, 2]),
             (&device, DType::F64),
         ),
-        Tensor::<NdArray<f64>, 3>::from_data(
+        Tensor::<3>::from_data(
             TensorData::new(
                 vec![
                     sigma_left * sigma_left,
@@ -260,8 +256,8 @@ fn assert_nonzero_relu_fixture(fixture: NonzeroReluFixture, scales: [f64; 2]) {
         ),
     );
     let output = propagate_relu_full(&input);
-    let mean = output.mean.into_data().to_vec::<f64>().unwrap();
-    let cov = output.cov.into_data().to_vec::<f64>().unwrap();
+    let mean = output.mean.into_data().try_to_vec::<f64>().unwrap();
+    let cov = output.cov.into_data().try_to_vec::<f64>().unwrap();
     let (expected_mean_left, expected_variance_left, delta_left) =
         relu_moments_and_omitted_energy(mean_left, sigma_left, fixture.cdf[0]);
     let (expected_mean_right, expected_variance_right, delta_right) =
@@ -293,7 +289,7 @@ fn assert_nonzero_relu_fixture(fixture: NonzeroReluFixture, scales: [f64; 2]) {
 
 #[test]
 fn centered_relu_covariance_stays_within_series_remainder() {
-    let device = Default::default();
+    let device = Device::flex().autodiff();
     let pi = std::f64::consts::PI;
     // The exact centered bivariate Gaussian ReLU kernel has a closed form.
     // Its omitted even powers have nonnegative coefficients; their sum at
@@ -301,7 +297,7 @@ fn centered_relu_covariance_stays_within_series_remainder() {
     let max_remainder = (pi - 3.0) / (4.0 * pi);
     for rho in [-1.0f64, -0.99, -0.9, -0.5, 0.0, 0.5, 0.9, 0.99, 1.0] {
         let input = MomentsFull::new(
-            Tensor::<NdArray<f32>, 2>::zeros([1, 2], (&device, DType::F32)),
+            Tensor::<2>::zeros([1, 2], (&device, DType::F32)),
             Tensor::from_data(
                 [[[1.0, rho as f32], [rho as f32, 1.0]]],
                 (&device, DType::F32),
@@ -310,7 +306,7 @@ fn centered_relu_covariance_stays_within_series_remainder() {
         let cov = propagate_relu_full(&input)
             .cov
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         let exact = ((1.0 - rho * rho).sqrt() + (pi - rho.acos()) * rho - 1.0) / (2.0 * pi);
         let error = exact - cov[1] as f64;
@@ -346,10 +342,10 @@ proptest! {
         let sigma_left = 10.0f64.powi(left_exponent);
         let sigma_right = 10.0f64.powi(right_exponent);
         let sigma_product = sigma_left * sigma_right;
-        let device = Default::default();
+        let device = Device::flex().autodiff();
         let input = MomentsFull::new(
-            Tensor::<NdArray<f64>, 2>::zeros([1, 2], (&device, DType::F64)),
-            Tensor::<NdArray<f64>, 3>::from_data(
+            Tensor::<2>::zeros([1, 2], (&device, DType::F64)),
+            Tensor::<3>::from_data(
                 TensorData::new(
                     vec![
                         sigma_left * sigma_left,
@@ -365,7 +361,7 @@ proptest! {
         let implemented = propagate_relu_full(&input)
             .cov
             .into_data()
-            .to_vec::<f64>()
+            .try_to_vec::<f64>()
             .unwrap()[1];
 
         let pi = std::f64::consts::PI;
@@ -419,7 +415,6 @@ fn assert_composed_k3_moment_gradients(fixture: NonzeroReluFixture, scales: [f64
     // Interior, strictly positive-definite fixtures keep every perturbation
     // coordinate inside the Gaussian model. This validates derivatives of the
     // implemented K3 approximation, not derivatives of exact pair moments.
-    type Ad = Autodiff<NdArray<f64>>;
 
     let mean_values = [fixture.mean[0] * scales[0], fixture.mean[1] * scales[1]];
     let std = [fixture.std[0] * scales[0], fixture.std[1] * scales[1]];
@@ -463,18 +458,18 @@ fn assert_composed_k3_moment_gradients(fixture: NonzeroReluFixture, scales: [f64
                     + 2.0 * weight_values[0] * pair.covariance),
     ];
 
-    let device = Default::default();
-    let mean = Tensor::<Ad, 2>::from_data(
+    let device = Device::flex().autodiff();
+    let mean = Tensor::<2>::from_data(
         TensorData::new(mean_values.to_vec(), [1, 2]),
         (&device, DType::F64),
     )
     .require_grad();
-    let covariance = Tensor::<Ad, 3>::from_data(
+    let covariance = Tensor::<3>::from_data(
         TensorData::new(vec![variance[0], q, q, variance[1]], [1, 2, 2]),
         (&device, DType::F64),
     )
     .require_grad();
-    let weight = Tensor::<Ad, 2>::from_data(
+    let weight = Tensor::<2>::from_data(
         TensorData::new(weight_values.to_vec(), [2, 1]),
         (&device, DType::F64),
     )
@@ -489,19 +484,19 @@ fn assert_composed_k3_moment_gradients(fixture: NonzeroReluFixture, scales: [f64
         .grad(&gradients)
         .unwrap()
         .into_data()
-        .to_vec::<f64>()
+        .try_to_vec::<f64>()
         .unwrap();
     let actual_covariance = covariance
         .grad(&gradients)
         .unwrap()
         .into_data()
-        .to_vec::<f64>()
+        .try_to_vec::<f64>()
         .unwrap();
     let actual_weight = weight
         .grad(&gradients)
         .unwrap()
         .into_data()
-        .to_vec::<f64>()
+        .try_to_vec::<f64>()
         .unwrap();
 
     let tolerance = 8192.0 * f64::EPSILON;

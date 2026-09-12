@@ -1,19 +1,12 @@
 #![cfg(feature = "burn")]
 
-use burn::{
-    backend::Autodiff,
-    tensor::{Tensor, TensorData},
-};
-use burn_ndarray::{NdArray, NdArrayDevice};
+use burn::tensor::{DType, Device, Tensor, TensorData};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use stableprop::burn_sdp::{
     propagate_linear, propagate_linear_full, propagate_relu, propagate_relu_full, Moments,
     MomentsFull,
 };
 use std::hint::black_box;
-
-type Backend = NdArray<f32>;
-type AutodiffBackend = Autodiff<Backend>;
 
 fn covariance(width: usize) -> Vec<f32> {
     let mut factors = vec![vec![0.0f32; width]; width];
@@ -112,11 +105,11 @@ fn assert_close(actual: &[f32], expected: &[f32]) {
     }
 }
 
-fn assert_full_relu_backward_reference(device: &NdArrayDevice) {
+fn assert_full_relu_backward_reference(device: &Device) {
     let covariance =
-        Tensor::<AutodiffBackend, 3>::from_data([[[1.0, 0.5], [0.5, 1.0]]], device).require_grad();
+        Tensor::<3>::from_data([[[1.0, 0.5], [0.5, 1.0]]], (device, DType::F32)).require_grad();
     let output = propagate_relu_full(&MomentsFull::new(
-        Tensor::<AutodiffBackend, 2>::zeros([1, 2], device),
+        Tensor::<2>::zeros([1, 2], (device, DType::F32)),
         covariance.clone(),
     ));
     // For zero-mean unit-variance inputs, one off-diagonal is
@@ -126,7 +119,7 @@ fn assert_full_relu_backward_reference(device: &NdArrayDevice) {
         .grad(&gradients)
         .unwrap()
         .into_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap();
     let variance_gradient = -0.25 / (8.0 * std::f32::consts::PI);
     let expected = [
@@ -141,7 +134,7 @@ fn assert_full_relu_backward_reference(device: &NdArrayDevice) {
 }
 
 fn burn_benches(c: &mut Criterion) {
-    let device = Default::default();
+    let device = Device::flex();
     let mut affine = c.benchmark_group("burn_affine_f32");
 
     for (batch, width) in [(8, 16), (64, 64)] {
@@ -164,15 +157,24 @@ fn burn_benches(c: &mut Criterion) {
             scalar_affine(&mean, &cov, batch, width, &weight, &bias);
         let expected_diagonal_var = scalar_diagonal_variance(&variance, batch, width, &weight);
 
-        let mean_tensor =
-            Tensor::<Backend, 2>::from_data(TensorData::new(mean.clone(), [batch, width]), &device);
-        let variance_tensor =
-            Tensor::<Backend, 2>::from_data(TensorData::new(variance, [batch, width]), &device);
-        let cov_tensor =
-            Tensor::<Backend, 3>::from_data(TensorData::new(cov, [batch, width, width]), &device);
-        let weight_tensor =
-            Tensor::<Backend, 2>::from_data(TensorData::new(weight, [width, width]), &device);
-        let bias_tensor = Tensor::<Backend, 1>::from_data(TensorData::new(bias, [width]), &device);
+        let mean_tensor = Tensor::<2>::from_data(
+            TensorData::new(mean.clone(), [batch, width]),
+            (&device, DType::F32),
+        );
+        let variance_tensor = Tensor::<2>::from_data(
+            TensorData::new(variance, [batch, width]),
+            (&device, DType::F32),
+        );
+        let cov_tensor = Tensor::<3>::from_data(
+            TensorData::new(cov, [batch, width, width]),
+            (&device, DType::F32),
+        );
+        let weight_tensor = Tensor::<2>::from_data(
+            TensorData::new(weight, [width, width]),
+            (&device, DType::F32),
+        );
+        let bias_tensor =
+            Tensor::<1>::from_data(TensorData::new(bias, [width]), (&device, DType::F32));
 
         let diagonal_input = Moments::new(mean_tensor.clone(), variance_tensor);
         let full_input = MomentsFull::new(mean_tensor, cov_tensor);
@@ -182,10 +184,10 @@ fn burn_benches(c: &mut Criterion) {
             Some(bias_tensor.clone()),
         );
         assert_close(
-            &diagonal_out.mean.into_data().to_vec::<f32>().unwrap(),
+            &diagonal_out.mean.into_data().try_to_vec::<f32>().unwrap(),
             &expected_mean,
         );
-        let diagonal_var = diagonal_out.var.into_data().to_vec::<f32>().unwrap();
+        let diagonal_var = diagonal_out.var.into_data().try_to_vec::<f32>().unwrap();
         assert_close(&diagonal_var, &expected_diagonal_var);
         let full_out = propagate_linear_full(
             &full_input,
@@ -193,11 +195,11 @@ fn burn_benches(c: &mut Criterion) {
             Some(bias_tensor.clone()),
         );
         assert_close(
-            &full_out.mean.into_data().to_vec::<f32>().unwrap(),
+            &full_out.mean.into_data().try_to_vec::<f32>().unwrap(),
             &expected_mean,
         );
         assert_close(
-            &full_out.cov.into_data().to_vec::<f32>().unwrap(),
+            &full_out.cov.into_data().try_to_vec::<f32>().unwrap(),
             &expected_cov,
         );
 
@@ -245,20 +247,22 @@ fn burn_benches(c: &mut Criterion) {
             ),
             ("negative_tail", vec![-7.0; batch * width]),
         ] {
-            let mean_tensor =
-                Tensor::<Backend, 2>::from_data(TensorData::new(mean, [batch, width]), &device);
+            let mean_tensor = Tensor::<2>::from_data(
+                TensorData::new(mean, [batch, width]),
+                (&device, DType::F32),
+            );
             let diagonal_input = Moments::new(
                 mean_tensor.clone(),
-                Tensor::<Backend, 2>::from_data(
+                Tensor::<2>::from_data(
                     TensorData::new(variance.clone(), [batch, width]),
-                    &device,
+                    (&device, DType::F32),
                 ),
             );
             let full_input = MomentsFull::new(
                 mean_tensor,
-                Tensor::<Backend, 3>::from_data(
+                Tensor::<3>::from_data(
                     TensorData::new(cov.clone(), [batch, width, width]),
-                    &device,
+                    (&device, DType::F32),
                 ),
             );
             let id = format!("{case}_b{batch}w{width}");
@@ -276,6 +280,7 @@ fn burn_benches(c: &mut Criterion) {
 
     // The base tensors have no autodiff graph. Cloning and requiring gradients
     // within each iteration creates fresh leaves while reusing fixture storage.
+    let device = device.autodiff();
     assert_full_relu_backward_reference(&device);
     let mut relu_backward = c.benchmark_group("burn_relu_full_backward_f32");
     for (batch, width) in [(8, 16), (64, 64)] {
@@ -283,9 +288,9 @@ fn burn_benches(c: &mut Criterion) {
         let covariance: Vec<f32> = (0..batch)
             .flat_map(|_| covariance_one.iter().copied())
             .collect();
-        let base_covariance = Tensor::<AutodiffBackend, 3>::from_data(
+        let base_covariance = Tensor::<3>::from_data(
             TensorData::new(covariance, [batch, width, width]),
-            &device,
+            (&device, DType::F32),
         );
 
         for (case, mean) in [
@@ -297,9 +302,9 @@ fn burn_benches(c: &mut Criterion) {
             ),
             ("negative_tail", vec![-7.0; batch * width]),
         ] {
-            let base_mean = Tensor::<AutodiffBackend, 2>::from_data(
+            let base_mean = Tensor::<2>::from_data(
                 TensorData::new(mean, [batch, width]),
-                &device,
+                (&device, DType::F32),
             );
             let id = format!("{case}_b{batch}w{width}");
             relu_backward.bench_with_input(

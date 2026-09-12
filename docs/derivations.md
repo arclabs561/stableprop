@@ -155,7 +155,7 @@ Thus the mathematical identities and their floating-point evaluation have
 different exactness claims. The [method guide](methods.md#efficiency-and-accuracy)
 describes precision and autodiff safeguards.
 
-Burn's division backward can also use an approximate reciprocal. For ratios
+Burn 0.21's division backward also used an approximate reciprocal. For ratios
 with a positive standard deviation or tail denominator, the implementation
 computes an untracked scale $s=1/b$, then evaluates $q=bs$ and $y=(as)/q$.
 Holding the numerical scale fixed during differentiation gives

@@ -46,7 +46,7 @@ jobs:
         include:
           - toolchain: "1.80.0"
             features: ""
-          - toolchain: "1.92.0"
+          - toolchain: "1.95.0"
             features: "burn"
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -55,7 +55,43 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ matrix.toolchain }}
-      - name: check library
-        run: cargo check --lib --no-default-features --features "$CARGO_FEATURES"
-        env:
-          CARGO_FEATURES: ${{ matrix.features }}
+      - name: Check default public API at MSRV
+        if: matrix.features == ''
+        run: |
+          consumer="$(mktemp -d "$RUNNER_TEMP/stableprop-msrv-consumer-XXXXXX")"
+          cat > "$consumer/Cargo.toml" <<EOF
+          [package]
+          name = "stableprop-msrv-consumer"
+          version = "0.0.0"
+          edition = "2021"
+          rust-version = "1.80"
+
+          [workspace]
+
+          [dependencies]
+          stableprop = { path = "$GITHUB_WORKSPACE" }
+          EOF
+          mkdir "$consumer/src"
+          cat > "$consumer/src/main.rs" <<'EOF'
+          use stableprop::{propagate_sequential, Layer};
+
+          fn main() {
+              let layers = [
+                  Layer::Linear {
+                      weight: vec![vec![1.0, -1.0]],
+                      bias: vec![0.0],
+                  },
+                  Layer::ReLU,
+              ];
+              let output = propagate_sequential(&layers, &[0.0, 0.0], &[0.3, 0.4]);
+              let expected_mean = 0.5 / (2.0 * std::f64::consts::PI).sqrt();
+              let expected_var = 0.25 * (0.5 - 1.0 / (2.0 * std::f64::consts::PI));
+              assert!((output.mean[0] - expected_mean).abs() < 1e-12);
+              assert!((output.cov[0][0] - expected_var).abs() < 1e-12);
+          }
+          EOF
+          cargo check --manifest-path "$consumer/Cargo.toml"
+          cargo run --manifest-path "$consumer/Cargo.toml"
+      - name: Check Burn library
+        if: matrix.features == 'burn'
+        run: cargo check --lib --no-default-features --features burn

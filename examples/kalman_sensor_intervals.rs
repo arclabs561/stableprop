@@ -22,23 +22,17 @@
 //! Run 20 independent fitted-model/split studies:
 //! `cargo run --release --features burn --example kalman_sensor_intervals -- --study`
 
-use burn::backend::Autodiff;
 use burn::module::Module;
 use burn::nn::loss::{MseLoss, Reduction};
 use burn::nn::{Linear, LinearConfig};
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
-use burn::tensor::backend::Backend;
+use burn::optim::{AdamConfig, GradientsParams};
 use burn::tensor::{activation, Device, Tensor, TensorData};
-use burn_ndarray::NdArray;
 use statskit::conformal::{calibrate_in_place, Coverage, Threshold};
 
 use stableprop::burn_sdp::{
     propagate_linear, propagate_linear_full, propagate_relu, propagate_relu_full, Moments,
     MomentsFull,
 };
-
-type Ad = Autodiff<NdArray<f32>>;
-type Nd = NdArray<f32>;
 
 const DIM: usize = 2;
 const HIDDEN: usize = 24;
@@ -75,20 +69,20 @@ const R: [[f64; DIM]; DIM] = [[0.08, 0.02], [0.02, 0.11]];
 const A: [[f64; DIM]; DIM] = [[0.90, 0.25], [0.25, 0.50]];
 
 #[derive(Module, Debug)]
-struct Mlp<B: Backend> {
-    first: Linear<B>,
-    last: Linear<B>,
+struct Mlp {
+    first: Linear,
+    last: Linear,
 }
 
-impl<B: Backend> Mlp<B> {
-    fn init(device: &B::Device) -> Self {
+impl Mlp {
+    fn init(device: &Device) -> Self {
         Self {
             first: LinearConfig::new(DIM, HIDDEN).init(device),
             last: LinearConfig::new(HIDDEN, 1).init(device),
         }
     }
 
-    fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+    fn forward(&self, x: Tensor<2>) -> Tensor<2> {
         self.last.forward(activation::relu(self.first.forward(x)))
     }
 }
@@ -345,12 +339,12 @@ fn clean_training_data(count: usize, seed: u64) -> (Vec<f32>, Vec<f32>) {
     (inputs, labels)
 }
 
-fn train_model(rows: usize, epochs: usize, seed: u64, device: &Device<Ad>) -> Mlp<Ad> {
+fn train_model(rows: usize, epochs: usize, seed: u64, device: &Device) -> Mlp {
     let (inputs, labels) = clean_training_data(rows, seed ^ 0xA11C_E001);
-    let x = Tensor::<Ad, 2>::from_data(TensorData::new(inputs, [rows, DIM]), device);
-    let y = Tensor::<Ad, 2>::from_data(TensorData::new(labels, [rows, 1]), device);
-    <Ad as Backend>::seed(device, seed ^ 0xA11C_E002);
-    let mut model = Mlp::<Ad>::init(device);
+    let x = Tensor::<2>::from_data(TensorData::new(inputs, [rows, DIM]), device);
+    let y = Tensor::<2>::from_data(TensorData::new(labels, [rows, 1]), device);
+    device.seed(seed ^ 0xA11C_E002);
+    let mut model = Mlp::init(device);
     let mut optimizer = AdamConfig::new().init();
     for _ in 0..epochs {
         let loss = MseLoss::new().forward(model.forward(x.clone()), y.clone(), Reduction::Mean);
@@ -400,15 +394,14 @@ fn finite_moments(mean: Vec<f32>, variance: Vec<f32>) -> Vec<MomentsEstimate> {
 }
 
 fn propagate(
-    model: &Mlp<Ad>,
+    model: &Mlp,
     rows: &[Trajectory],
     full: bool,
-    device: &Device<Nd>,
+    device: &Device,
 ) -> Vec<MomentsEstimate> {
     let count = rows.len();
-    let mean =
-        Tensor::<Nd, 2>::from_data(TensorData::new(flatten_means(rows), [count, DIM]), device);
-    let covariance = Tensor::<Nd, 3>::from_data(
+    let mean = Tensor::<2>::from_data(TensorData::new(flatten_means(rows), [count, DIM]), device);
+    let covariance = Tensor::<3>::from_data(
         TensorData::new(flatten_covariances(rows), [count, DIM, DIM]),
         device,
     );
@@ -426,8 +419,8 @@ fn propagate(
             w2,
             b2,
         );
-        let variance = output.variance().to_data().to_vec::<f32>().unwrap();
-        let mean = output.mean.to_data().to_vec::<f32>().unwrap();
+        let variance = output.variance().to_data().try_to_vec::<f32>().unwrap();
+        let mean = output.mean.to_data().try_to_vec::<f32>().unwrap();
         finite_moments(mean, variance)
     } else {
         // Retain the supplied input covariance in the first affine marginal,
@@ -440,14 +433,14 @@ fn propagate(
             b2,
         );
         finite_moments(
-            output.mean.to_data().to_vec::<f32>().unwrap(),
-            output.var.to_data().to_vec::<f32>().unwrap(),
+            output.mean.to_data().try_to_vec::<f32>().unwrap(),
+            output.var.to_data().try_to_vec::<f32>().unwrap(),
         )
     }
 }
 
-fn forward_inner(model: &Mlp<Ad>, inputs: Vec<f32>, rows: usize, device: &Device<Nd>) -> Vec<f64> {
-    let x = Tensor::<Nd, 2>::from_data(TensorData::new(inputs, [rows, DIM]), device);
+fn forward_inner(model: &Mlp, inputs: Vec<f32>, rows: usize, device: &Device) -> Vec<f64> {
+    let x = Tensor::<2>::from_data(TensorData::new(inputs, [rows, DIM]), device);
     let w1 = model.first.weight.val().inner();
     let b1 = model
         .first
@@ -464,7 +457,7 @@ fn forward_inner(model: &Mlp<Ad>, inputs: Vec<f32>, rows: usize, device: &Device
         .expect("configured linear layer has a bias");
     (activation::relu(x.matmul(w1) + b1.reshape([1, HIDDEN])).matmul(w2) + b2.reshape([1, 1]))
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
         .into_iter()
         .map(f64::from)
@@ -472,11 +465,11 @@ fn forward_inner(model: &Mlp<Ad>, inputs: Vec<f32>, rows: usize, device: &Device
 }
 
 fn matched_mc(
-    model: &Mlp<Ad>,
+    model: &Mlp,
     rows: &[Trajectory],
     draws: usize,
     seed: u64,
-    device: &Device<Nd>,
+    device: &Device,
 ) -> Vec<MomentsEstimate> {
     assert!(draws > 1, "matched Monte Carlo needs two draws");
     let mut rng = Rng::new(seed);
@@ -563,7 +556,7 @@ fn mean_abs_difference(
         / left.len() as f64
 }
 
-fn trial(repeat: usize, quick: bool, device: &Device<Ad>) -> Trial {
+fn trial(repeat: usize, quick: bool, device: &Device) -> Trial {
     let (train_rows, calibration_rows, test_rows, epochs, draws) = if quick {
         (
             QUICK_TRAIN,
@@ -579,7 +572,7 @@ fn trial(repeat: usize, quick: bool, device: &Device<Ad>) -> Trial {
     let model = train_model(train_rows, epochs, base + 1, device);
     let calibration = trajectories(calibration_rows, base + 2);
     let test = trajectories(test_rows, base + 3);
-    let inner = Device::<Nd>::default();
+    let inner = Device::flex();
     let full_calibration = propagate(&model, &calibration, true, &inner);
     let full_test = propagate(&model, &test, true, &inner);
     let diagonal_test = propagate(&model, &test, false, &inner);
@@ -700,7 +693,7 @@ fn main() {
         _ => panic!("usage: kalman_sensor_intervals [--quick|--study]"),
     };
     let repeats = if quick { QUICK_REPEATS } else { FULL_REPEATS };
-    let device = Device::<Ad>::default();
+    let device = Device::flex().autodiff();
     println!("two-channel linear-Gaussian state estimator; shared-plus-independent reading covariance R={R:?}");
     println!("{repeats} independent trajectory splits; one terminal target per trajectory; observation steps={OBSERVATIONS}, horizon={HORIZON}");
     println!(
@@ -895,18 +888,16 @@ mod tests {
 
     #[test]
     fn actual_propagation_has_zero_variance_for_zero_covariance() {
-        let device = Device::<Nd>::default();
-        let mean =
-            Tensor::<Nd, 2>::from_data(TensorData::new(vec![0.4_f32, -0.2], [1, DIM]), &device);
-        let covariance = Tensor::<Nd, 3>::zeros([1, DIM, DIM], &device);
-        let w1 = Tensor::<Nd, 2>::from_data(
+        let device = Device::flex();
+        let mean = Tensor::<2>::from_data(TensorData::new(vec![0.4_f32, -0.2], [1, DIM]), &device);
+        let covariance = Tensor::<3>::zeros([1, DIM, DIM], &device);
+        let w1 = Tensor::<2>::from_data(
             TensorData::new(vec![1.0_f32, -0.5, -0.3, 0.8], [DIM, DIM]),
             &device,
         );
-        let b1 = Tensor::<Nd, 1>::from_data(TensorData::new(vec![0.1_f32, 0.2], [DIM]), &device);
-        let w2 =
-            Tensor::<Nd, 2>::from_data(TensorData::new(vec![0.7_f32, -0.4], [DIM, 1]), &device);
-        let b2 = Tensor::<Nd, 1>::from_data(TensorData::new(vec![0.05_f32], [1]), &device);
+        let b1 = Tensor::<1>::from_data(TensorData::new(vec![0.1_f32, 0.2], [DIM]), &device);
+        let w2 = Tensor::<2>::from_data(TensorData::new(vec![0.7_f32, -0.4], [DIM, 1]), &device);
+        let b2 = Tensor::<1>::from_data(TensorData::new(vec![0.05_f32], [1]), &device);
         let output = propagate_linear_full(
             &propagate_relu_full(&propagate_linear_full(
                 &MomentsFull::new(mean.clone(), covariance),
@@ -916,12 +907,12 @@ mod tests {
             w2.clone(),
             Some(b2.clone()),
         );
-        let variance = output.variance().to_data().to_vec::<f32>().unwrap();
-        let propagated = output.mean.to_data().to_vec::<f32>().unwrap();
+        let variance = output.variance().to_data().try_to_vec::<f32>().unwrap();
+        let propagated = output.mean.to_data().try_to_vec::<f32>().unwrap();
         let point = (activation::relu(mean.matmul(w1) + b1.reshape([1, DIM])).matmul(w2)
             + b2.reshape([1, 1]))
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap();
         assert_eq!(propagated, point);
         assert_eq!(variance, vec![0.0]);

@@ -37,8 +37,8 @@ to exploration value and augmentation disagreement to training-data selection.
 
 ## Start with a small network
 
-The default API uses `f64` vectors, has no runtime dependencies, and supports
-Rust 1.80. The optional Burn backend requires Rust 1.92 or newer.
+The published default API uses `f64` vectors, has no runtime dependencies, and
+supports Rust 1.80.
 
 ```toml
 [dependencies]
@@ -76,27 +76,42 @@ cargo run --release --example basic
 
 ## Burn models
 
-Enable `features = ["burn"]` for batched tensors. Use an autodiff Burn 0.21
-backend for differentiable propagation. Burn weights use `[input, output]`, the
-transpose of the vector API's layout.
+The Burn tensor integration is development API, not a published crate release.
+It requires Rust 1.95 or newer. Use stableprop's `main` branch with the same
+Burn revision when importing `burn::tensor::Tensor`:
 
-Burn selects tensor precision at creation. For `f64`, pass
-`(&device, DType::F64)` to tensor constructors; a backend type alone does not
-select double precision. Use the same floating dtype for moments, weights and
-biases. Propagation preserves that dtype.
+```toml
+[dependencies.stableprop]
+git = "https://github.com/arclabs561/stableprop"
+branch = "main"
+features = ["burn"]
+
+[dependencies.burn]
+git = "https://github.com/tracel-ai/burn"
+rev = "1414c8a14e5169ef5e5fc67f9b8ab01a25d6352d"
+default-features = false
+features = ["std", "flex", "autodiff"]
+```
+
+Burn weights use `[input, output]`, the transpose of the vector API's layout.
+CPU examples use `Device::flex()`; call `.autodiff()` when differentiating.
+On macOS, `Device::metal(DeviceKind::DefaultDevice)` selects Metal. Burn selects
+tensor precision at creation. For `f64`, pass `(&device, DType::F64)` to tensor
+constructors. Use the same floating dtype for moments, weights and biases.
+Propagation preserves that dtype.
 
 | Representation | What it tracks | Main approximation |
 | --- | --- | --- |
-| [`burn_sdp::Moments`](https://docs.rs/stableprop/latest/stableprop/burn_sdp/struct.Moments.html) | Mean and variance, each `[batch, features]` | Drops feature and row correlations |
-| [`burn_sdp::MomentsFull`](https://docs.rs/stableprop/latest/stableprop/burn_sdp/struct.MomentsFull.html) | Mean `[batch, features]`; covariance `[batch, features, features]` | No cross-row covariance; Gaussian layer inputs; [third-order ReLU covariance series](docs/derivations.md#relu-coefficients-and-the-implemented-order) |
-| [`burn_sdp::Cauchy`](https://docs.rs/stableprop/latest/stableprop/burn_sdp/struct.Cauchy.html) | Location and scale, each `[batch, features]` | Drops dependence; local ReLU gate |
+| [`burn_sdp::Moments`](src/burn_sdp.rs) | Mean and variance, each `[batch, features]` | Drops feature and row correlations |
+| [`burn_sdp::MomentsFull`](src/burn_sdp.rs) | Mean `[batch, features]`; covariance `[batch, features, features]` | No cross-row covariance; Gaussian layer inputs; [third-order ReLU covariance series](docs/derivations.md#relu-coefficients-and-the-implemented-order) |
+| [`burn_sdp::Cauchy`](src/burn_sdp.rs) | Location and scale, each `[batch, features]` | Drops dependence; local ReLU gate |
 
 The tensor API also includes leaky ReLU, diagonal convolution, fixed left
 matrix multiplication, residual addition, and affine propagation with supplied
 weight variances. Cross-covariance helpers propagate supplied within-row
 covariance through affine and Gaussian ReLU steps. Pass the resulting diagonal
-to `propagate_residual_add_correlated` for the residual cross term. See the
-[API documentation](https://docs.rs/stableprop/latest/stableprop/burn_sdp/).
+to `propagate_residual_add_correlated` for the residual cross term. The
+[source documentation](src/burn_sdp.rs) describes the development API.
 
 On macOS, `features = ["metal"]` enables Burn's WGPU Metal backend with
 operation fusion. Run `just metal-train` for the training example or
@@ -145,8 +160,9 @@ output interval is an approximation after nonlinear propagation.
 
 ## Checks
 
-Use current stable Rust for repository development. The Rust 1.80 floor applies
-to the default library; tests and examples also resolve the Burn dependencies.
+Use Rust 1.95 or newer for repository development. The Rust 1.80 floor applies
+to consumers of the default library; checking this checkout also resolves
+Burn's Git workspace. CI checks the default API through an isolated consumer.
 Install [just](https://github.com/casey/just#installation), then run:
 
 ```sh

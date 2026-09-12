@@ -1,18 +1,15 @@
 #![cfg(feature = "burn")]
 
-//! Property tests for Burn's NdArray implementation.  The scalar expectations
+//! Property tests for Burn's Flex implementation.  The scalar expectations
 //! are deliberately evaluated on the host so they do not repeat tensor shapes
 //! or reductions from the implementation under test.
 
-use burn::tensor::{Tensor, TensorData};
-use burn_ndarray::NdArray;
+use burn::tensor::{Device, Tensor, TensorData};
 use proptest::prelude::*;
 use stableprop::burn_sdp::{
     propagate_linear_cross_covariance, propagate_linear_full, propagate_relu_cross_covariance,
     propagate_relu_full, propagate_residual_add_correlated, Moments, MomentsFull,
 };
-
-type Nd = NdArray<f32>;
 
 const BATCH: usize = 2;
 
@@ -197,18 +194,18 @@ proptest! {
         for batch in 0..BATCH {
             prop_assert!(case.cov[batch * case.d_in * case.d_in + 1].abs() > 0.0);
         }
-        let device = Default::default();
+        let device = Device::flex().autodiff();
         let moments = MomentsFull::new(
-            Tensor::<Nd, 2>::from_data(TensorData::new(case.mean.clone(), [BATCH, case.d_in]), &device),
-            Tensor::<Nd, 3>::from_data(TensorData::new(case.cov.clone(), [BATCH, case.d_in, case.d_in]), &device),
+            Tensor::<2>::from_data(TensorData::new(case.mean.clone(), [BATCH, case.d_in]), &device),
+            Tensor::<3>::from_data(TensorData::new(case.cov.clone(), [BATCH, case.d_in, case.d_in]), &device),
         );
         let out = propagate_linear_full(
             &moments,
-            Tensor::<Nd, 2>::from_data(TensorData::new(case.weight.clone(), [case.d_in, case.d_out]), &device),
-            Some(Tensor::<Nd, 1>::from_data(TensorData::new(case.bias.clone(), [case.d_out]), &device)),
+            Tensor::<2>::from_data(TensorData::new(case.weight.clone(), [case.d_in, case.d_out]), &device),
+            Some(Tensor::<1>::from_data(TensorData::new(case.bias.clone(), [case.d_out]), &device)),
         );
-        let actual_mean = out.mean.into_data().to_vec::<f32>().unwrap();
-        let actual_cov = out.cov.into_data().to_vec::<f32>().unwrap();
+        let actual_mean = out.mean.into_data().try_to_vec::<f32>().unwrap();
+        let actual_cov = out.cov.into_data().try_to_vec::<f32>().unwrap();
         for batch in 0..BATCH {
             for out_i in 0..case.d_out {
                 let mut expected_mean = case.bias[out_i] as f64;
@@ -256,12 +253,12 @@ proptest! {
         for batch in 0..BATCH {
             prop_assert!(case.cross[batch * case.d_left * case.d_in].abs() > 0.0);
         }
-        let device = Default::default();
-        let cross = Tensor::<Nd, 3>::from_data(TensorData::new(case.cross.clone(), [BATCH, case.d_left, case.d_in]), &device);
-        let w1 = Tensor::<Nd, 2>::from_data(TensorData::new(case.first.clone(), [case.d_in, case.d_hidden]), &device);
-        let w2 = Tensor::<Nd, 2>::from_data(TensorData::new(case.second.clone(), [case.d_hidden, case.d_out]), &device);
+        let device = Device::flex().autodiff();
+        let cross = Tensor::<3>::from_data(TensorData::new(case.cross.clone(), [BATCH, case.d_left, case.d_in]), &device);
+        let w1 = Tensor::<2>::from_data(TensorData::new(case.first.clone(), [case.d_in, case.d_hidden]), &device);
+        let w2 = Tensor::<2>::from_data(TensorData::new(case.second.clone(), [case.d_hidden, case.d_out]), &device);
         let first_hop = propagate_linear_cross_covariance(cross, w1);
-        let first_values = first_hop.clone().into_data().to_vec::<f32>().unwrap();
+        let first_values = first_hop.clone().into_data().try_to_vec::<f32>().unwrap();
         for batch in 0..BATCH {
             for left in 0..case.d_left {
                 for hidden in 0..case.d_hidden {
@@ -285,7 +282,7 @@ proptest! {
         }
         let sequential = propagate_linear_cross_covariance(first_hop, w2)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         for batch in 0..BATCH {
             for left in 0..case.d_left {
@@ -320,12 +317,12 @@ proptest! {
         case in full_affine_case(),
         direction_coefficients in prop::collection::vec(-2.0f32..2.0, 12),
     ) {
-        let device = Default::default();
+        let device = Device::flex().autodiff();
         let out = propagate_relu_full(&MomentsFull::new(
-            Tensor::<Nd, 2>::from_data(TensorData::new(case.mean.clone(), [BATCH, case.d_in]), &device),
-            Tensor::<Nd, 3>::from_data(TensorData::new(case.cov.clone(), [BATCH, case.d_in, case.d_in]), &device),
+            Tensor::<2>::from_data(TensorData::new(case.mean.clone(), [BATCH, case.d_in]), &device),
+            Tensor::<3>::from_data(TensorData::new(case.cov.clone(), [BATCH, case.d_in, case.d_in]), &device),
         ));
-        let covariance = out.cov.into_data().to_vec::<f32>().unwrap();
+        let covariance = out.cov.into_data().try_to_vec::<f32>().unwrap();
         let mut contrast = vec![0.0; case.d_in];
         contrast[0] = 1.0;
         contrast[1] = -1.0;
@@ -386,7 +383,7 @@ proptest! {
     /// to affine weight rows leaves the output distribution unchanged.
     #[test]
     fn full_relu_and_affine_are_feature_permutation_equivariant(case in full_affine_case()) {
-        let device = Default::default();
+        let device = Device::flex().autodiff();
         let permutation: Vec<usize> = (0..case.d_in)
             .map(|i| if i < 2 { 1 - i } else { i })
             .collect();
@@ -407,20 +404,20 @@ proptest! {
                 perm_weight[i * case.d_out + o] = case.weight[permutation[i] * case.d_out + o];
             }
         }
-        let original: MomentsFull<Nd> = MomentsFull::new(
+        let original: MomentsFull = MomentsFull::new(
             Tensor::from_data(TensorData::new(case.mean.clone(), [BATCH, case.d_in]), &device),
             Tensor::from_data(TensorData::new(case.cov.clone(), [BATCH, case.d_in, case.d_in]), &device),
         );
-        let permuted: MomentsFull<Nd> = MomentsFull::new(
+        let permuted: MomentsFull = MomentsFull::new(
             Tensor::from_data(TensorData::new(perm_mean, [BATCH, case.d_in]), &device),
             Tensor::from_data(TensorData::new(perm_cov, [BATCH, case.d_in, case.d_in]), &device),
         );
         let relu = propagate_relu_full(&original);
         let relu_perm = propagate_relu_full(&permuted);
-        let relu_mean = relu.mean.clone().into_data().to_vec::<f32>().unwrap();
-        let relu_cov = relu.cov.clone().into_data().to_vec::<f32>().unwrap();
-        let relu_perm_mean = relu_perm.mean.clone().into_data().to_vec::<f32>().unwrap();
-        let relu_perm_cov = relu_perm.cov.clone().into_data().to_vec::<f32>().unwrap();
+        let relu_mean = relu.mean.clone().into_data().try_to_vec::<f32>().unwrap();
+        let relu_cov = relu.cov.clone().into_data().try_to_vec::<f32>().unwrap();
+        let relu_perm_mean = relu_perm.mean.clone().into_data().try_to_vec::<f32>().unwrap();
+        let relu_perm_cov = relu_perm.cov.clone().into_data().try_to_vec::<f32>().unwrap();
         for batch in 0..BATCH {
             for i in 0..case.d_in {
                 let a = relu_perm_mean[batch * case.d_in + i] as f64;
@@ -443,10 +440,10 @@ proptest! {
             Tensor::from_data(TensorData::new(perm_weight, [case.d_in, case.d_out]), &device),
             Some(Tensor::from_data(TensorData::new(case.bias.clone(), [case.d_out]), &device)),
         );
-        let mean = out.mean.into_data().to_vec::<f32>().unwrap();
-        let perm_mean = out_perm.mean.into_data().to_vec::<f32>().unwrap();
-        let cov = out.cov.into_data().to_vec::<f32>().unwrap();
-        let perm_cov = out_perm.cov.into_data().to_vec::<f32>().unwrap();
+        let mean = out.mean.into_data().try_to_vec::<f32>().unwrap();
+        let perm_mean = out_perm.mean.into_data().try_to_vec::<f32>().unwrap();
+        let cov = out.cov.into_data().try_to_vec::<f32>().unwrap();
+        let perm_cov = out_perm.cov.into_data().try_to_vec::<f32>().unwrap();
         // Permuting summands changes rounding. Bound it by the sum of absolute
         // terms, not the potentially near-zero result after cancellation.
         for batch in 0..BATCH {
@@ -485,21 +482,21 @@ proptest! {
     /// must equal processing each singleton batch independently.
     #[test]
     fn full_relu_affine_is_batch_partition_invariant(case in full_affine_case()) {
-        let device = Default::default();
-        let input: MomentsFull<Nd> = MomentsFull::new(
+        let device = Device::flex().autodiff();
+        let input: MomentsFull = MomentsFull::new(
             Tensor::from_data(TensorData::new(case.mean.clone(), [BATCH, case.d_in]), &device),
             Tensor::from_data(TensorData::new(case.cov.clone(), [BATCH, case.d_in, case.d_in]), &device),
         );
         let weight = Tensor::from_data(TensorData::new(case.weight.clone(), [case.d_in, case.d_out]), &device);
         let bias = Tensor::from_data(TensorData::new(case.bias.clone(), [case.d_out]), &device);
         let relu = propagate_relu_full(&input);
-        let relu_mean = relu.mean.to_data().to_vec::<f32>().unwrap();
-        let relu_cov = relu.cov.to_data().to_vec::<f32>().unwrap();
+        let relu_mean = relu.mean.to_data().try_to_vec::<f32>().unwrap();
+        let relu_cov = relu.cov.to_data().try_to_vec::<f32>().unwrap();
         let combined = propagate_linear_full(&relu, weight.clone(), Some(bias.clone()));
-        let combined_mean = combined.mean.into_data().to_vec::<f32>().unwrap();
-        let combined_cov = combined.cov.into_data().to_vec::<f32>().unwrap();
+        let combined_mean = combined.mean.into_data().try_to_vec::<f32>().unwrap();
+        let combined_cov = combined.cov.into_data().try_to_vec::<f32>().unwrap();
         for batch in 0..BATCH {
-            let row: MomentsFull<Nd> = MomentsFull::new(
+            let row: MomentsFull = MomentsFull::new(
                 Tensor::from_data(TensorData::new(
                     case.mean[batch * case.d_in..(batch + 1) * case.d_in].to_vec(),
                     [1, case.d_in],
@@ -510,8 +507,8 @@ proptest! {
                 ), &device),
             );
             let separate = propagate_linear_full(&propagate_relu_full(&row), weight.clone(), Some(bias.clone()));
-            let mean = separate.mean.into_data().to_vec::<f32>().unwrap();
-            let cov = separate.cov.into_data().to_vec::<f32>().unwrap();
+            let mean = separate.mean.into_data().try_to_vec::<f32>().unwrap();
+            let cov = separate.cov.into_data().try_to_vec::<f32>().unwrap();
             // Batch shape can change kernel rounding. Bound the affine sum
             // by its absolute terms, including when its result nearly cancels.
             for (i, actual) in mean.iter().enumerate() {
@@ -552,8 +549,8 @@ proptest! {
         slope in prop_oneof![Just(-1.0f32), -2.0f32..2.0],
         bias in -2.0f32..2.0,
     ) {
-        let device = Default::default();
-        let skip: Moments<Nd> = Moments::new(
+        let device = Device::flex().autodiff();
+        let skip: Moments = Moments::new(
             Tensor::from_data([[mean]], &device),
             Tensor::from_data([[variance]], &device),
         );
@@ -564,8 +561,8 @@ proptest! {
         let out = propagate_residual_add_correlated(
             &skip, &branch, Tensor::from_data([[slope * variance]], &device),
         );
-        let actual_mean = out.mean.into_data().to_vec::<f32>().unwrap()[0] as f64;
-        let actual_var = out.var.into_data().to_vec::<f32>().unwrap()[0] as f64;
+        let actual_mean = out.mean.into_data().try_to_vec::<f32>().unwrap()[0] as f64;
+        let actual_var = out.var.into_data().try_to_vec::<f32>().unwrap()[0] as f64;
         let factor = 1.0 + slope as f64;
         let expected_mean = factor * mean as f64 + bias as f64;
         let expected_var = factor * factor * variance as f64;
@@ -581,23 +578,23 @@ proptest! {
     #[test]
     fn relu_cross_covariance_reflection_recovers_input_cross_covariance(case in relu_case()) {
         let d_right = 4;
-        let device = Default::default();
+        let device = Device::flex().autodiff();
         let right = Moments::new(
-            Tensor::<Nd, 2>::from_data(TensorData::new(case.mean.clone(), [BATCH, d_right]), &device),
-            Tensor::<Nd, 2>::from_data(TensorData::new(case.var.clone(), [BATCH, d_right]), &device),
+            Tensor::<2>::from_data(TensorData::new(case.mean.clone(), [BATCH, d_right]), &device),
+            Tensor::<2>::from_data(TensorData::new(case.var.clone(), [BATCH, d_right]), &device),
         );
         let reflected_right = Moments::new(
-            Tensor::<Nd, 2>::from_data(TensorData::new(case.mean.iter().map(|value| -value).collect(), [BATCH, d_right]), &device),
-            Tensor::<Nd, 2>::from_data(TensorData::new(case.var.clone(), [BATCH, d_right]), &device),
+            Tensor::<2>::from_data(TensorData::new(case.mean.iter().map(|value| -value).collect(), [BATCH, d_right]), &device),
+            Tensor::<2>::from_data(TensorData::new(case.var.clone(), [BATCH, d_right]), &device),
         );
         let positive = propagate_relu_cross_covariance(
-            Tensor::<Nd, 3>::from_data(TensorData::new(case.cross.clone(), [BATCH, case.d_left, d_right]), &device),
+            Tensor::<3>::from_data(TensorData::new(case.cross.clone(), [BATCH, case.d_left, d_right]), &device),
             &right,
-        ).into_data().to_vec::<f32>().unwrap();
+        ).into_data().try_to_vec::<f32>().unwrap();
         let negative = propagate_relu_cross_covariance(
-            Tensor::<Nd, 3>::from_data(TensorData::new(case.cross.iter().map(|value| -value).collect(), [BATCH, case.d_left, d_right]), &device),
+            Tensor::<3>::from_data(TensorData::new(case.cross.iter().map(|value| -value).collect(), [BATCH, case.d_left, d_right]), &device),
             &reflected_right,
-        ).into_data().to_vec::<f32>().unwrap();
+        ).into_data().try_to_vec::<f32>().unwrap();
         prop_assert_eq!(positive.len(), negative.len());
         prop_assert_eq!(positive.len(), case.cross.len());
         for (index, ((positive, negative), cross)) in positive.iter().zip(&negative).zip(&case.cross).enumerate() {
@@ -618,25 +615,25 @@ proptest! {
         scale in 0.2f32..3.0,
     ) {
         let d_right = 4;
-        let device = Default::default();
+        let device = Device::flex().autodiff();
         prop_assert!(case.cross.iter().any(|value| *value < 0.0));
         prop_assert!(case.cross.iter().any(|value| *value > 0.0));
         let right = Moments::new(
-            Tensor::<Nd, 2>::from_data(TensorData::new(case.mean.clone(), [BATCH, d_right]), &device),
-            Tensor::<Nd, 2>::from_data(TensorData::new(case.var.clone(), [BATCH, d_right]), &device),
+            Tensor::<2>::from_data(TensorData::new(case.mean.clone(), [BATCH, d_right]), &device),
+            Tensor::<2>::from_data(TensorData::new(case.var.clone(), [BATCH, d_right]), &device),
         );
         let base = propagate_relu_cross_covariance(
-            Tensor::<Nd, 3>::from_data(TensorData::new(case.cross.clone(), [BATCH, case.d_left, d_right]), &device),
+            Tensor::<3>::from_data(TensorData::new(case.cross.clone(), [BATCH, case.d_left, d_right]), &device),
             &right,
-        ).into_data().to_vec::<f32>().unwrap();
+        ).into_data().try_to_vec::<f32>().unwrap();
         let scaled_right = Moments::new(
-            Tensor::<Nd, 2>::from_data(TensorData::new(case.mean.iter().map(|value| value * scale).collect(), [BATCH, d_right]), &device),
-            Tensor::<Nd, 2>::from_data(TensorData::new(case.var.iter().map(|value| value * scale * scale).collect(), [BATCH, d_right]), &device),
+            Tensor::<2>::from_data(TensorData::new(case.mean.iter().map(|value| value * scale).collect(), [BATCH, d_right]), &device),
+            Tensor::<2>::from_data(TensorData::new(case.var.iter().map(|value| value * scale * scale).collect(), [BATCH, d_right]), &device),
         );
         let scaled = propagate_relu_cross_covariance(
-            Tensor::<Nd, 3>::from_data(TensorData::new(case.cross.iter().map(|value| value * scale).collect(), [BATCH, case.d_left, d_right]), &device),
+            Tensor::<3>::from_data(TensorData::new(case.cross.iter().map(|value| value * scale).collect(), [BATCH, case.d_left, d_right]), &device),
             &scaled_right,
-        ).into_data().to_vec::<f32>().unwrap();
+        ).into_data().try_to_vec::<f32>().unwrap();
         prop_assert_eq!(scaled.len(), base.len());
         prop_assert_eq!(scaled.len(), case.cross.len());
         for (index, (actual, expected)) in scaled.iter().zip(base.iter().map(|value| value * scale)).enumerate() {
