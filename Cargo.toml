@@ -12,6 +12,7 @@ readme = "README.md"
 keywords = ["uncertainty", "moment-propagation", "neural-network", "gaussian", "calibration"]
 categories = ["science", "algorithms"]
 publish = true
+exclude = ["/.github", "/.gitignore", "/AGENTS.md", "/.agents", "/.ruff_cache"]
 
 [workspace]
 
