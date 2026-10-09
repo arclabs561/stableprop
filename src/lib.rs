@@ -16,6 +16,8 @@
 //! The `burn_sdp` module (feature `burn`) provides the propagation on
 //! Burn tensors: batched, differentiable, and composable with Burn models.
 
+#![doc = include_str!("../README.md")]
+
 #[cfg(feature = "burn")]
 pub mod burn_sdp;
 

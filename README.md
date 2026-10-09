@@ -173,7 +173,7 @@ just property-test
 `just check` runs formatting, lints, tests, documentation and example builds,
 smoke examples, and benchmark correctness checks. `just property-test` extends
 the propagation, calibration, and selection properties to 4,096 cases each.
-The [justfile](justfile) also provides independent numerical references and
+The [justfile](https://github.com/arclabs561/stableprop/blob/main/justfile) also provides independent numerical references and
 Metal value/gradient checks. See the [benchmark guide](benches/README.md) for
 timing methods and the [reference guide](scripts/README.md) for numerical oracles.
 
