@@ -359,7 +359,7 @@ fn correlation(a: &[f64], b: &[f64]) -> Option<f64> {
 
 fn ranks(values: &[f64]) -> Vec<f64> {
     let mut order: Vec<usize> = (0..values.len()).collect();
-    order.sort_by(|&i, &j| values[i].partial_cmp(&values[j]).unwrap());
+    order.sort_by(|&i, &j| values[i].total_cmp(&values[j]));
     let mut out = vec![0.0; values.len()];
     let mut first = 0;
     while first < order.len() {
@@ -384,8 +384,7 @@ fn select_top(indices: &[usize], scores: &[f64], count: usize, tie_rng: &mut Rng
     }
     order.sort_by(|&a, &b| {
         scores[b]
-            .partial_cmp(&scores[a])
-            .unwrap()
+            .total_cmp(&scores[a])
             .then_with(|| tie_rank[a].cmp(&tie_rank[b]))
     });
     order.into_iter().take(count).map(|i| indices[i]).collect()

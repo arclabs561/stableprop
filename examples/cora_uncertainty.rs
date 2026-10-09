@@ -302,7 +302,7 @@ fn argmax_correct(logits: &[f32], labels: &[i32], i: usize, c: usize) -> bool {
     let pred = row
         .iter()
         .enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .max_by(|a, b| a.1.total_cmp(b.1))
         .unwrap()
         .0 as i32;
     pred == labels[i]
@@ -378,7 +378,7 @@ fn accuracy_at_coverage(
     coverage: f64,
 ) -> f64 {
     let mut order: Vec<usize> = (0..idx.len()).collect();
-    order.sort_by(|&a, &b| uncertainty[a].partial_cmp(&uncertainty[b]).unwrap());
+    order.sort_by(|&a, &b| uncertainty[a].total_cmp(&uncertainty[b]));
     let keep = ((idx.len() as f64) * coverage).round() as usize;
     let kept = &order[..keep.max(1)];
     let correct = kept
@@ -399,7 +399,7 @@ fn spearman(a: &[f64], b: &[f64]) -> Option<f64> {
     }
     let rank = |v: &[f64]| {
         let mut idx: Vec<usize> = (0..v.len()).collect();
-        idx.sort_by(|&i, &j| v[i].partial_cmp(&v[j]).unwrap());
+        idx.sort_by(|&i, &j| v[i].total_cmp(&v[j]));
         let mut r = vec![0.0; v.len()];
         let mut start = 0;
         while start < idx.len() {
@@ -621,7 +621,7 @@ mod tests {
 fn auroc(score: &[f64], positive: &[bool]) -> f64 {
     let n = score.len();
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&i, &j| score[i].partial_cmp(&score[j]).unwrap());
+    order.sort_by(|&i, &j| score[i].total_cmp(&score[j]));
     let mut rank = vec![0.0f64; n];
     let mut i = 0;
     while i < n {

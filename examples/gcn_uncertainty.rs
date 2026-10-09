@@ -185,7 +185,7 @@ fn main() {
             (node, mean_v.sqrt())
         })
         .collect();
-    node_std.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    node_std.sort_by(|a, b| b.1.total_cmp(&a.1));
     let thresh = node_std.iter().map(|(_, s)| s).sum::<f64>() / n as f64;
     println!(
         "\nrelative-uncertainty thresholding mechanics (mean std {thresh:.4}; no task metric):"

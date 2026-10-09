@@ -601,12 +601,7 @@ fn policy(risk: &[f64], heldout: &[f64]) -> ([f64; 2], [f64; 2]) {
     for (slot, rate) in DEFER.iter().enumerate() {
         let n = deferred_count(*rate);
         let mut order: Vec<_> = (0..Q).collect();
-        order.sort_by(|&a, &b| {
-            risk[b]
-                .partial_cmp(&risk[a])
-                .unwrap()
-                .then_with(|| a.cmp(&b))
-        });
+        order.sort_by(|&a, &b| risk[b].total_cmp(&risk[a]).then_with(|| a.cmp(&b)));
         let mut defer = [false; Q];
         for &i in order.iter().take(n) {
             defer[i] = true;

@@ -1089,7 +1089,7 @@ mod tests {
         }
         for idx in 0..n * d_out {
             let s = &mut samples[idx];
-            s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            s.sort_by(|a, b| a.total_cmp(b));
             let med = s[k / 2];
             let mc_scale = (s[3 * k / 4] - s[k / 4]) / 2.0;
             assert!(
