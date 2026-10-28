@@ -24,7 +24,8 @@ scope.
 
 The 90-digit computation is cross-checked at 50-digit working precision and
 for pair-swap symmetry.
-The tool fails above `1e-40`. JSON is deterministic; Rust output matches the
+The tool fails if either check's absolute difference exceeds `1e-40`.
+JSON is deterministic; Rust output matches the
 current `NonzeroReluFixture` fields and is a review fragment, not a write to
 tests.
 
