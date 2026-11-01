@@ -32,7 +32,7 @@ burn = { version = "0.22", default-features = false, features = ["std"], optiona
 burn = { version = "0.22", default-features = false, features = ["std", "autodiff", "optim", "flex", "linalg"] }
 ricci = { git = "https://github.com/arclabs561/ricci", rev = "0cb0e88439e15420bbba14086ceea459b46d3527" }
 statskit = "0.3.0"
-tuplet = { git = "https://github.com/arclabs561/tuplet", rev = "dc4f68d4ea78a938b1c0254f0121cbaf80aa7a2a", features = ["burn-flex"] }
+tuplet = { git = "https://github.com/arclabs561/tuplet", rev = "ff3aef44341930c2af41258aa05f11ad670951fc", features = ["burn-flex"] }
 proptest = "1.5"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 

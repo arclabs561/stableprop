@@ -22,7 +22,7 @@
 
 use std::env;
 
-use burn::module::{AutodiffModule, Module};
+use burn::module::Module;
 use burn::nn::loss::{MseLoss, Reduction};
 use burn::nn::{Linear, LinearConfig};
 use burn::optim::{AdamConfig, GradientsParams};
