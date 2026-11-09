@@ -31,7 +31,7 @@ burn = { git = "https://github.com/tracel-ai/burn", rev = "1414c8a14e5169ef5e5fc
 # unifies this with the optional `burn` dep when building stableprop's examples.
 burn = { git = "https://github.com/tracel-ai/burn", rev = "1414c8a14e5169ef5e5fc67f9b8ab01a25d6352d", default-features = false, features = ["std", "autodiff", "optim", "flex", "linalg"] }
 ricci = { git = "https://github.com/arclabs561/ricci", rev = "0cb0e88439e15420bbba14086ceea459b46d3527" }
-statskit = "0.3.0"
+statskit = "0.4.0"
 tuplet = { git = "https://github.com/arclabs561/tuplet", rev = "dc4f68d4ea78a938b1c0254f0121cbaf80aa7a2a", features = ["burn-flex"] }
 proptest = "1.5"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
