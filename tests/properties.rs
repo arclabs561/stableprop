@@ -93,8 +93,8 @@ proptest! {
     #[test]
     fn relu_variance_nonnegative(m in moments()) {
         let out = propagate_relu(&m);
-        for i in 0..out.mean.len() {
-            prop_assert!(out.cov[i][i] >= -1e-9, "negative relu var {}", out.cov[i][i]);
+        for (i, row) in out.cov.iter().enumerate() {
+            prop_assert!(row[i] >= -1e-9, "negative relu var {}", row[i]);
         }
     }
 
