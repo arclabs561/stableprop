@@ -1,8 +1,8 @@
 # Examples
 
 Run these commands from the repository root with Rust 1.95 or newer; Cargo
-also builds the Burn development dependencies for `basic`. That example
-uses the dependency-free vector API; the other examples default to Burn's CPU
+also builds the Burn development dependencies for `basic` and `duplicate_relu`.
+Both use the dependency-free vector API. The other examples default to Burn's CPU
 Flex backend. `robust_training` also accepts `--metal` on macOS with the
 `metal` feature. Training and sampling use fixed seeds. Floating-point results may
 still differ across backend or dependency versions. Results labeled Burn 0.21
@@ -11,6 +11,7 @@ NdArray are archived observations, not expected outputs of the current commands.
 | I want to… | Start with |
 | --- | --- |
 | Understand the input and output moments | [`basic`](basic.rs) |
+| See what dropping covariance does to a difference | [`duplicate_relu`](duplicate_relu.rs) |
 | Separate input noise from parameter uncertainty | [`uncertainty_sources`](uncertainty_sources.rs) |
 | Estimate ranking flips under noisy query features | [`pairwise_ranking_risk`](pairwise_ranking_risk.rs) |
 | Compare propagated uncertainty with Monte Carlo | [`regression_intervals`](regression_intervals.rs) |

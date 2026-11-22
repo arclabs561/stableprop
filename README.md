@@ -59,6 +59,19 @@ From a repository checkout, use Rust 1.95 or newer and run the same example:
 cargo run --release --example basic
 ```
 
+For a case you can solve without sampling, copy one noisy input into two
+channels, apply ReLU to each, then subtract. Both channels contain the same
+value on every draw, so the true output variance is zero.
+
+```sh
+cargo run --release --example duplicate_relu -- 1
+```
+
+With unit input standard deviation the vector API reports variance 0.681690.
+The ReLU step keeps each channel's variance and drops the covariance that
+would cancel it in the subtraction. Pass 0 for a noiseless control, or 2
+to quadruple the reported variance. [Example source](examples/duplicate_relu.rs)
+
 ## Burn models
 
 The development tensor API below differs from the published crate's Burn API.
